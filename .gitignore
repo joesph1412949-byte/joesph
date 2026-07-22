@@ -30,5 +30,8 @@ Thumbs.db
 # Claude Code (internal)
 .claude/
 
+# Downloaded plugins source
+superpowers-main/
+
 # Optional: TypeScript compiled output
 # *.tsbuildinfo
