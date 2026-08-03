@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>贪吃蛇</title>
+<style>
+  :root {
+    --bg: #1a1a2e;
+    --card: #16213e;
+    --board: #ffe0e6;
+    --snake-head: #ff6b9d;
+    --snake-body: #ffb3c6;
+    --snake-body-2: #ffd1dc;
+    --food: #e63946;
+    --text: #f8f9fa;
+    --shadow: rgba(0, 0, 0, 0.45);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: radial-gradient(circle at 30% 20%, #232342, var(--bg) 70%);
+    font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: var(--text);
+    padding: 20px;
+  }
+
+  .card {
+    background: var(--card);
+    border-radius: 20px;
+    padding: 24px;
+    box-shadow: 0 16px 40px var(--shadow);
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    align-items: center;
+    max-width: 100%;
+  }
+
+  .header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    width: 100%;
+  }
+
+  h1 {
+    font-size: 26px;
+    letter-spacing: 2px;
+    background: linear-gradient(90deg, var(--snake-head), var(--food));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .badges { display: flex; gap: 10px; margin-left: auto; }
+
+  .badge {
+    background: rgba(255, 107, 157, 0.15);
+    border: 1px solid rgba(255, 107, 157, 0.4);
+    border-radius: 999px;
+    padding: 6px 14px;
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .badge span { color: var(--snake-head); margin-left: 4px; }
+
+  .board-wrap {
+    position: relative;
+    background: var(--board);
+    border-radius: 14px;
+    box-shadow: inset 0 0 12px rgba(230, 57, 70, 0.12);
+  }
+
+  canvas {
+    display: block;
+    width: 480px;
+    height: 480px;
+    border-radius: 14px;
+  }
+
+  .overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    background: rgba(26, 26, 46, 0.78);
+    border-radius: 14px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.25s ease;
+  }
+
+  .overlay.show { opacity: 1; pointer-events: auto; }
+
+  .overlay h2 { font-size: 34px; letter-spacing: 4px; }
+  .overlay p { font-size: 16px; opacity: 0.9; }
+
+  .overlay .new-record { color: var(--snake-head); font-weight: 700; }
+
+  .controls { display: flex; gap: 12px; }
+
+  .btn {
+    border: none;
+    cursor: pointer;
+    font-size: 16px;
+    font-weight: 700;
+    padding: 12px 32px;
+    border-radius: 999px;
+    background: linear-gradient(135deg, var(--snake-head), #ff4d6d);
+    color: #fff;
+    box-shadow: 0 6px 18px rgba(255, 77, 109, 0.4);
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
+  }
+
+  .btn:hover { transform: translateY(-2px); box-shadow: 0 10px 24px rgba(255, 77, 109, 0.5); }
+  .btn:active { transform: translateY(0); }
+
+  .hint { font-size: 13px; opacity: 0.6; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="header">
+      <h1>🐍 贪吃蛇</h1>
+      <div class="badges">
+        <div class="badge">分数 <span id="score">0</span></div>
+        <div class="badge">最高 <span id="highScore">0</span></div>
+      </div>
+    </div>
+
+    <div class="board-wrap">
+      <canvas id="board" width="480" height="480"></canvas>
+      <div class="overlay" id="overlay">
+        <h2 id="overlayTitle">游戏结束</h2>
+        <p id="overlayText">本次得分 0</p>
+        <p class="new-record" id="newRecord" hidden>🎉 新纪录！</p>
+        <button class="btn" id="overlayBtn">重新开始</button>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button class="btn" id="mainBtn">开始</button>
+    </div>
+    <p class="hint">方向键控制移动 · 空格 / 回车 开始或重新开始</p>
+  </div>
+
+<script>
+(() => {
+  'use strict';
+
+  const GRID = 20;
+  const canvas = document.getElementById('board');
+  const ctx = canvas.getContext('2d');
+  const CELL = canvas.width / GRID;
+
+  function drawEmptyBoard() {
+    ctx.fillStyle = '#ffe0e6';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = '#fff0f3';
+    ctx.lineWidth = 1;
+    for (let i = 1; i < GRID; i++) {
+      ctx.beginPath();
+      ctx.moveTo(i * CELL, 0);
+      ctx.lineTo(i * CELL, canvas.height);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(0, i * CELL);
+      ctx.lineTo(canvas.width, i * CELL);
+      ctx.stroke();
+    }
+  }
+
+  drawEmptyBoard();
+})();
+</script>
+</body>
+</html>
