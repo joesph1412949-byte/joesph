@@ -541,13 +541,23 @@ git commit -m "feat: implement core snake gameplay with collision and game over"
 在 `currentInterval()` 函数之后新增以下两个函数：
 
 ```js
+  const memHighScore = { value: 0 };
+
   function getHighScore() {
-    return parseInt(localStorage.getItem(HIGH_SCORE_KEY) || '0', 10);
+    try {
+      return parseInt(localStorage.getItem(HIGH_SCORE_KEY) || '0', 10);
+    } catch (e) {
+      return memHighScore.value;
+    }
   }
 
   function updateHighScore() {
     if (state.score > getHighScore()) {
-      localStorage.setItem(HIGH_SCORE_KEY, String(state.score));
+      try {
+        localStorage.setItem(HIGH_SCORE_KEY, String(state.score));
+      } catch (e) {
+        memHighScore.value = state.score;
+      }
       newRecordEl.hidden = false;
     } else {
       newRecordEl.hidden = true;
@@ -555,6 +565,8 @@ git commit -m "feat: implement core snake gameplay with collision and game over"
     highScoreEl.textContent = getHighScore();
   }
 ```
+
+> **注意（最终审查修订）：** localStorage 访问用 try/catch 防护（存储被禁用/隐私模式下会抛 SecurityError，直接读取会在 `initGame()` 里中止页面导致白屏），并加内存回退。
 
 将 `initGame()` 中的 `scoreEl.textContent = '0';` 替换为：
 
@@ -595,12 +607,14 @@ git commit -m "feat: implement core snake gameplay with collision and game over"
       const d = KEY_TO_DIR[e.key];
       const last = state.queue[state.queue.length - 1] || state.dir;
       if (OPPOSITE[last.key] !== d.key) state.queue.push(d);
-    } else if ((e.key === ' ' || e.key === 'Enter') && state.status !== 'playing') {
+    } else if (e.key === ' ' || e.key === 'Enter') {
       e.preventDefault();
-      startGame();
+      if (state.status !== 'playing') startGame();
     }
   });
 ```
+
+> **注意（最终审查修订）：** `preventDefault()` 必须对 Space/Enter **无条件**调用（即使在游戏中），否则当玩家点击「开始」按钮开局后按钮保持聚焦，游戏中按空格/回车会触发浏览器原生的按钮激活 → 静默重启游戏丢失进度。
 
 - [ ] **Step 4: 加入响应式缩放**
 
