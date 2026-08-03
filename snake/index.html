@@ -158,14 +158,144 @@
 (() => {
   'use strict';
 
+  // ---------- Constants ----------
   const GRID = 20;
+  const BASE_INTERVAL = 200;       // 初始移动间隔 (ms)
+  const MIN_INTERVAL = 80;         // 最快间隔
+  const SPEED_STEP_EVERY = 3;      // 每吃 3 个食物加速一次
+  const SPEED_FACTOR = 0.9;        // 每次加速系数
+  const POINTS_PER_FOOD = 10;
+
+  // ---------- DOM ----------
   const canvas = document.getElementById('board');
   const ctx = canvas.getContext('2d');
+  const scoreEl = document.getElementById('score');
+  const mainBtn = document.getElementById('mainBtn');
+  const overlay = document.getElementById('overlay');
+  const overlayTitle = document.getElementById('overlayTitle');
+  const overlayText = document.getElementById('overlayText');
+  const overlayBtn = document.getElementById('overlayBtn');
+
   const CELL = canvas.width / GRID;
 
-  function drawEmptyBoard() {
+  // ---------- State ----------
+  const state = {
+    snake: [],
+    dir: { x: 1, y: 0 },   // 当前方向
+    queue: [],             // 方向输入队列
+    food: { x: 0, y: 0 },
+    score: 0,
+    foodsEaten: 0,
+    status: 'idle',        // 'idle' | 'playing' | 'over'
+    timer: null,
+  };
+
+  const OPPOSITE = { up: 'down', down: 'up', left: 'right', right: 'left' };
+  const KEY_TO_DIR = {
+    ArrowUp:    { key: 'up',    x: 0,  y: -1 },
+    ArrowDown:  { key: 'down',  x: 0,  y: 1 },
+    ArrowLeft:  { key: 'left',  x: -1, y: 0 },
+    ArrowRight: { key: 'right', x: 1,  y: 0 },
+  };
+
+  // ---------- Lifecycle ----------
+  function initGame() {
+    state.snake = [{ x: 8, y: 10 }, { x: 7, y: 10 }, { x: 6, y: 10 }];
+    state.dir = { x: 1, y: 0 };
+    state.queue = [];
+    state.score = 0;
+    state.foodsEaten = 0;
+    placeFood();
+    scoreEl.textContent = '0';
+    hideOverlay();
+    draw();
+  }
+
+  function startGame() {
+    clearTimer();
+    initGame();
+    state.status = 'playing';
+    mainBtn.textContent = '重新开始';
+    state.timer = setInterval(step, currentInterval());
+  }
+
+  function gameOver() {
+    clearTimer();
+    state.status = 'over';
+    mainBtn.textContent = '重新开始';
+    showOverlay('游戏结束', `本次得分 ${state.score}`);
+    draw();
+  }
+
+  function currentInterval() {
+    const factor = Math.pow(SPEED_FACTOR, Math.floor(state.foodsEaten / SPEED_STEP_EVERY));
+    return Math.max(MIN_INTERVAL, Math.round(BASE_INTERVAL * factor));
+  }
+
+  // ---------- Food ----------
+  function placeFood() {
+    const free = [];
+    for (let y = 0; y < GRID; y++) {
+      for (let x = 0; x < GRID; x++) {
+        if (!state.snake.some(s => s.x === x && s.y === y)) free.push({ x, y });
+      }
+    }
+    if (!free.length) return; // 蛇占满棋盘（实际不可达）
+    state.food = free[Math.floor(Math.random() * free.length)];
+  }
+
+  // ---------- Movement ----------
+  function nextDirection() {
+    let dir = state.dir;
+    while (state.queue.length) {
+      const candidate = state.queue.shift();
+      if (OPPOSITE[dir.key] !== candidate.key) { dir = candidate; break; }
+    }
+    state.dir = dir;
+    return dir;
+  }
+
+  function step() {
+    const dir = nextDirection();
+    const head = state.snake[0];
+    const newHead = { x: head.x + dir.x, y: head.y + dir.y };
+
+    // 撞墙
+    if (newHead.x < 0 || newHead.x >= GRID || newHead.y < 0 || newHead.y >= GRID) {
+      gameOver();
+      return;
+    }
+
+    const eats = newHead.x === state.food.x && newHead.y === state.food.y;
+    // 不吃时尾巴会移走，检测时排除尾巴
+    const bodyToCheck = eats ? state.snake : state.snake.slice(0, -1);
+
+    // 撞自己
+    if (bodyToCheck.some(s => s.x === newHead.x && s.y === newHead.y)) {
+      gameOver();
+      return;
+    }
+
+    state.snake.unshift(newHead);
+    if (eats) {
+      state.foodsEaten++;
+      state.score += POINTS_PER_FOOD;
+      scoreEl.textContent = state.score;
+      placeFood();
+      // 吃食后重新计时以应用加速
+      clearTimer();
+      state.timer = setInterval(step, currentInterval());
+    } else {
+      state.snake.pop();
+    }
+    draw();
+  }
+
+  // ---------- Rendering ----------
+  function draw() {
     ctx.fillStyle = '#ffe0e6';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
+
     ctx.strokeStyle = '#fff0f3';
     ctx.lineWidth = 1;
     for (let i = 1; i < GRID; i++) {
@@ -178,9 +308,72 @@
       ctx.lineTo(canvas.width, i * CELL);
       ctx.stroke();
     }
+
+    // 食物（玫红圆点 + 高光）
+    const fx = state.food.x * CELL + CELL / 2;
+    const fy = state.food.y * CELL + CELL / 2;
+    ctx.fillStyle = '#e63946';
+    ctx.beginPath();
+    ctx.arc(fx, fy, CELL * 0.34, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ff8fa3';
+    ctx.beginPath();
+    ctx.arc(fx - CELL * 0.08, fy - CELL * 0.08, CELL * 0.12, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 蛇：头粉色、身渐变
+    state.snake.forEach((seg, i) => {
+      const isHead = i === 0;
+      const t = i / Math.max(1, state.snake.length - 1);
+      ctx.fillStyle = isHead ? '#ff6b9d'
+        : t < 0.5 ? '#ffb3c6' : '#ffd1dc';
+      const pad = isHead ? 1 : 2.5;
+      roundRect(seg.x * CELL + pad, seg.y * CELL + pad, CELL - pad * 2, CELL - pad * 2, isHead ? 6 : 5);
+      ctx.fill();
+    });
   }
 
-  drawEmptyBoard();
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  // ---------- UI ----------
+  function showOverlay(title, text) {
+    overlayTitle.textContent = title;
+    overlayText.textContent = text;
+    overlay.classList.add('show');
+  }
+
+  function hideOverlay() {
+    overlay.classList.remove('show');
+  }
+
+  function clearTimer() {
+    if (state.timer) { clearInterval(state.timer); state.timer = null; }
+  }
+
+  // ---------- Input ----------
+  document.addEventListener('keydown', (e) => {
+    if (e.key in KEY_TO_DIR) {
+      e.preventDefault();
+      if (state.status !== 'playing') return;
+      const d = KEY_TO_DIR[e.key];
+      const last = state.queue[state.queue.length - 1] || state.dir;
+      if (OPPOSITE[last.key] !== d.key) state.queue.push(d);
+    }
+  });
+
+  mainBtn.addEventListener('click', startGame);
+  overlayBtn.addEventListener('click', startGame);
+
+  // ---------- Boot ----------
+  initGame();
 })();
 </script>
 </body>
