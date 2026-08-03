@@ -165,6 +165,7 @@
   const SPEED_STEP_EVERY = 3;      // 每吃 3 个食物加速一次
   const SPEED_FACTOR = 0.9;        // 每次加速系数
   const POINTS_PER_FOOD = 10;
+  const HIGH_SCORE_KEY = 'snake-high-score';
 
   // ---------- DOM ----------
   const canvas = document.getElementById('board');
@@ -175,6 +176,8 @@
   const overlayTitle = document.getElementById('overlayTitle');
   const overlayText = document.getElementById('overlayText');
   const overlayBtn = document.getElementById('overlayBtn');
+  const highScoreEl = document.getElementById('highScore');
+  const newRecordEl = document.getElementById('newRecord');
 
   const CELL = canvas.width / GRID;
 
@@ -207,6 +210,8 @@
     state.foodsEaten = 0;
     placeFood();
     scoreEl.textContent = '0';
+    highScoreEl.textContent = getHighScore();
+    newRecordEl.hidden = true;
     hideOverlay();
     draw();
   }
@@ -224,12 +229,27 @@
     state.status = 'over';
     mainBtn.textContent = '重新开始';
     showOverlay('游戏结束', `本次得分 ${state.score}`);
+    updateHighScore();
     draw();
   }
 
   function currentInterval() {
     const factor = Math.pow(SPEED_FACTOR, Math.floor(state.foodsEaten / SPEED_STEP_EVERY));
     return Math.max(MIN_INTERVAL, Math.round(BASE_INTERVAL * factor));
+  }
+
+  function getHighScore() {
+    return parseInt(localStorage.getItem(HIGH_SCORE_KEY) || '0', 10);
+  }
+
+  function updateHighScore() {
+    if (state.score > getHighScore()) {
+      localStorage.setItem(HIGH_SCORE_KEY, String(state.score));
+      newRecordEl.hidden = false;
+    } else {
+      newRecordEl.hidden = true;
+    }
+    highScoreEl.textContent = getHighScore();
   }
 
   // ---------- Food ----------
@@ -366,8 +386,19 @@
       const d = KEY_TO_DIR[e.key];
       const last = state.queue[state.queue.length - 1] || state.dir;
       if (OPPOSITE[last.key] !== d.key) state.queue.push(d);
+    } else if ((e.key === ' ' || e.key === 'Enter') && state.status !== 'playing') {
+      e.preventDefault();
+      startGame();
     }
   });
+
+  function fitCanvas() {
+    const maxSize = Math.min(480, window.innerWidth - 90);
+    canvas.style.width = maxSize + 'px';
+    canvas.style.height = maxSize + 'px';
+  }
+  window.addEventListener('resize', fitCanvas);
+  fitCanvas();
 
   mainBtn.addEventListener('click', startGame);
   overlayBtn.addEventListener('click', startGame);
