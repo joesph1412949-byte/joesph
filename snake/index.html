@@ -181,7 +181,7 @@
   // ---------- State ----------
   const state = {
     snake: [],
-    dir: { x: 1, y: 0 },   // 当前方向
+    dir: { x: 1, y: 0, key: 'right' },   // 当前方向
     queue: [],             // 方向输入队列
     food: { x: 0, y: 0 },
     score: 0,
@@ -201,7 +201,7 @@
   // ---------- Lifecycle ----------
   function initGame() {
     state.snake = [{ x: 8, y: 10 }, { x: 7, y: 10 }, { x: 6, y: 10 }];
-    state.dir = { x: 1, y: 0 };
+    state.dir = { x: 1, y: 0, key: 'right' };
     state.queue = [];
     state.score = 0;
     state.foodsEaten = 0;
