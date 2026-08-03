@@ -238,13 +238,23 @@
     return Math.max(MIN_INTERVAL, Math.round(BASE_INTERVAL * factor));
   }
 
+  const memHighScore = { value: 0 };
+
   function getHighScore() {
-    return parseInt(localStorage.getItem(HIGH_SCORE_KEY) || '0', 10);
+    try {
+      return parseInt(localStorage.getItem(HIGH_SCORE_KEY) || '0', 10);
+    } catch (e) {
+      return memHighScore.value;
+    }
   }
 
   function updateHighScore() {
     if (state.score > getHighScore()) {
-      localStorage.setItem(HIGH_SCORE_KEY, String(state.score));
+      try {
+        localStorage.setItem(HIGH_SCORE_KEY, String(state.score));
+      } catch (e) {
+        memHighScore.value = state.score;
+      }
       newRecordEl.hidden = false;
     } else {
       newRecordEl.hidden = true;
@@ -386,9 +396,9 @@
       const d = KEY_TO_DIR[e.key];
       const last = state.queue[state.queue.length - 1] || state.dir;
       if (OPPOSITE[last.key] !== d.key) state.queue.push(d);
-    } else if ((e.key === ' ' || e.key === 'Enter') && state.status !== 'playing') {
+    } else if (e.key === ' ' || e.key === 'Enter') {
       e.preventDefault();
-      startGame();
+      if (state.status !== 'playing') startGame();
     }
   });
 
