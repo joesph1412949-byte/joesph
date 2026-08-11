@@ -1,10 +1,15 @@
 # -*- coding: utf-8 -*-
 """选股流程编排：先判市场环境，达标才扫涨停池算分，输出候选清单。
 依赖 data_source / factors / manual_store / models，可注入假实现便于测试。"""
+import logging
+
 from data_source import DataSource
+from eastmoney import EastMoneyFeed
 from factors import FactorEngine
 from manual_store import ManualStore
 from models import ModelScorer
+
+logger = logging.getLogger(__name__)
 
 # 默认科技行业池（用于板块映射 F4/S6）
 SECTORS = ["SW1电子", "SW1计算机", "SW1通信"]
@@ -14,11 +19,12 @@ ENV_THRESHOLD = 3
 
 
 class ScreenRunner:
-    def __init__(self, ds=None, engine=None, store=None, scorer=None):
+    def __init__(self, ds=None, engine=None, store=None, scorer=None, em_feed=None):
         self.ds = ds or DataSource()
         self.engine = engine or FactorEngine()
         self.store = store or ManualStore()
         self.scorer = scorer or ModelScorer()
+        self.em_feed = em_feed or EastMoneyFeed()
 
     def _build_sector_map(self, limit_ups):
         """涨停池 code → 所属行业。用科技行业板块反查。"""
@@ -39,8 +45,15 @@ class ScreenRunner:
         ticks = self.ds.get_full_market_ticks()
         limit_ups = self.ds.get_limit_up_stocks(ticks)
 
-        # 2. 市场环境因子 N1-N5
-        market_factors = self.engine.compute_market_factors(self.ds, ticks, limit_ups)
+        # 2. 东财涨停池真数据(N1/N3/N4) — 尽力而为, 失败则 em=None 走代理兜底
+        em = None
+        try:
+            em = self.em_feed.get_market_stats()
+        except Exception:
+            em = None
+
+        # 3. 市场环境因子 N1-N5
+        market_factors = self.engine.compute_market_factors(self.ds, ticks, limit_ups, em)
         node_score = sum(1 for n in ["N1","N2","N3","N4","N5"]
                          if market_factors.get(n, {}).get("score") == 1)
         stage = self.scorer.classify_market(node_score)
@@ -60,14 +73,14 @@ class ScreenRunner:
                         "c_count": 0, "d_count": 0},
         }
 
-        # 3. 环境门槛：不达标直接返回
+        # 4. 环境门槛：不达标直接返回
         if not result["environment_ok"]:
             return result
 
-        # 4. 板块映射（供 F4/S6）
+        # 5. 板块映射（供 F4/S6）
         sector_map = self._build_sector_map(limit_ups)
 
-        # 5. 对涨停池每只算因子 + 评分
+        # 6. 对涨停池每只算因子 + 评分
         for lu in limit_ups:
             code = lu["code"]
             try:
@@ -79,12 +92,14 @@ class ScreenRunner:
                 # 拍扁: compute_factors 返回 {因子:{score,note}}, merge/score 需扁平 {因子:0/1}
                 auto = {k: (v.get("score", 0) if isinstance(v, dict) else v)
                         for k, v in auto_raw.items()}
-            except Exception:
+            except Exception as e:
+                logger.warning("选股 %s 自动因子计算失败, 按空因子处理: %r", code, e)
                 auto = {}
             # 合并手填因子
             factors = self.store.merge(auto, code)
             # 注入市场节点因子(N1-N5)，使节点模型计入综合分与A-E分级(设计: 节点15%)
-            factors.update({k: v["score"] for k, v in market_factors.items()})
+            # 用 .get("score", 0) 兜底: 单个 market 因子条目畸形时不能 500 整屏
+            factors.update({k: v.get("score", 0) for k, v in market_factors.items()})
             scores = self.scorer.score_stock(factors)
             # 标记来源：自动算的(含市场N因子) vs 手填的
             auto_all = set(auto) | set(market_factors)
@@ -103,7 +118,7 @@ class ScreenRunner:
                 "auto_manual": auto_manual,
             })
 
-        # 6. 汇总
+        # 7. 汇总
         c = result["candidates"]
         result["summary"] = {
             "candidate_count": len(c),

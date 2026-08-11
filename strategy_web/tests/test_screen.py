@@ -64,9 +64,26 @@ class FakeEngine:
         return {"F1":1,"F2":1,"F3":1,"F4":0,"F5":1,"F6":1,
                 "Y3":1,"Y4":1,"S2":1,"S3":1,"S4":1,"S6":0}
 
-    def compute_market_factors(self, ds, ticks, limit_ups=None):
+    def compute_market_factors(self, ds, ticks, limit_ups=None, em=None):
         return {"N1":{"score":1},"N2":{"score":1},"N3":{"score":1},
                 "N4":{"score":1},"N5":{"score":1}}
+
+
+class FakeEastMoneyFeed:
+    """假东财涨停池: 返回固定 em dict 或抛异常, 绝不发网络请求。"""
+    def __init__(self, stats=None, exc=None):
+        self.stats = stats
+        self.exc = exc
+
+    def get_market_stats(self):
+        if self.exc is not None:
+            raise self.exc
+        return self.stats
+
+
+DEFAULT_EM = {"daily_counts": [20, 22, 18, 25, 30],
+              "yesterday_codes": ["002859.SZ"],
+              "max_boards": 6}
 
 
 class FakeStore:
@@ -90,7 +107,8 @@ class FakeScorer:
 
 def test_screen_returns_candidates_when_env_ok():
     r = ScreenRunner(ds=FakeDS(), engine=FakeEngine(),
-                     store=FakeStore(), scorer=FakeScorer()).run()
+                     store=FakeStore(), scorer=FakeScorer(),
+                     em_feed=FakeEastMoneyFeed(stats=DEFAULT_EM)).run()
     assert r["environment_ok"] is True
     assert len(r["candidates"]) == 1
     assert r["candidates"][0]["code"] == "002859.SZ"
@@ -105,11 +123,12 @@ def test_screen_blocks_when_env_bad():
             return "退潮期"
     # 环境不达标 → 返回 environment_ok=False, 无候选
     class BadEngine(FakeEngine):
-        def compute_market_factors(self, ds, ticks, limit_ups=None):
+        def compute_market_factors(self, ds, ticks, limit_ups=None, em=None):
             return {"N1":{"score":0},"N2":{"score":0},"N3":{"score":0},
                     "N4":{"score":0},"N5":{"score":0}}
     r = ScreenRunner(ds=FakeDS(), engine=BadEngine(),
-                     store=FakeStore(), scorer=BadScorer()).run()
+                     store=FakeStore(), scorer=BadScorer(),
+                     em_feed=FakeEastMoneyFeed(stats=DEFAULT_EM)).run()
     assert r["environment_ok"] is False
     assert r["candidates"] == []
 
@@ -125,7 +144,7 @@ def test_screen_passes_real_tick_and_detail_to_engine():
                                               sector_map, limit_ups, market)
     eng = SpyEngine()
     ScreenRunner(ds=FakeDS(), engine=eng, store=FakeStore(),
-                 scorer=FakeScorer()).run()
+                 scorer=FakeScorer(), em_feed=FakeEastMoneyFeed(stats=DEFAULT_EM)).run()
     assert len(eng.calls) == 1
     code, tick, detail = eng.calls[0]
     assert code == "002859.SZ"
@@ -143,10 +162,47 @@ def test_screen_pipeline_real_shapes_produce_scores():
                     ["F1", "F2", "F3", "F4", "F5", "F6",
                      "Y3", "Y4", "S2", "S3", "S4", "S6"]}
     r = ScreenRunner(ds=FakeDS(), engine=RealShapeEngine(),
-                     store=FakeStore(), scorer=ModelScorer()).run()
+                     store=FakeStore(), scorer=ModelScorer(),
+                     em_feed=FakeEastMoneyFeed(stats=DEFAULT_EM)).run()
     cand = r["candidates"][0]
     assert cand["factors"]["F1"] == 1            # 拍扁后是 int
     assert cand["scores"]["first_board"] == 7     # F1-F6自动 + F7手填
     assert cand["scores"]["node"] == 5            # 市场 N1-N5 注入
     assert cand["scores"]["grade"] == "A"         # 节点≥4 且 首板≥6
     assert cand["scores"]["strength"] == "极强"    # 节点5 且 任一选股模型≥6
+
+
+def test_screen_passes_em_stats_to_engine():
+    class SpyEngine(FakeEngine):
+        def __init__(self):
+            self.calls = []
+        def compute_market_factors(self, ds, ticks, limit_ups=None, em=None):
+            self.calls.append((limit_ups, em))
+            return FakeEngine.compute_market_factors(self, ds, ticks, limit_ups, em)
+    em_stats = {"daily_counts": [10, 12, 8, 15, 20],
+                "yesterday_codes": ["002859.SZ"],
+                "max_boards": 6}
+    eng = SpyEngine()
+    ScreenRunner(ds=FakeDS(), engine=eng, store=FakeStore(),
+                 scorer=FakeScorer(),
+                 em_feed=FakeEastMoneyFeed(stats=em_stats)).run()
+    limit_ups, em = eng.calls[0]
+    assert em == em_stats
+    assert limit_ups[0]["code"] == "002859.SZ"
+
+
+def test_screen_survives_em_feed_failure():
+    # 东财不可达(get_market_stats 抛异常) → em=None, 仍走代理兜底, 不崩溃
+    class SpyEngine(FakeEngine):
+        def __init__(self):
+            self.calls = []
+        def compute_market_factors(self, ds, ticks, limit_ups=None, em=None):
+            self.calls.append((limit_ups, em))
+            return FakeEngine.compute_market_factors(self, ds, ticks, limit_ups, em)
+    eng = SpyEngine()
+    r = ScreenRunner(ds=FakeDS(), engine=eng, store=FakeStore(),
+                     scorer=FakeScorer(),
+                     em_feed=FakeEastMoneyFeed(exc=RuntimeError("eastmoney down"))).run()
+    assert r["environment_ok"] is True
+    assert r["candidates"][0]["code"] == "002859.SZ"
+    assert eng.calls[0][1] is None
