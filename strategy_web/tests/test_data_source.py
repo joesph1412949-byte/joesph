@@ -87,6 +87,11 @@ xtdata_mod.__name__ = "xtquant.xtdata"
 mock_xt.xtdata = xtdata_mod
 sys.modules["xtquant.xtdata"] = xtdata_mod
 
+import data_source
+# 兜底：若 data_source 已被其他测试模块(如 test_app 经 app 导入)提前加载，
+# 上面 sys.modules 的 mock 不会生效，需重绑模块级 xtdata 指向 mock
+data_source.xtdata = xtdata_mod
+
 from data_source import DataSource, DataSourceError
 
 @pytest.fixture

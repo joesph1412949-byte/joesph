@@ -1,0 +1,88 @@
+# -*- coding: utf-8 -*-
+"""Flask 后端：提供可视化网页 + JSON API。
+启动：python app.py，浏览器访问 http://localhost:5000"""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from flask import Flask, jsonify, render_template, request
+
+from data_source import DataSource, DataSourceError
+from manual_store import ManualStore
+from screen import ScreenRunner
+
+app = Flask(__name__)
+
+# 全局单例（测试时可用 monkeypatch 替换）
+ds_obj = DataSource()
+manual_store_obj = ManualStore()
+
+
+def _get_screen_runner():
+    return ScreenRunner(ds=ds_obj, store=manual_store_obj)
+
+
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
+@app.route("/api/health")
+def health():
+    return jsonify({"ok": True, "qmt_connected": ds_obj._connected})
+
+
+@app.route("/api/screen", methods=["POST"])
+def screen():
+    if not ds_obj._connected:
+        return jsonify({"error": "QMT未连接, 请先打开QMT并开启miniQMT"}), 400
+    try:
+        result = _get_screen_runner().run()
+        return jsonify(result)
+    except DataSourceError as e:
+        return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        return jsonify({"error": "选股失败: %r" % e}), 500
+
+
+@app.route("/api/stock/<code>/kline")
+def stock_kline(code):
+    try:
+        df = ds_obj.get_kline(code, days=120)
+        ma60 = df["close"].rolling(60).mean().tolist()
+        detail = ds_obj.get_instrument(code)
+        return jsonify({
+            "dates": [str(t.date()) for t in df["time"]],
+            "closes": df["close"].tolist(),
+            "volumes": [int(v) for v in df["volume"]],
+            "ma60": [None if x != x else round(x, 2) for x in ma60],  # NaN→None
+            "up_stop": detail.get("UpStopPrice") or 0,
+        })
+    except Exception as e:
+        return jsonify({"error": "K线获取失败: %r" % e}), 500
+
+
+@app.route("/api/stock/<code>/manual", methods=["GET", "POST"])
+def manual(code):
+    if request.method == "GET":
+        return jsonify(manual_store_obj.get_manual(code))
+    try:
+        payload = request.get_json() or {}
+        manual_store_obj.set_manual(code, payload)
+        return jsonify({"factors": manual_store_obj.get_manual(code)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+if __name__ == "__main__":
+    print("=" * 50)
+    print("连接 QMT miniQMT...")
+    try:
+        ds_obj.connect()
+        print("已连接: 数据源就绪")
+    except DataSourceError as e:
+        print("警告: %s" % e)
+        print("请先打开 QMT 并开启 miniQMT 模式")
+    print("浏览器访问: http://localhost:5000")
+    app.run(host="127.0.0.1", port=5000, debug=True)

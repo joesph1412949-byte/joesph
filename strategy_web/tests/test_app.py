@@ -1,0 +1,79 @@
+# -*- coding: utf-8 -*-
+"""app 单元测试 — Flask test_client, 用假 ScreenRunner"""
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import pytest
+
+# 在 import app 前注入假模块（避免 app 里真实 import xtquant）
+import app as app_module
+
+
+class FakeScreen:
+    def __init__(self, *a, **k):
+        pass
+
+    def run(self):
+        return {"market": {"node_score": 4, "stage": "回暖期",
+                           "factors": {}, "total_amount": 2.5e12,
+                           "limit_up_count": 50},
+                "environment_ok": True,
+                "candidates": [{"code": "002859.SZ", "name": "洁美科技",
+                                "scores": {"grade": "A", "composite": 5.0,
+                                           "strength": "强", "position": "50%"},
+                                "factors": {"F1": 1}}],
+                "summary": {"candidate_count": 1, "a_count": 1}}
+
+
+@pytest.fixture
+def client(monkeypatch):
+    monkeypatch.setattr(app_module, "ScreenRunner", FakeScreen)
+    monkeypatch.setattr(app_module.ds_obj, "_connected", True)
+    app_module.app.config["TESTING"] = True
+    return app_module.app.test_client()
+
+
+def test_health(client):
+    r = client.get("/api/health")
+    assert r.status_code == 200
+    assert r.get_json()["ok"] is True
+
+
+def test_screen_returns_candidates(client):
+    r = client.post("/api/screen")
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["environment_ok"] is True
+    assert len(data["candidates"]) == 1
+
+
+def test_manual_set_and_get(client, tmp_path, monkeypatch):
+    # 用临时文件避免污染真实 manual_factors.json
+    from manual_store import ManualStore
+    s = ManualStore(str(tmp_path / "m.json"))
+    monkeypatch.setattr(app_module, "manual_store_obj", s)
+    r = client.post("/api/stock/002859.SZ/manual", json={"F7": 1})
+    assert r.status_code == 200
+    assert r.get_json()["factors"]["F7"] == 1
+    r2 = client.get("/api/stock/002859.SZ/manual")
+    assert r2.get_json()["F7"] == 1
+
+
+def test_kline_endpoint(client, monkeypatch):
+    import pandas as pd
+    import numpy as np
+    class FakeDS:
+        def get_kline(self, code, days=120):
+            n = 120
+            return pd.DataFrame({"time": pd.date_range("2026-01-01", periods=n, freq="B"),
+                                 "close": np.linspace(10, 20, n),
+                                 "volume": np.full(n, 100000)})
+        def get_instrument(self, code):
+            return {"UpStopPrice": 22.0}
+    monkeypatch.setattr(app_module, "ds_obj", FakeDS())
+    r = client.get("/api/stock/002859.SZ/kline")
+    assert r.status_code == 200
+    data = r.get_json()
+    assert len(data["closes"]) == 120
+    assert "ma60" in data
