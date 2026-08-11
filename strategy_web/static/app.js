@@ -168,7 +168,6 @@ function renderFactors(screenResult, code, manual) {
     html += `<div class="factor-row ${isManual?'manual':''}">
       <span class="fname">${f}</span><span>${names[f]||f}</span>
       <span>${v===1?'✓':'✗'}</span>
-      ${isManual ? `<input type="number" id="inp-${f}" min="0" max="1" step="1" value="${v}">` : ""}
     </div>`;
   }
   // 手动因子总输入（覆盖所有可手填项）
