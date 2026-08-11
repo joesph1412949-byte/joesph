@@ -229,7 +229,7 @@ class FactorEngine:
             sealed_cnt = sum(1 for lu in limit_ups if lu.get("sealed"))
             if len(limit_ups) > 0 and sealed_cnt / len(limit_ups) > 0.6:
                 n4 = 1
-        n4_note = "涨停% 且封板率>60%" % len(limit_ups) if n4 else "连板高度不足"
+        n4_note = "涨停家数 %d 且封板率>60%%" % len(limit_ups) if n4 else "连板高度不足"
 
         return {
             "N1": {"score": n1, "note": n1_note},

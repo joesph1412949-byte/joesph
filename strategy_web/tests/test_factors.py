@@ -121,3 +121,13 @@ def test_N5_below_threshold():
     ticks = {"000001.SZ":{"amount":1.0e12},"000002.SZ":{"amount":0.5e12}}
     m = eng.compute_market_factors(ds, ticks, limit_ups=[])
     assert m["N5"]["score"] == 0
+
+def test_N4_high_chain_no_crash():
+    ds = FakeDS()
+    eng = FactorEngine()
+    ticks = {"000001.SZ": {"amount": 1e12}}
+    # 30+ 涨停且封板率>60% → N4=1, 且不抛异常
+    limit_ups = [{"code": "00000%d.SZ" % i, "sealed": True} for i in range(35)]
+    m = eng.compute_market_factors(ds, ticks, limit_ups=limit_ups)
+    assert m["N4"]["score"] == 1
+    assert "60%" in m["N4"]["note"]
