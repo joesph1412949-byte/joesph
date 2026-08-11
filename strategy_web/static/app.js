@@ -68,7 +68,7 @@ function renderCandidates(candidates) {
   const tbody = document.querySelector("#cand-table tbody");
   tbody.innerHTML = "";
   if (!candidates || candidates.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:#999">无候选股</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#999">无候选股</td></tr>';
     return;
   }
   for (const c of candidates) {
@@ -77,7 +77,7 @@ function renderCandidates(candidates) {
     tr.className = "grade-" + s.grade;
     tr.innerHTML = `<td>${c.code}</td><td>${c.name}</td>
       <td>${s.first_board}</td><td>${s.monster}</td><td>${s.momentum}</td>
-      <td>${s.node}</td><td>${s.composite}</td>
+      <td>${s.composite}</td>
       <td><b>${s.grade}</b></td><td>${s.strength}</td>`;
     tr.style.cursor = "pointer";
     tr.onclick = () => showStockDetail(c.code);
@@ -216,14 +216,17 @@ function renderFactors(screenResult, code, manual) {
     N1:"涨停指数",N2:"情绪周期",N3:"首板溢价",N4:"连板高度",N5:"成交额" };
   let html = "";
   for (const [f, v] of Object.entries(factors)) {
-    const isManual = src[f] === "manual";
-    html += `<div class="factor-row ${isManual?'manual':''}">
+    const src_ = src[f] || "auto";
+    const badge = src_ === "fundamental" ? '<span class="src-tag">东财</span>'
+                 : src_ === "manual" ? '<span class="src-tag src-manual">手填</span>'
+                 : '<span class="src-tag src-auto">QMT</span>';
+    html += `<div class="factor-row ${src_==='manual'?'manual':''}">
       <span class="fname">${f}</span><span>${names[f]||f}</span>
-      <span>${v===1?'✓':'✗'}</span>
+      ${badge}<span>${v===1?'✓':'✗'}</span>
     </div>`;
   }
   // 手动因子总输入（覆盖所有可手填项）
-  const MANUAL_ALL = ["F7","Y1","Y2","Y5","Y6","Y7","S1","S5","S7"];
+  const MANUAL_ALL = ["S1","S5","S7"];
   html += `<div style="padding:8px 0;margin-top:8px;border-top:1px solid #eee">
     <b>手填因子</b>`;
   for (const f of MANUAL_ALL) {
@@ -238,7 +241,7 @@ function renderFactors(screenResult, code, manual) {
 }
 
 async function saveManual(code) {
-  const MANUAL_ALL = ["F7","Y1","Y2","Y5","Y6","Y7","S1","S5","S7"];
+  const MANUAL_ALL = ["S1","S5","S7"];
   const payload = {};
   for (const f of MANUAL_ALL) {
     const el = document.getElementById("man-" + f);

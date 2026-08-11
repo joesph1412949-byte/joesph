@@ -63,3 +63,9 @@ tr.grade-D { background: #f1f8e9; }
 #factor-table .fnote { flex: 1; color: #666; font-size: 13px; }
 #factor-table input[type=number] { width: 60px; padding: 4px; }
 #factor-table .manual { background: #fff8e1; }
+
+/* 因子来源徽标: QMT自动 / 东财fundamental / 手填manual */
+.src-tag { font-size: 10px; padding: 1px 6px; border-radius: 4px; color: #fff;
+           background: #2980b9; }
+.src-tag.src-auto { background: #2980b9; }
+.src-tag.src-manual { background: #e67e22; }

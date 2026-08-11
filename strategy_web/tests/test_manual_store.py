@@ -21,31 +21,31 @@ def test_empty_manual(store):
 
 
 def test_set_and_get(store):
-    store.set_manual("000001.SZ", {"F7": 1, "Y5": 0})
-    assert store.get_manual("000001.SZ") == {"F7": 1, "Y5": 0}
+    store.set_manual("000001.SZ", {"S1": 1, "S7": 0})
+    assert store.get_manual("000001.SZ") == {"S1": 1, "S7": 0}
 
 
 def test_set_persists_to_disk(store, tmp_path):
-    store.set_manual("000001.SZ", {"F7": 1})
+    store.set_manual("000001.SZ", {"S1": 1})
     reloaded = ManualStore(str(tmp_path / "manual.json"))
-    assert reloaded.get_manual("000001.SZ") == {"F7": 1}
+    assert reloaded.get_manual("000001.SZ") == {"S1": 1}
 
 
 def test_set_rejects_invalid_values(store):
     with pytest.raises(ValueError):
-        store.set_manual("000001.SZ", {"F7": 2})   # 非 0/1
+        store.set_manual("000001.SZ", {"S1": 2})   # 非 0/1
     with pytest.raises(ValueError):
-        store.set_manual("000001.SZ", {"F7": "x"})
+        store.set_manual("000001.SZ", {"S1": "x"})
 
 
 def test_merge_combines_auto_and_manual(store):
-    auto = {"F1": 1, "F3": 0, "Y1": 0}
-    store.set_manual("000001.SZ", {"F7": 1, "Y1": 1})  # 手填覆盖 Y1
+    auto = {"F1": 1, "F3": 0, "S5": 0}
+    store.set_manual("000001.SZ", {"S1": 1, "S5": 1})  # 手填覆盖 S5
     merged = store.merge(auto, "000001.SZ")
     assert merged["F1"] == 1       # 自动
     assert merged["F3"] == 0       # 自动
-    assert merged["F7"] == 1       # 手填
-    assert merged["Y1"] == 1       # 手填覆盖自动
+    assert merged["S1"] == 1       # 手填
+    assert merged["S5"] == 1       # 手填覆盖自动
 
 
 def test_merge_unknown_code(store):
@@ -65,7 +65,17 @@ def test_corrupt_json_is_preserved_and_recoverable(tmp_path, caplog):
     assert len(siblings) == 1               # 损坏文件被重命名为 .corrupt-* 保留
     assert siblings[0].read_bytes() == garbage  # 原始字节保留
     assert not p.exists()                   # 原路径已被移走
-    s.set_manual("000001.SZ", {"F7": 1})    # 后续写入生成全新有效文件
+    s.set_manual("000001.SZ", {"S1": 1})    # 后续写入生成全新有效文件
     reloaded = ManualStore(str(p))
-    assert reloaded.get_manual("000001.SZ") == {"F7": 1}
+    assert reloaded.get_manual("000001.SZ") == {"S1": 1}
     assert any("损坏" in rec.message for rec in caplog.records)
+
+
+def test_manual_rejects_automated_factor():
+    from manual_store import ManualStore
+    store = ManualStore(path="__nonexistent__.json")
+    try:
+        with pytest.raises(ValueError):
+            store.set_manual("000001", {"Y1": 1})   # Y1 已自动化, 不再手填
+    finally:
+        store._data = {}   # 清理内存态(不落盘)

@@ -111,7 +111,8 @@ class FakeScorer:
 def test_screen_returns_candidates_when_env_ok():
     r = ScreenRunner(ds=FakeDS(), engine=FakeEngine(),
                      store=FakeStore(), scorer=FakeScorer(),
-                     em_feed=FakeEastMoneyFeed(stats=DEFAULT_EM)).run()
+                     em_feed=FakeEastMoneyFeed(stats=DEFAULT_EM),
+                     fund_feed=FakeFundFeed()).run()
     assert r["environment_ok"] is True
     assert len(r["candidates"]) == 1
     assert r["candidates"][0]["code"] == "002859.SZ"
@@ -131,7 +132,8 @@ def test_screen_blocks_when_env_bad():
                     "N4":{"score":0},"N5":{"score":0}}
     r = ScreenRunner(ds=FakeDS(), engine=BadEngine(),
                      store=FakeStore(), scorer=BadScorer(),
-                     em_feed=FakeEastMoneyFeed(stats=DEFAULT_EM)).run()
+                     em_feed=FakeEastMoneyFeed(stats=DEFAULT_EM),
+                     fund_feed=FakeFundFeed()).run()
     assert r["environment_ok"] is False
     assert r["candidates"] == []
 
@@ -147,7 +149,8 @@ def test_screen_passes_real_tick_and_detail_to_engine():
                                               sector_map, limit_ups, market)
     eng = SpyEngine()
     ScreenRunner(ds=FakeDS(), engine=eng, store=FakeStore(),
-                 scorer=FakeScorer(), em_feed=FakeEastMoneyFeed(stats=DEFAULT_EM)).run()
+                 scorer=FakeScorer(), em_feed=FakeEastMoneyFeed(stats=DEFAULT_EM),
+                 fund_feed=FakeFundFeed()).run()
     assert len(eng.calls) == 1
     code, tick, detail = eng.calls[0]
     assert code == "002859.SZ"
@@ -166,7 +169,8 @@ def test_screen_pipeline_real_shapes_produce_scores():
                      "Y3", "Y4", "S2", "S3", "S4", "S6"]}
     r = ScreenRunner(ds=FakeDS(), engine=RealShapeEngine(),
                      store=FakeStore(), scorer=ModelScorer(),
-                     em_feed=FakeEastMoneyFeed(stats=DEFAULT_EM)).run()
+                     em_feed=FakeEastMoneyFeed(stats=DEFAULT_EM),
+                     fund_feed=FakeFundFeed()).run()
     cand = r["candidates"][0]
     assert cand["factors"]["F1"] == 1
     assert "N1" not in cand["factors"]          # 节点不再注入个股 (v2)
@@ -185,7 +189,8 @@ def test_screen_filters_by_candidate_min_model():
                      "S1","S2","S3","S4","S5","S6","S7"]}   # 最强模型=2 < 门槛3
     r = ScreenRunner(ds=FakeDS(), engine=FakeEngine(), store=LowScoringStore(),
                      scorer=ModelScorer(),
-                     em_feed=FakeEastMoneyFeed(stats=DEFAULT_EM)).run()
+                     em_feed=FakeEastMoneyFeed(stats=DEFAULT_EM),
+                     fund_feed=FakeFundFeed()).run()
     assert r["candidates"] == []                 # 全部被门槛过滤掉
 
 
@@ -202,7 +207,8 @@ def test_screen_passes_em_stats_to_engine():
     eng = SpyEngine()
     ScreenRunner(ds=FakeDS(), engine=eng, store=FakeStore(),
                  scorer=FakeScorer(),
-                 em_feed=FakeEastMoneyFeed(stats=em_stats)).run()
+                 em_feed=FakeEastMoneyFeed(stats=em_stats),
+                 fund_feed=FakeFundFeed()).run()
     limit_ups, em = eng.calls[0]
     assert em == em_stats
     assert limit_ups[0]["code"] == "002859.SZ"
@@ -219,7 +225,8 @@ def test_screen_survives_em_feed_failure():
     eng = SpyEngine()
     r = ScreenRunner(ds=FakeDS(), engine=eng, store=FakeStore(),
                      scorer=FakeScorer(),
-                     em_feed=FakeEastMoneyFeed(exc=RuntimeError("eastmoney down"))).run()
+                     em_feed=FakeEastMoneyFeed(exc=RuntimeError("eastmoney down")),
+                     fund_feed=FakeFundFeed()).run()
     assert r["environment_ok"] is True
     assert r["candidates"][0]["code"] == "002859.SZ"
     assert eng.calls[0][1] is None
@@ -242,8 +249,30 @@ def test_screen_sorts_candidates_by_composite_desc():
 
     r = ScreenRunner(ds=TwoStockDS(), engine=FakeEngine(), store=FakeStore(),
                      scorer=ModelScorer(),
-                     em_feed=FakeEastMoneyFeed(stats=DEFAULT_EM)).run()
+                     em_feed=FakeEastMoneyFeed(stats=DEFAULT_EM),
+                     fund_feed=FakeFundFeed()).run()
     codes = [c["code"] for c in r["candidates"]]
     assert codes == ["002859.SZ", "000001.SZ"]          # 综合分高者在前
     comps = [c["scores"]["composite"] for c in r["candidates"]]
     assert comps == sorted(comps, reverse=True)
+
+
+class FakeFundFeed:
+    def __init__(self, factors=None):
+        self.factors = factors or {"Y1": {"score": 1, "note": "test"},
+                                   "Y5": {"score": 0, "note": "test"}}
+    def compute_for_stock(self, code, float_mv=None):
+        return dict(self.factors)
+
+
+def test_screen_merges_fundamental_and_marks_source():
+    from models import ModelScorer
+    r = ScreenRunner(ds=FakeDS(), engine=FakeEngine(), store=FakeStore(),
+                     scorer=ModelScorer(),
+                     em_feed=FakeEastMoneyFeed(stats=DEFAULT_EM),
+                     fund_feed=FakeFundFeed()).run()
+    cand = r["candidates"][0]
+    assert cand["factors"]["Y1"] == 1              # 东财因子已合并
+    assert cand["auto_manual"]["Y1"] == "fundamental"
+    assert cand["auto_manual"]["F1"] == "auto"     # QMT 因子
+    assert cand["auto_manual"]["F7"] == "manual"   # 手填因子

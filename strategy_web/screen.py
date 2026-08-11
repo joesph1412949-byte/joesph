@@ -6,6 +6,7 @@ import logging
 from data_source import DataSource
 from eastmoney import EastMoneyFeed
 from factors import FactorEngine
+from fundamental import FundamentalFeed
 from manual_store import ManualStore
 from models import ModelScorer
 
@@ -21,12 +22,14 @@ CANDIDATE_MIN_MODEL = 3
 
 
 class ScreenRunner:
-    def __init__(self, ds=None, engine=None, store=None, scorer=None, em_feed=None):
+    def __init__(self, ds=None, engine=None, store=None, scorer=None,
+                 em_feed=None, fund_feed=None):
         self.ds = ds or DataSource()
         self.engine = engine or FactorEngine()
         self.store = store or ManualStore()
         self.scorer = scorer or ModelScorer()
         self.em_feed = em_feed or EastMoneyFeed()
+        self.fund_feed = fund_feed or FundamentalFeed()
 
     def _build_sector_map(self, limit_ups):
         """涨停池 code → 所属行业。用科技行业板块反查。"""
@@ -97,22 +100,24 @@ class ScreenRunner:
             except Exception as e:
                 logger.warning("选股 %s 自动因子计算失败, 按空因子处理: %r", code, e)
                 auto = {}
-            # 合并手填因子
-            factors = self.store.merge(auto, code)
-            scores = self.scorer.score_stock(factors)
-            # 来源标记：自动算的(QMT) vs 手填的；节点只当市场闸门, 不再注入个股
-            auto_manual = {f: ("auto" if f in auto else "manual") for f in factors}
+            # 合并手填因子 + 东财个股因子(Y1/Y5/F7/Y7/S5/Y6/Y2), 失败自动跳过 → 回落手填
             float_mv = (lu.get("float_volume") or 0) * (lu.get("last") or 0)
+            fund = self.fund_feed.compute_for_stock(code, float_mv=float_mv)
+            auto_plus = dict(auto)
+            auto_plus.update({k: v["score"] for k, v in fund.items()})
+            factors = self.store.merge(auto_plus, code)
+            scores = self.scorer.score_stock(factors)
+            # 来源: QMT自动 / 东财fundamental / 手填manual
+            auto_manual = {
+                f: ("auto" if f in auto else
+                    "fundamental" if f in fund else "manual")
+                for f in factors
+            }
             result["candidates"].append({
-                "code": code,
-                "name": lu.get("name") or code,
-                "last": lu.get("last"),
-                "up_stop_price": lu.get("up_stop_price"),
-                "sealed": lu.get("sealed"),
-                "float_mv": float_mv,
-                "scores": scores,
-                "factors": factors,
-                "auto_manual": auto_manual,
+                "code": code, "name": lu.get("name") or code,
+                "last": lu.get("last"), "up_stop_price": lu.get("up_stop_price"),
+                "sealed": lu.get("sealed"), "float_mv": float_mv,
+                "scores": scores, "factors": factors, "auto_manual": auto_manual,
             })
 
         # 7. 个股达标门槛: 最强模型分低于门槛的不进清单 (spec v2 §3)
