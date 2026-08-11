@@ -13,6 +13,21 @@ def _ma(series, n):
     return series.rolling(n).mean()
 
 
+def _tick_key_for_em_code(code):
+    """东财裸代码(6位数字) → QMT ticks 字典键(带交易所后缀)。
+    A股后缀约定: 6xxxxx→.SH, 0xxxxx/3xxxxx→.SZ, 8xxxxx/4xxxxx/92xxxx→.BJ。
+    已带后缀的键原样返回; 无法推断时原样返回(由调用方当作"找不到"处理)。"""
+    if "." in code:
+        return code
+    if code.startswith("6"):
+        return code + ".SH"
+    if code.startswith(("0", "3")):
+        return code + ".SZ"
+    if code.startswith(("8", "4", "92")):
+        return code + ".BJ"
+    return code
+
+
 class FactorEngine:
     def _sector_count(self, code, sector_map, limit_ups):
         """所属板块内当日涨停家数"""
@@ -224,7 +239,10 @@ class FactorEngine:
         if yesterday_codes:
             chgs = []
             for code in yesterday_codes:
-                t = ticks.get(code)
+                # 东财返回裸6位代码(如 "002859"), 而 QMT ticks 键带交易所后缀("002859.SZ"),
+                # 必须按前缀补后缀再查, 否则实盘永远命中不了 → N3 恒 0。找不到的代码跳过。
+                key = _tick_key_for_em_code(code)
+                t = ticks.get(key) or ticks.get(code)
                 if not t:
                     continue
                 last = t.get("lastPrice") or 0
@@ -234,8 +252,10 @@ class FactorEngine:
             if chgs:
                 avg_chg = sum(chgs) / len(chgs)
                 n3 = 1 if avg_chg > 0 else 0
-            n3_note = "昨日涨停股今日均涨 %.2f%% (东财真数据)" % avg_chg if chgs else \
-                      "昨日涨停股无今日行情 (东财真数据)"
+                n3_note = "昨日涨停股今日均涨 %.2f%% (东财真数据)" % avg_chg if n3 else \
+                          "昨日涨停股今日均涨 %.2f%% (东财真数据, 溢价为负)" % avg_chg
+            else:
+                n3_note = "昨日涨停股(%d只)今日无匹配行情 (东财真数据)" % len(yesterday_codes)
         else:
             chgs = []
             try:

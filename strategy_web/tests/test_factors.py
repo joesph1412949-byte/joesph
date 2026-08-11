@@ -213,6 +213,30 @@ def test_N3_real_data_negative():
     assert m["N3"]["score"] == 0
 
 
+def test_N3_real_data_bare_codes_resolve_suffix():
+    ds = FakeDS()
+    eng = FactorEngine()
+    # 东财返回裸6位代码, 而 QMT ticks 键带交易所后缀 → 需按前缀补后缀才能命中
+    ticks = {"000001.SZ": {"amount": 1e12, "lastPrice": 11.0, "lastClose": 10.0},
+             "600519.SH": {"amount": 1e12, "lastPrice": 20.0, "lastClose": 19.0}}
+    em = {"daily_counts": [20, 30, 25, 20, 30],
+          "yesterday_codes": ["000001", "600519", "999999"],  # 999999 无匹配 → 跳过
+          "max_boards": 5}
+    m = eng.compute_market_factors(ds, ticks, limit_ups=[], em=em)
+    assert m["N3"]["score"] == 1   # 000001→.SZ, 600519→.SH 均命中
+    assert "东财真数据" in m["N3"]["note"]
+
+
+def test_N3_real_data_no_match_keeps_zero():
+    ds = FakeDS()
+    eng = FactorEngine()
+    ticks = {"000001.SZ": {"amount": 1e12}}
+    em = {"daily_counts": [20, 30, 25, 20, 30], "yesterday_codes": ["123456"], "max_boards": 5}
+    m = eng.compute_market_factors(ds, ticks, limit_ups=[], em=em)
+    assert m["N3"]["score"] == 0      # 代码存在但无一命中 → 保持0, 不误走兜底
+    assert "无匹配" in m["N3"]["note"]
+
+
 def test_N3_fallback_today_pool():
     ds = FakeDS()
     eng = FactorEngine()
