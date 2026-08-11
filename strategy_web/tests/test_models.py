@@ -58,3 +58,27 @@ def test_classify_market():
     assert s.classify_market(4) == "回暖期"
     assert s.classify_market(3) == "冰点期"
     assert s.classify_market(2) == "退潮期"
+
+
+def test_strength_extreme_strong():
+    s = ModelScorer()
+    # 极强: nd==5 且 任一选股模型≥6 → 首板6 + 节点5
+    factors = {"F1":1,"F2":1,"F3":1,"F4":1,"F5":1,"F6":1,"F7":0,
+               "Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0,"Y6":0,"Y7":0,
+               "S1":0,"S2":0,"S3":0,"S4":0,"S5":0,"S6":0,"S7":0,
+               "N1":1,"N2":1,"N3":1,"N4":1,"N5":1}
+    r = s.score_stock(factors)
+    assert r["strength"] == "极强"
+    assert r["position"] == "仓位上限75%"
+
+
+def test_strength_medium():
+    s = ModelScorer()
+    # 中等: nd==3 且 任一选股模型≥5 (非极强/非强: 节点<4 且 ≠5) → 首板5 + 节点3
+    factors = {"F1":1,"F2":1,"F3":1,"F4":1,"F5":1,"F6":0,"F7":0,
+               "Y1":0,"Y2":0,"Y3":0,"Y4":0,"Y5":0,"Y6":0,"Y7":0,
+               "S1":0,"S2":0,"S3":0,"S4":0,"S5":0,"S6":0,"S7":0,
+               "N1":1,"N2":1,"N3":1,"N4":0,"N5":0}
+    r = s.score_stock(factors)
+    assert r["strength"] == "中等"
+    assert r["position"] == "仓位上限30%"

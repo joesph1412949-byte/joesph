@@ -63,10 +63,12 @@ def test_manual_set_and_get(client, tmp_path, monkeypatch):
 def test_kline_endpoint(client, monkeypatch):
     import pandas as pd
     import numpy as np
+    import datetime as dt
+    n = 120
+    ts = (pd.date_range("2026-01-01", periods=n, freq="B").astype("int64") // 10**6).tolist()
     class FakeDS:
         def get_kline(self, code, days=120):
-            n = 120
-            return pd.DataFrame({"time": (pd.date_range("2026-01-01", periods=n, freq="B").astype("int64") // 10**6).tolist(),
+            return pd.DataFrame({"time": ts,
                                  "close": np.linspace(10, 20, n),
                                  "volume": np.full(n, 100000)})
         def get_instrument(self, code):
@@ -75,10 +77,19 @@ def test_kline_endpoint(client, monkeypatch):
     r = client.get("/api/stock/002859.SZ/kline")
     assert r.status_code == 200
     data = r.get_json()
-    # 真实 xtdata 的 time 列是 int64 毫秒级 epoch —— 若 _fmt_date 的 int64 分支被删，
-    # 日期会变成原始毫秒整数, 下面断言即失败。
+    # 期望日期用与 _fmt_date 相同的 int64-ms 换算(fromtimestamp)推导 → 任何时区都一致,
+    # 但仍能拦截 _fmt_date 的 int 分支被删的回归(日期会变回毫秒整数)。
+    expected0 = dt.datetime.fromtimestamp(ts[0] / 1000.0).strftime("%Y-%m-%d")
+    expected1 = dt.datetime.fromtimestamp(ts[1] / 1000.0).strftime("%Y-%m-%d")
     assert len(data["dates"]) == 120
-    assert data["dates"][0] == "2026-01-01"
-    assert data["dates"][1] == "2026-01-02"
+    assert data["dates"][0] == expected0
+    assert data["dates"][1] == expected1
     assert len(data["closes"]) == 120
     assert "ma60" in data
+
+
+def test_screen_disconnected_returns_400(client, monkeypatch):
+    monkeypatch.setattr(app_module.ds_obj, "_connected", False)
+    r = client.post("/api/screen")
+    assert r.status_code == 400
+    assert "QMT未连接" in r.get_json()["error"]
