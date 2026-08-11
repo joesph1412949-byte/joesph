@@ -119,6 +119,7 @@ class EastMoneyFeed:
 
         daily_counts = []
         yesterday_codes = []
+        first_day_found = False
         day = today - timedelta(days=1)
         # 回溯上限：覆盖春节/十一等长假，同时防止无限循环
         for _ in range(20):
@@ -134,8 +135,11 @@ class EastMoneyFeed:
                 continue
             stocks = self._pool_to_stocks(pool)
             daily_counts.append(len(stocks))
-            if not yesterday_codes:  # 最近一个交易日（即昨天往前的第一个交易日）
+            # 最近一个交易日（即昨天往前的第一个交易日）的代码。用布尔标志而非列表真值:
+            # 若最近交易日空池(0家), 需让 yesterday_codes 保持 [] → N3 走兜底, 不能误取更早一天。
+            if not first_day_found:
                 yesterday_codes = [s["code"] for s in stocks]
+                first_day_found = True
             day -= timedelta(days=1)
 
         if len(daily_counts) < 3:

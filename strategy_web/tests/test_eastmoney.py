@@ -109,6 +109,29 @@ def test_get_market_stats_builds_counts():
     assert stats["daily_counts"] == [1, 0, 1, 1, 1]  # 近→远
 
 
+def test_get_market_stats_empty_recent_day_keeps_yesterday_codes_empty():
+    today = date.today()
+
+    def d(offset):
+        return (today - timedelta(days=offset)).strftime("%Y%m%d")
+
+    # 回归(复审发现): 最近交易日空池(0家)时, yesterday_codes 必须保持 [],
+    # 不能误取更早一天的代码(否则 N3 会算到"前天"), 让 N3 走兜底。
+    http = FakeHTTP({
+        d(0): {"data": {"pool": []}},
+        d(1): {"data": {"pool": []}},                          # 最近交易日: 空池
+        d(2): {"data": {"pool": _stocks(("000001", "A", 1))}},  # 更早交易日有码
+        d(3): {"data": {"pool": _stocks(("000002", "B", 1))}},
+        d(4): {"data": {"pool": _stocks(("000003", "C", 1))}},
+        d(5): {"data": {"pool": _stocks(("000004", "D", 1))}},
+        d(6): {"data": {"pool": _stocks(("000005", "E", 1))}},
+    })
+    stats = EastMoneyFeed(http_get=http).get_market_stats()
+    assert stats is not None
+    assert stats["yesterday_codes"] == []
+    assert stats["daily_counts"] == [0, 1, 1, 1, 1]
+
+
 def test_get_market_stats_max_boards_zero_on_empty_today():
     today = date.today()
 
