@@ -206,3 +206,27 @@ def test_screen_survives_em_feed_failure():
     assert r["environment_ok"] is True
     assert r["candidates"][0]["code"] == "002859.SZ"
     assert eng.calls[0][1] is None
+
+
+def test_screen_sorts_candidates_by_composite_desc():
+    from models import ModelScorer
+
+    class TwoStockDS(FakeDS):
+        def get_limit_up_stocks(self, ticks=None):
+            # 故意乱序: 000001(综合分低)在前, 002859(综合分高, F7手填)在后
+            return [
+                {"code": "000001.SZ", "name": "平安银行", "last": 10.0, "last_close": 10.0,
+                 "up_stop_price": 11.0, "sealed": True, "amount": 1e7, "volume": 5000,
+                 "float_volume": 2e10, "open_date": "19910101"},
+                {"code": "002859.SZ", "name": "洁美科技", "last": 81.32, "last_close": 73.93,
+                 "up_stop_price": 81.32, "sealed": True, "amount": 1.4e9, "volume": 181657,
+                 "float_volume": 428315200.0, "open_date": "20170407"},
+            ]
+
+    r = ScreenRunner(ds=TwoStockDS(), engine=FakeEngine(), store=FakeStore(),
+                     scorer=ModelScorer(),
+                     em_feed=FakeEastMoneyFeed(stats=DEFAULT_EM)).run()
+    codes = [c["code"] for c in r["candidates"]]
+    assert codes == ["002859.SZ", "000001.SZ"]          # 综合分高者在前
+    comps = [c["scores"]["composite"] for c in r["candidates"]]
+    assert comps == sorted(comps, reverse=True)

@@ -118,7 +118,10 @@ class ScreenRunner:
                 "auto_manual": auto_manual,
             })
 
-        # 7. 汇总
+        # 7. 综合分从高到低排序 (spec §4② "按综合分排序")
+        result["candidates"].sort(key=lambda c: c["scores"]["composite"], reverse=True)
+
+        # 8. 汇总
         c = result["candidates"]
         result["summary"] = {
             "candidate_count": len(c),
