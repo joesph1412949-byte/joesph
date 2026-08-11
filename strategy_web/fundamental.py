@@ -111,7 +111,8 @@ class FundamentalFeed:
 
     def _hybk_history(self):
         """近 RECENT_DAYS-1 个交易日的全部涨停池 hybk 集合(按日缓存, 全股票共用)。
-        从昨天起逐日历日回溯, data.pool==null(非交易日)/失败→跳过该日历日继续, 上限 20 日。
+        从昨天起逐日历日回溯, data.pool==null(非交易日)→跳过该日历日继续, 上限 20 日;
+        端点失败(HTTP/超时/解析)→ 直接抛异常(F7 fail-open, 不写缓存)。
         键 'hybk_history:YYYYMMDD' 与各股票无关, 一天只算一次, 避免每只股各回溯 N 次。"""
         today_key = _today_key()
         cache_key = "hybk_history:%s" % today_key
@@ -125,9 +126,14 @@ class FundamentalFeed:
                 break
             try:
                 pool = self._ztpool(day.strftime("%Y%m%d"))
-            except Exception:
-                day -= timedelta(days=1)
-                continue
+            except Exception as e:
+                # 端点失败(HTTP/超时/解析) ≠ 非交易日(data.pool==null): 失败日不能当
+                # "无该题材", 否则该日题材会被误判"新颖"(F7 假阳性)。上抛给
+                # compute_for_stock → F7 fail-open(不出现在输出); 此处不写缓存,
+                # 绝不让部分/空历史集合被缓存。
+                logger.warning("F7 历史涨停池 %s 获取失败, F7 跳过(fail-open): %r",
+                               day.strftime("%Y%m%d"), e)
+                raise
             if pool is None:  # 非交易日(data.pool==null) → 跳过
                 day -= timedelta(days=1)
                 continue

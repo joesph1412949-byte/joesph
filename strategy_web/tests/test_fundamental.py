@@ -199,6 +199,20 @@ def test_f7_stock_not_in_today_pool_fail_open():
     assert "F7" not in out
 
 
+def test_f7_history_fetch_error_fail_open():
+    # 历史日 ztpool 端点失败(抛异常, 而非 data.pool==null 非交易日) → F7 整体 fail-open:
+    # 该失败日不能当"无该题材"(否则会假判新颖), 直接跳过 F7, 且不崩。
+    pool_by_date = {
+        dk(0): [_pool_row("000001", "全新技术题材")],
+        dk(1): [_pool_row("999999", "旧题材A")],
+        dk(2): RuntimeError("ztpool timeout"),   # 端点失败, 不是非交易日
+    }
+    http = FakeHTTP(_base_routes(pool_by_date=pool_by_date))
+    f = FundamentalFeed(http_get=http, cache_path=None)
+    out = f.compute_for_stock("000001.SZ")
+    assert "F7" not in out
+
+
 # ---------- Y7 游资现身(龙虎榜) ----------
 def test_y7_dragon_tiger_hit():
     lhb = [_lhb_row("000001", d(3), 5000000), _lhb_row("000001", d(1), 1.2e6)]
