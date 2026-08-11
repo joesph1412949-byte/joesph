@@ -1,0 +1,75 @@
+# -*- coding: utf-8 -*-
+"""四模型评分：首板/妖股/势能/节点 + 综合分 + 组合分级 + 强弱区间。"""
+
+# 模型权重（修正为100%）
+MODEL_WEIGHTS = {
+    "first_board": 0.30,
+    "monster": 0.30,
+    "momentum": 0.25,
+    "node": 0.15,
+}
+
+# 因子归属
+MODEL_FACTORS = {
+    "first_board": ["F1", "F2", "F3", "F4", "F5", "F6", "F7"],
+    "monster": ["Y1", "Y2", "Y3", "Y4", "Y5", "Y6", "Y7"],
+    "momentum": ["S1", "S2", "S3", "S4", "S5", "S6", "S7"],
+    "node": ["N1", "N2", "N3", "N4", "N5"],
+}
+
+
+class ModelScorer:
+    def score_stock(self, factors):
+        """输入完整因子字典 {因子: 0/1}，返回模型评分结果。缺失因子按0计。"""
+        model_scores = {}
+        for model, names in MODEL_FACTORS.items():
+            model_scores[model] = sum(1 for n in names if factors.get(n) == 1)
+
+        fb = model_scores["first_board"]
+        mo = model_scores["monster"]
+        mom = model_scores["momentum"]
+        nd = model_scores["node"]
+
+        composite = (fb * MODEL_WEIGHTS["first_board"] +
+                     mo * MODEL_WEIGHTS["monster"] +
+                     mom * MODEL_WEIGHTS["momentum"] +
+                     nd * MODEL_WEIGHTS["node"])
+
+        # 组合分级 A-E
+        best_pick = max(fb, mo, mom)
+        if nd >= 4 and fb >= 6:
+            grade = "A"
+        elif nd >= 4 and mo >= 6:
+            grade = "B"
+        elif nd >= 4 and mom >= 6:
+            grade = "C"
+        elif nd >= 3 and best_pick >= 5:
+            grade = "D"
+        else:
+            grade = "E"
+
+        # 强弱区间
+        if nd == 5 and best_pick >= 6:
+            strength, position = "极强", "仓位上限75%"
+        elif nd >= 4 and best_pick >= 5:
+            strength, position = "强", "仓位上限50%"
+        elif nd >= 3 and best_pick >= 5:
+            strength, position = "中等", "仓位上限30%"
+        else:
+            strength, position = "弱", "观察/空仓"
+
+        return {
+            "first_board": fb, "monster": mo, "momentum": mom, "node": nd,
+            "composite": round(composite, 2),
+            "grade": grade, "strength": strength, "position": position,
+        }
+
+    def classify_market(self, node_score):
+        """节点模型得分 → 情绪阶段。5=高潮 4=回暖 3=冰点 2以下=退潮"""
+        if node_score >= 5:
+            return "高潮期"
+        if node_score == 4:
+            return "回暖期"
+        if node_score == 3:
+            return "冰点期"
+        return "退潮期"
