@@ -1,12 +1,11 @@
 # -*- coding: utf-8 -*-
 """四模型评分：首板/妖股/势能/节点 + 综合分 + 组合分级 + 强弱区间。"""
 
-# 模型权重（修正为100%）
+# 模型权重(节点已退出个股综合分, 只当市场闸门)
 MODEL_WEIGHTS = {
     "first_board": 0.30,
     "monster": 0.30,
     "momentum": 0.25,
-    "node": 0.15,
 }
 
 # 因子归属
@@ -32,28 +31,28 @@ class ModelScorer:
 
         composite = (fb * MODEL_WEIGHTS["first_board"] +
                      mo * MODEL_WEIGHTS["monster"] +
-                     mom * MODEL_WEIGHTS["momentum"] +
-                     nd * MODEL_WEIGHTS["node"])
+                     mom * MODEL_WEIGHTS["momentum"])
 
-        # 组合分级 A-E
-        best_pick = max(fb, mo, mom)
-        if nd >= 4 and fb >= 6:
+        # 组合分级 A-E（绝对阈值，节点只当市场闸门）
+        best = max(fb, mo, mom)
+        second = sorted([fb, mo, mom])[-2]
+        if best >= 6:
             grade = "A"
-        elif nd >= 4 and mo >= 6:
+        elif best >= 5 and second >= 3:
             grade = "B"
-        elif nd >= 4 and mom >= 6:
+        elif best >= 4:
             grade = "C"
-        elif nd >= 3 and best_pick >= 5:
+        elif best >= 3:
             grade = "D"
         else:
             grade = "E"
 
-        # 强弱区间
-        if nd == 5 and best_pick >= 6:
+        # 强弱区间（节点退出后，纯按最强模型分）
+        if best >= 6:
             strength, position = "极强", "仓位上限75%"
-        elif nd >= 4 and best_pick >= 5:
+        elif best >= 5:
             strength, position = "强", "仓位上限50%"
-        elif nd >= 3 and best_pick >= 5:
+        elif best >= 4:
             strength, position = "中等", "仓位上限30%"
         else:
             strength, position = "弱", "观察/空仓"
