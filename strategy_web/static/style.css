@@ -24,7 +24,25 @@ header h1 { font-size: 22px; }
 .chart { background: #fff; border-radius: 8px; padding: 12px;
          margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
 #radar-chart, #bar-chart { height: 340px; }
-#kline-chart { height: 400px; }
+
+/* 池内 A/B/C/D 等级分布卡片 (spec §4④) */
+.tile { background: #fff; border-radius: 8px; padding: 14px 18px; min-width: 120px;
+        box-shadow: 0 1px 3px rgba(0,0,0,.1); border-top: 4px solid #ddd; }
+.tile .label { font-size: 12px; color: #888; }
+.tile .value { font-size: 26px; font-weight: bold; margin-top: 4px; }
+.tile.grade-A { border-top-color: #e67e22; background: #fff3e0; }
+.tile.grade-B { border-top-color: #27ae60; background: #e8f5e9; }
+.tile.grade-C { border-top-color: #2980b9; background: #e3f2fd; }
+.tile.grade-D { border-top-color: #8bc34a; background: #f1f8e9; }
+
+/* 单股详情: 左K线右因子表 (spec §4③) */
+#detail-layout { display: flex; gap: 16px; align-items: flex-start; }
+#detail-layout #kline-chart { flex: 1 1 60%; min-width: 0; height: 400px; }
+#detail-layout #factor-table { flex: 1 1 40%; min-width: 0; }
+@media (max-width: 900px) {
+  #detail-layout { flex-direction: column; }
+  #detail-layout #kline-chart, #detail-layout #factor-table { flex: 1 1 auto; width: 100%; }
+}
 table { width: 100%; border-collapse: collapse; background: #fff;
         border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
 th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #eee; }

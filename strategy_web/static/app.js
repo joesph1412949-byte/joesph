@@ -89,6 +89,16 @@ function renderCandidates(candidates) {
 function renderComparison(data) {
   if (!data || !data.candidates || data.candidates.length === 0) return;
   const c = data.candidates;
+  // 池内 A/B/C/D 等级分布 (spec §4④, 后端已算 summary.a/b/c/d_count)
+  const sum = data.summary || {};
+  const tiles = document.getElementById("class-tiles");
+  tiles.innerHTML = "";
+  for (const [g, n] of [["A", sum.a_count], ["B", sum.b_count],
+                        ["C", sum.c_count], ["D", sum.d_count]]) {
+    tiles.insertAdjacentHTML("beforeend",
+      `<div class="tile grade-${g}"><div class="label">${g}级 · 候选</div>
+       <div class="value">${n}</div></div>`);
+  }
   const radar = echarts.init(document.getElementById("radar-chart"));
   radar.setOption({
     title: { text: "三模型评分对比 (池内均值)" },
@@ -138,15 +148,57 @@ async function showStockDetail(code) {
 
 function renderKline(k) {
   const chart = echarts.init(document.getElementById("kline-chart"));
+  const n = k.closes.length;
+  const lastIdx = n - 1;
+  const upStop = k.up_stop;                 // 涨停价
+  // 突破位 = 今日之前的最高价 (当日突破历史高点才有意义)
+  const priorHigh = n > 1 ? Math.max.apply(null, k.highs.slice(0, lastIdx)) : null;
+  const atLimit = upStop > 0 && k.closes[lastIdx] >= upStop - 0.01;  // 今日封板
+
+  // ECharts 蜡烛图数据顺序: [open, close, low, high]
+  const ohlc = k.dates.map((_, i) =>
+    [k.opens[i], k.closes[i], k.lows[i], k.highs[i]]);
+
+  const markLines = [];
+  if (upStop > 0) {
+    markLines.push({ yAxis: upStop, name: "涨停价",
+      lineStyle: { color: "#e74c3c", type: "dashed" } });
+  }
+  if (priorHigh !== null) {
+    markLines.push({ yAxis: priorHigh, name: "突破位",
+      lineStyle: { color: "#2980b9", type: "dashed" } });
+  }
+
   chart.setOption({
     title: { text: "日线K线 (近120日)" },
-    xAxis: { type: "category", data: k.dates },
+    tooltip: { trigger: "axis", axisPointer: { type: "cross" } },
+    grid: { left: 64, right: 24, top: 48, bottom: 64 },
+    xAxis: { type: "category", data: k.dates, boundaryGap: true },
     yAxis: { type: "value", scale: true },
-    tooltip: { trigger: "axis" },
-    dataZoom: [{ type: "inside" }],
+    dataZoom: [
+      { type: "inside", start: 40, end: 100 },
+      { type: "slider", start: 40, end: 100, height: 20, bottom: 10 },
+    ],
     series: [
-      { name: "收盘", type: "line", data: k.closes, showSymbol: false, lineStyle: { width: 1.5 } },
-      { name: "MA60", type: "line", data: k.ma60, showSymbol: false, lineStyle: { color: "#e67e22", width: 1 } },
+      {
+        name: "K线", type: "candlestick", data: ohlc,
+        itemStyle: {
+          color: "#e74c3c", color0: "#27ae60",
+          borderColor: "#e74c3c", borderColor0: "#27ae60",
+        },
+        markPoint: atLimit ? {
+          symbol: "pin", symbolSize: 48,
+          label: { color: "#fff" },
+          data: [{ coord: [lastIdx, k.highs[lastIdx]], value: "涨停",
+                   itemStyle: { color: "#e74c3c" } }],
+        } : {},
+        markLine: {
+          symbol: "none", label: { formatter: "{b}" },
+          data: markLines,
+        },
+      },
+      { name: "MA60", type: "line", data: k.ma60, showSymbol: false,
+        lineStyle: { color: "#e67e22", width: 1 } },
     ],
   });
 }

@@ -61,9 +61,13 @@ def stock_kline(code):
         df = ds_obj.get_kline(code, days=120)
         ma60 = df["close"].rolling(60).mean().tolist()
         detail = ds_obj.get_instrument(code)
+        # OHLC 用于前端 ECharts 蜡烛图 (spec §4③)
         return jsonify({
             "dates": [_fmt_date(t) for t in df["time"]],
-            "closes": df["close"].tolist(),
+            "opens": [float(x) for x in df["open"]],
+            "closes": [float(x) for x in df["close"]],
+            "highs": [float(x) for x in df["high"]],
+            "lows": [float(x) for x in df["low"]],
             "volumes": [int(v) for v in df["volume"]],
             "ma60": [None if x != x else round(x, 2) for x in ma60],  # NaN→None
             "up_stop": detail.get("UpStopPrice") or 0,

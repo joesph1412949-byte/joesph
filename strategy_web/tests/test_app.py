@@ -69,6 +69,9 @@ def test_kline_endpoint(client, monkeypatch):
     class FakeDS:
         def get_kline(self, code, days=120):
             return pd.DataFrame({"time": ts,
+                                 "open": np.linspace(9.5, 19.5, n),
+                                 "high": np.linspace(10.5, 20.5, n),
+                                 "low": np.linspace(9.0, 19.0, n),
                                  "close": np.linspace(10, 20, n),
                                  "volume": np.full(n, 100000)})
         def get_instrument(self, code):
@@ -85,7 +88,14 @@ def test_kline_endpoint(client, monkeypatch):
     assert data["dates"][0] == expected0
     assert data["dates"][1] == expected1
     assert len(data["closes"]) == 120
+    # OHLC 蜡烛图所需字段 (spec §4③)
+    for key in ("opens", "highs", "lows"):
+        assert key in data
+        assert len(data[key]) == 120
+        assert isinstance(data[key][0], float)
     assert "ma60" in data
+    assert len(data["volumes"]) == 120
+    assert data["up_stop"] == 22.0
 
 
 def test_screen_disconnected_returns_400(client, monkeypatch):
