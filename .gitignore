@@ -35,6 +35,7 @@ Thumbs.db
 
 # Claude Code (internal)
 .claude/
+.superpowers/
 
 # Downloaded plugins source
 superpowers-main/
