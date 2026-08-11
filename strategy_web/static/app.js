@@ -25,7 +25,7 @@ async function fetchScreen() {
     const data = await api("/api/screen", { method: "POST" });
     if (data.error) { alert(data.error); return; }
     state.screenResult = data;
-    renderMarket(data);
+    renderMarket(data.market);
     renderCandidates(data.candidates);
     if (data.environment_ok) switchTab("candidates");
     else switchTab("market");
