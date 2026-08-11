@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>量化选股策略看板</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/echarts.min.js"></script>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>量化选股策略看板</h1>
+    <span id="conn-status" class="badge">未连接</span>
+    <button id="btn-screen" onclick="fetchScreen()">开始选股</button>
+  </header>
+
+  <nav id="tabs">
+    <button class="tab active" data-tab="market" onclick="switchTab('market')">市场环境</button>
+    <button class="tab" data-tab="candidates" onclick="switchTab('candidates')">候选列表</button>
+    <button class="tab" data-tab="compare" onclick="switchTab('compare')">模型对比</button>
+    <button class="tab" data-tab="detail" onclick="switchTab('detail')">单股详情</button>
+  </nav>
+
+  <main>
+    <section id="tab-market" class="tab-panel active">
+      <div id="market-banner"></div>
+      <div id="node-cards" class="cards"></div>
+      <div id="market-stats"></div>
+    </section>
+
+    <section id="tab-candidates" class="tab-panel">
+      <table id="cand-table">
+        <thead><tr>
+          <th>代码</th><th>名称</th><th>首板</th><th>妖股</th><th>势能</th>
+          <th>节点</th><th>综合</th><th>等级</th><th>强度</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section id="tab-compare" class="tab-panel">
+      <div id="radar-chart" class="chart"></div>
+      <div id="bar-chart" class="chart"></div>
+    </section>
+
+    <section id="tab-detail" class="tab-panel">
+      <h2 id="detail-title">点击候选列表选择股票</h2>
+      <div id="kline-chart" class="chart"></div>
+      <div id="factor-table"></div>
+    </section>
+  </main>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
