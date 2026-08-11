@@ -2,7 +2,11 @@
 """手填因子持久化：xtdata 拿不到数据的因子，用户在网页上手填得分(0/1)。
 数据存 JSON 文件，重新选股时自动合并到自动因子。"""
 import json
+import logging
+import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class ManualStore:
@@ -17,6 +21,16 @@ class ManualStore:
         if self.path.exists():
             try:
                 return json.loads(self.path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as e:
+                # 损坏的 JSON: 重命名为 <path>.corrupt-<epoch秒> 保留原始字节,
+                # 否则下次 _save 会静默覆盖, 永久丢失手填因子。
+                backup = Path("%s.corrupt-%d" % (self.path, int(time.time())))
+                try:
+                    self.path.rename(backup)
+                    logger.warning("manual_factors.json 损坏, 已备份到 %s: %s", backup, e)
+                except OSError as rn_err:
+                    logger.warning("manual_factors.json 损坏且备份失败: %r", rn_err)
+                return {}
             except Exception:
                 return {}
         return {}

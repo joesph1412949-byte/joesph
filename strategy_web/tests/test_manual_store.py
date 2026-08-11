@@ -52,3 +52,20 @@ def test_merge_unknown_code(store):
     auto = {"F1": 1}
     merged = store.merge(auto, "999999.SZ")
     assert merged == {"F1": 1}     # 无手填则保持原样
+
+
+def test_corrupt_json_is_preserved_and_recoverable(tmp_path, caplog):
+    p = tmp_path / "manual.json"
+    # 有效 UTF-8 文本但非法 JSON → json.loads 抛 JSONDecodeError（触发备份分支）
+    garbage = b"{ this is not valid json {{ "
+    p.write_bytes(garbage)
+    s = ManualStore(str(p))
+    assert s.all() == {}                    # 损坏时不抛异常, 返回空
+    siblings = list(tmp_path.glob("manual.json.corrupt-*"))
+    assert len(siblings) == 1               # 损坏文件被重命名为 .corrupt-* 保留
+    assert siblings[0].read_bytes() == garbage  # 原始字节保留
+    assert not p.exists()                   # 原路径已被移走
+    s.set_manual("000001.SZ", {"F7": 1})    # 后续写入生成全新有效文件
+    reloaded = ManualStore(str(p))
+    assert reloaded.get_manual("000001.SZ") == {"F7": 1}
+    assert any("损坏" in rec.message for rec in caplog.records)
