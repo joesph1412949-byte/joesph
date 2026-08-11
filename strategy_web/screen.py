@@ -16,6 +16,8 @@ SECTORS = ["SW1电子", "SW1计算机", "SW1通信"]
 
 # 环境门槛：节点模型得分达标才选股（冰点期阈值）
 ENV_THRESHOLD = 3
+# 个股门槛：最强模型分(首板/妖股/势能任一)低于此值的不进候选清单
+CANDIDATE_MIN_MODEL = 3
 
 
 class ScreenRunner:
@@ -97,14 +99,9 @@ class ScreenRunner:
                 auto = {}
             # 合并手填因子
             factors = self.store.merge(auto, code)
-            # 注入市场节点因子(N1-N5)，使节点模型计入综合分与A-E分级(设计: 节点15%)
-            # 用 .get("score", 0) 兜底: 单个 market 因子条目畸形时不能 500 整屏
-            factors.update({k: v.get("score", 0) for k, v in market_factors.items()})
             scores = self.scorer.score_stock(factors)
-            # 标记来源：自动算的(含市场N因子) vs 手填的
-            auto_all = set(auto) | set(market_factors)
-            auto_manual = {f: ("auto" if f in auto_all else "manual")
-                           for f in factors}
+            # 来源标记：自动算的(QMT) vs 手填的；节点只当市场闸门, 不再注入个股
+            auto_manual = {f: ("auto" if f in auto else "manual") for f in factors}
             float_mv = (lu.get("float_volume") or 0) * (lu.get("last") or 0)
             result["candidates"].append({
                 "code": code,
@@ -118,10 +115,17 @@ class ScreenRunner:
                 "auto_manual": auto_manual,
             })
 
-        # 7. 综合分从高到低排序 (spec §4② "按综合分排序")
+        # 7. 个股达标门槛: 最强模型分低于门槛的不进清单 (spec v2 §3)
+        result["candidates"] = [
+            c for c in result["candidates"]
+            if max(c["scores"]["first_board"], c["scores"]["monster"],
+                   c["scores"]["momentum"]) >= CANDIDATE_MIN_MODEL
+        ]
+
+        # 8. 综合分从高到低排序 (spec §4②)
         result["candidates"].sort(key=lambda c: c["scores"]["composite"], reverse=True)
 
-        # 8. 汇总
+        # 9. 汇总
         c = result["candidates"]
         result["summary"] = {
             "candidate_count": len(c),

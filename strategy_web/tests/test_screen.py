@@ -97,9 +97,12 @@ class FakeStore:
 class FakeScorer:
     def score_stock(self, factors):
         fb = sum(1 for n in ["F1","F2","F3","F4","F5","F6","F7"] if factors.get(n)==1)
-        return {"first_board":fb,"monster":0,"momentum":0,"node":5,
-                "composite":round(fb*0.3+5*0.15,2),
-                "grade":"A" if fb>=6 else "E","strength":"极强","position":"75%"}
+        mo = sum(1 for n in ["Y1","Y2","Y3","Y4","Y5","Y6","Y7"] if factors.get(n)==1)
+        best = max(fb, mo)
+        grade = "A" if best >= 6 else ("B" if best >= 5 else ("C" if best >= 4 else "E"))
+        return {"first_board":fb,"monster":mo,"momentum":0,"node":0,
+                "composite":round(fb*0.3+mo*0.3,2),
+                "grade":grade,"strength":"强" if best>=5 else "弱","position":"50%"}
 
     def classify_market(self, node_score):
         return "回暖期"
@@ -165,11 +168,25 @@ def test_screen_pipeline_real_shapes_produce_scores():
                      store=FakeStore(), scorer=ModelScorer(),
                      em_feed=FakeEastMoneyFeed(stats=DEFAULT_EM)).run()
     cand = r["candidates"][0]
-    assert cand["factors"]["F1"] == 1            # 拍扁后是 int
-    assert cand["scores"]["first_board"] == 7     # F1-F6自动 + F7手填
-    assert cand["scores"]["node"] == 5            # 市场 N1-N5 注入
-    assert cand["scores"]["grade"] == "A"         # 节点≥4 且 首板≥6
-    assert cand["scores"]["strength"] == "极强"    # 节点5 且 任一选股模型≥6
+    assert cand["factors"]["F1"] == 1
+    assert "N1" not in cand["factors"]          # 节点不再注入个股 (v2)
+    assert cand["scores"]["node"] == 0
+    assert cand["scores"]["first_board"] == 7    # F1-F6自动 + F7手填
+    assert cand["scores"]["grade"] == "A"        # 绝对阈值: 最强≥6
+
+
+def test_screen_filters_by_candidate_min_model():
+    from models import ModelScorer
+    class LowScoringStore(FakeStore):
+        def merge(self, auto, code):
+            return {f: 1 if f in ["F1", "F2"] else 0 for f in
+                    ["F1","F2","F3","F4","F5","F6","F7",
+                     "Y1","Y2","Y3","Y4","Y5","Y6","Y7",
+                     "S1","S2","S3","S4","S5","S6","S7"]}   # 最强模型=2 < 门槛3
+    r = ScreenRunner(ds=FakeDS(), engine=FakeEngine(), store=LowScoringStore(),
+                     scorer=ModelScorer(),
+                     em_feed=FakeEastMoneyFeed(stats=DEFAULT_EM)).run()
+    assert r["candidates"] == []                 # 全部被门槛过滤掉
 
 
 def test_screen_passes_em_stats_to_engine():
