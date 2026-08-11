@@ -44,11 +44,13 @@ class FactorEngine:
             closes = kline["close"].tolist()
             ratio = (0.30 if code.startswith(("8", "4")) else
                      0.20 if code.startswith(("300", "301", "688")) else 0.10)
-            # 历史每日是否涨停: 当日收盘 >= 基于"前一日收盘"算的涨停价 (排除今日)。
-            # (原实现对当日 close 自身算涨停价, 对正常正价格恒不成立, 使"近历史有涨停"分支成死代码;
-            #  终审修复: 涨停价应基于前一日收盘)
+            # 近历史每日是否涨停: 当日收盘 >= 基于"前一日收盘"算的涨停价。
+            # 只扫 closes[:-1] 排除今日——被评分的股票今日封死涨停, 今日收盘==涨停价,
+            # 若不排除会把每个首板都误判成"已有涨停"→ F1 恒 0。
+            # (修复: ①排除今日, ②涨停价基于前一日收盘而非当日 close——后者的原实现
+            #  对正常正价格恒不成立, 使"近历史有涨停"分支成死代码)
             prev_limit = False
-            for i in range(1, len(closes)):
+            for i in range(1, len(closes) - 1):
                 limit_px = round(closes[i - 1] * (1 + ratio), 2)
                 if closes[i] >= limit_px - 0.01:
                     prev_limit = True

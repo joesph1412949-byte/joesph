@@ -63,6 +63,21 @@ def test_F1_prior_limitup_fails():
     assert r["F1"]["score"] == 0
     assert "已有涨停" in r["F1"]["note"]   # 走的是"近历史已有涨停"分支, 而非"今日未涨停"
 
+
+def test_F1_today_at_limit_no_prior_limitup_is_first_board():
+    # 回归(复审发现): F1 扫描若误包含今日, 今日收盘==涨停价(11.55 = 10.5 的 +10%)
+    # 会被判成"已有涨停" → F1 恒 0。今日在涨停价且近历史无涨停 → F1 必须为 1。
+    closes = [10.0]*19 + [10.5, 11.55]
+    kline = make_kline(closes, [100000]*21)
+    ds = FakeDS(kline_map={"000001.SZ": kline})
+    eng = FactorEngine()
+    tick = {"lastPrice":11.55,"lastClose":11.0,"sealed":True,
+            "amount":1e6,"volume":200000}
+    detail = {"UpStopPrice":11.55,"FloatVolume":1e8}   # 今日在涨停价
+    r = eng.compute_factors("000001.SZ", tick, detail, ds, sector_map={})
+    assert r["F1"]["score"] == 1
+    assert "无涨停" in r["F1"]["note"]
+
 def test_F3_seal_strength_mainboard():
     ds = FakeDS()
     eng = FactorEngine()
