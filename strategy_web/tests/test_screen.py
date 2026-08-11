@@ -132,3 +132,21 @@ def test_screen_passes_real_tick_and_detail_to_engine():
     assert tick.get("lastPrice") == 81.32             # 真实盘口tick
     assert detail.get("UpStopPrice") == 81.32         # 涨停价
     assert detail.get("FloatVolume") == 428315200.0   # 流通股本
+
+
+def test_screen_pipeline_real_shapes_produce_scores():
+    from models import ModelScorer
+    class RealShapeEngine(FakeEngine):
+        def compute_factors(self, *a, **k):
+            # 真实形状: dict 套 dict
+            return {f: {"score": 1, "note": "test"} for f in
+                    ["F1", "F2", "F3", "F4", "F5", "F6",
+                     "Y3", "Y4", "S2", "S3", "S4", "S6"]}
+    r = ScreenRunner(ds=FakeDS(), engine=RealShapeEngine(),
+                     store=FakeStore(), scorer=ModelScorer()).run()
+    cand = r["candidates"][0]
+    assert cand["factors"]["F1"] == 1            # 拍扁后是 int
+    assert cand["scores"]["first_board"] == 7     # F1-F6自动 + F7手填
+    assert cand["scores"]["node"] == 5            # 市场 N1-N5 注入
+    assert cand["scores"]["grade"] == "A"         # 节点≥4 且 首板≥6
+    assert cand["scores"]["strength"] == "极强"    # 节点5 且 任一选股模型≥6

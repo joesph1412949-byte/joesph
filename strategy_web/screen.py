@@ -74,15 +74,21 @@ class ScreenRunner:
                 tick = ticks.get(code, {})
                 detail = {"UpStopPrice": lu.get("up_stop_price"),
                           "FloatVolume": lu.get("float_volume")}
-                auto = self.engine.compute_factors(code, tick, detail, self.ds,
-                                                   sector_map, limit_ups, None)
+                auto_raw = self.engine.compute_factors(code, tick, detail, self.ds,
+                                                       sector_map, limit_ups, None)
+                # 拍扁: compute_factors 返回 {因子:{score,note}}, merge/score 需扁平 {因子:0/1}
+                auto = {k: (v.get("score", 0) if isinstance(v, dict) else v)
+                        for k, v in auto_raw.items()}
             except Exception:
                 auto = {}
             # 合并手填因子
             factors = self.store.merge(auto, code)
+            # 注入市场节点因子(N1-N5)，使节点模型计入综合分与A-E分级(设计: 节点15%)
+            factors.update({k: v["score"] for k, v in market_factors.items()})
             scores = self.scorer.score_stock(factors)
-            # 标记来源：自动算的 vs 手填的
-            auto_manual = {f: ("auto" if f in auto else "manual")
+            # 标记来源：自动算的(含市场N因子) vs 手填的
+            auto_all = set(auto) | set(market_factors)
+            auto_manual = {f: ("auto" if f in auto_all else "manual")
                            for f in factors}
             float_mv = (lu.get("float_volume") or 0) * (lu.get("last") or 0)
             result["candidates"].append({
