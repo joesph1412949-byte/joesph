@@ -6,6 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import datetime as _dt
+
 from flask import Flask, jsonify, render_template, request
 
 from data_source import DataSource, DataSourceError
@@ -21,6 +23,13 @@ manual_store_obj = ManualStore()
 
 def _get_screen_runner():
     return ScreenRunner(ds=ds_obj, store=manual_store_obj)
+
+
+def _fmt_date(t):
+    """K线 time 字段转日期字符串。xtdata 返回毫秒级 epoch int；测试 mock 可能是 datetime。"""
+    if hasattr(t, "date"):
+        return str(t.date())
+    return _dt.datetime.fromtimestamp(int(t) / 1000.0).strftime("%Y-%m-%d")
 
 
 @app.route("/")
@@ -53,7 +62,7 @@ def stock_kline(code):
         ma60 = df["close"].rolling(60).mean().tolist()
         detail = ds_obj.get_instrument(code)
         return jsonify({
-            "dates": [str(t.date()) for t in df["time"]],
+            "dates": [_fmt_date(t) for t in df["time"]],
             "closes": df["close"].tolist(),
             "volumes": [int(v) for v in df["volume"]],
             "ma60": [None if x != x else round(x, 2) for x in ma60],  # NaN→None
