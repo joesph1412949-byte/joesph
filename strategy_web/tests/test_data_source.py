@@ -126,6 +126,15 @@ def test_get_limit_up_marks_sealed():
     ups = ds.get_limit_up_stocks(ticks)
     assert ups[0]["sealed"] is True  # askPrice[0]==0 → 封板
 
+def test_get_limit_up_not_sealed_when_ask_has_price():
+    ds = DataSource()
+    ticks = {"002859.SZ": {"lastPrice":81.32,"lastClose":73.93,
+                           "askPrice":[10.05,0,0,0,0],"bidPrice":[81.32,81.31,0,0,0]}}
+    ds.get_instruments_bulk = lambda codes: {
+        "002859.SZ": {"UpStopPrice":81.32,"InstrumentName":"洁美科技","FloatVolume":428315200.0}}
+    ups = ds.get_limit_up_stocks(ticks)
+    assert ups[0]["sealed"] is False  # askPrice[0] > 0 → 未封板
+
 def test_get_kline_downloads_then_reads(ds):
     df = ds.get_kline("002859.SZ", days=120)
     assert "close" in df.columns and "volume" in df.columns
@@ -135,6 +144,26 @@ def test_get_instruments_bulk(ds):
     details = ds.get_instruments_bulk(["002859.SZ", "000001.SZ"])
     assert details["002859.SZ"]["InstrumentName"] == "洁美科技"
     assert details["002859.SZ"]["FloatVolume"] == 428315200.0
+
+def test_get_instruments_bulk_takes_batch_path(monkeypatch):
+    # 真实 API 返回 {code: detail}，key 是带后缀的完整代码。
+    # 验证批量分支真正生效（bulk 被调用、fallback 不触发），而非逐只回退。
+    bulk_calls = {"n": 0}
+    fallback_calls = {"n": 0}
+    def spy_bulk(codes):
+        bulk_calls["n"] += 1
+        return _fake_get_instrument_detail_list(codes)
+    def spy_fallback(c):
+        fallback_calls["n"] += 1
+        return {"InstrumentID": "000001", "InstrumentName": "fallback"}
+    monkeypatch.setattr(xtdata_mod, "get_instrument_detail_list", spy_bulk)
+    monkeypatch.setattr(xtdata_mod, "get_instrument_detail", spy_fallback)
+    ds = DataSource()
+    details = ds.get_instruments_bulk(["002859.SZ", "600353.SH"])
+    assert details["002859.SZ"]["InstrumentName"] == "洁美科技"
+    assert details["600353.SH"]["InstrumentName"] == "旭光电子"
+    assert bulk_calls["n"] == 1
+    assert fallback_calls["n"] == 0  # 全部命中批量路径，无需逐只 fallback
 
 def test_get_sector_stocks(ds):
     codes = ds.get_sector_stocks("沪深A股")

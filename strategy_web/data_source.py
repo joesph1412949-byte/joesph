@@ -49,7 +49,7 @@ class DataSource:
         返回 [{code,name,last,last_close,up_stop_price,sealed,amount,volume}]"""
         if ticks is None:
             ticks = self.get_full_market_ticks()
-        ups = [c for c in ticks if ticks[c].get("lastPrice") or 0 > 0]
+        ups = [c for c in ticks if (ticks[c].get("lastPrice") or 0) > 0]
         if not ups:
             return []
         details = self.get_instruments_bulk(ups)
@@ -127,20 +127,18 @@ class DataSource:
             return {}
         try:
             if hasattr(xtdata, "get_instrument_detail_list"):
-                lst = xtdata.get_instrument_detail_list(codes)
-                out = {}
-                for item in lst or []:
-                    if isinstance(item, dict) and item.get("InstrumentID"):
-                        # 构造带市场后缀的 code
-                        ex = item.get("ExchangeID", "")
-                        code = item["InstrumentID"]
-                        suff = ".SH" if ex == "SH" else ".SZ"
-                        out[code + suff] = item
-                # 补充可能缺失的
-                for c in codes:
-                    if c not in out:
-                        out[c] = self.get_instrument(c)
-                return out
+                try:
+                    d = xtdata.get_instrument_detail_list(codes) or {}
+                    out = {}
+                    for code_key, detail in d.items():
+                        if isinstance(detail, dict) and detail.get("InstrumentID"):
+                            out[code_key] = detail
+                    for c in codes:
+                        if c not in out:
+                            out[c] = self.get_instrument(c)
+                    return out
+                except Exception:
+                    return {c: self.get_instrument(c) for c in codes}
             return {c: self.get_instrument(c) for c in codes}
         except Exception:
             return {c: self.get_instrument(c) for c in codes}
