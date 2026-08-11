@@ -66,7 +66,7 @@ def test_kline_endpoint(client, monkeypatch):
     class FakeDS:
         def get_kline(self, code, days=120):
             n = 120
-            return pd.DataFrame({"time": pd.date_range("2026-01-01", periods=n, freq="B"),
+            return pd.DataFrame({"time": (pd.date_range("2026-01-01", periods=n, freq="B").astype("int64") // 10**6).tolist(),
                                  "close": np.linspace(10, 20, n),
                                  "volume": np.full(n, 100000)})
         def get_instrument(self, code):
@@ -75,5 +75,10 @@ def test_kline_endpoint(client, monkeypatch):
     r = client.get("/api/stock/002859.SZ/kline")
     assert r.status_code == 200
     data = r.get_json()
+    # 真实 xtdata 的 time 列是 int64 毫秒级 epoch —— 若 _fmt_date 的 int64 分支被删，
+    # 日期会变成原始毫秒整数, 下面断言即失败。
+    assert len(data["dates"]) == 120
+    assert data["dates"][0] == "2026-01-01"
+    assert data["dates"][1] == "2026-01-02"
     assert len(data["closes"]) == 120
     assert "ma60" in data
