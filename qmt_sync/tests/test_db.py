@@ -1,5 +1,11 @@
 from qmt_sync.db import QmtDb
 
+def test_db_creates_missing_parent_dir(tmp_path):
+    # sqlite 不会自动建父目录; D:\QMT_SYNC 首次运行时不存在, 必须由 QmtDb 创建
+    nested = tmp_path / "not_yet_created" / "t.db"
+    db = QmtDb(str(nested))
+    assert nested.is_file()
+
 def test_schema_and_asset(tmp_path):
     db = QmtDb(str(tmp_path / "t.db"))
     db.insert_asset("A", 100000.0, 50000.0, 50000.0, 0.0, "2026-08-12 10:00:00")

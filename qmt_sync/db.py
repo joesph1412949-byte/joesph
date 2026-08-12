@@ -1,5 +1,6 @@
 """SQLite 存储层: schema + 写入/查询。同步进程写, Vibe-Trading 工具只读。"""
 from __future__ import annotations
+import os
 import sqlite3
 import threading
 from datetime import datetime, timedelta
@@ -52,6 +53,8 @@ CREATE TABLE IF NOT EXISTS alerts (
 class QmtDb:
     def __init__(self, path: str):
         self.path = path
+        # sqlite 不自动建父目录; D:\QMT_SYNC 首次运行不存在时必须先创建
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         # xtquant 回调在 worker 线程跑, 连接必须可跨线程使用
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._lock = threading.Lock()
