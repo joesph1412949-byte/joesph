@@ -16,6 +16,28 @@ async function api(url, opts) {
   return res.json();
 }
 
+// ---------- QMT 连接状态 ----------
+async function checkHealth() {
+  const el = document.getElementById("conn-status");
+  try {
+    const data = await api("/api/health");
+    if (data.qmt_connected) {
+      el.textContent = "已连接 QMT";
+      el.classList.add("ok");
+      el.classList.remove("fail");
+    } else {
+      el.textContent = "未连接";
+      el.classList.add("fail");
+      el.classList.remove("ok");
+    }
+  } catch (e) {
+    el.textContent = "后端未启动";
+    el.classList.add("fail");
+    el.classList.remove("ok");
+  }
+}
+checkHealth();
+
 // ---------- 选股 ----------
 async function fetchScreen() {
   const btn = document.getElementById("btn-screen");

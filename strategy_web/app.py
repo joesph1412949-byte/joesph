@@ -98,4 +98,7 @@ if __name__ == "__main__":
         print("警告: %s" % e)
         print("请先打开 QMT 并开启 miniQMT 模式")
     print("浏览器访问: http://localhost:5000")
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    # debug 模式(带 reloader)后台运行不稳定, 生产/常驻用 APP_DEBUG=0 关闭
+    import os
+    debug = os.environ.get("APP_DEBUG", "1") != "0"
+    app.run(host="127.0.0.1", port=5000, debug=debug)
