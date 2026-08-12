@@ -22,6 +22,20 @@ def _i(v, default=0) -> int:
         return default
 
 
+def _normalize_time(v):
+    """把 xtquant 紧凑时间 "YYYYMMDDHHMMSS" 规整为 "YYYY-MM-DD HH:MM:SS"。
+
+    解析失败或输入不匹配时原样返回(不中断、不篡改其它格式)。
+    """
+    s = str(v)
+    if len(s) != 14 or not s.isdigit():
+        return s
+    try:
+        return datetime.strptime(s, "%Y%m%d%H%M%S").strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return s
+
+
 def _attr(obj, *names, default=None):
     if obj is None:
         return default
@@ -114,7 +128,7 @@ class TradeRecord:
             stock_code=str(_attr(xt, "stock_code", default="")),
             order_type=_i(_attr(xt, "order_type")),
             traded_id=str(_attr(xt, "traded_id", default="")),
-            traded_time=str(_attr(xt, "traded_time", default="")),
+            traded_time=_normalize_time(_attr(xt, "traded_time", default="")),
             traded_price=_f(_attr(xt, "traded_price")),
             traded_volume=_i(_attr(xt, "traded_volume")),
             traded_amount=_f(_attr(xt, "traded_amount")),

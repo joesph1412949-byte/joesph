@@ -1,6 +1,8 @@
 """SQLite 存储层: schema + 写入/查询。同步进程写, Vibe-Trading 工具只读。"""
 from __future__ import annotations
 import sqlite3
+import threading
+from datetime import datetime, timedelta
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS account_assets (
@@ -50,69 +52,97 @@ CREATE TABLE IF NOT EXISTS alerts (
 class QmtDb:
     def __init__(self, path: str):
         self.path = path
-        self._conn = sqlite3.connect(path)
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        # xtquant 回调在 worker 线程跑, 连接必须可跨线程使用
+        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._lock = threading.Lock()
+        with self._lock:
+            self._conn.execute("PRAGMA journal_mode=WAL")
         self.init_schema()
 
     def init_schema(self) -> None:
-        self._conn.executescript(SCHEMA)
-        self._conn.commit()
+        with self._lock:
+            self._conn.executescript(SCHEMA)
+            self._conn.commit()
 
     # ---------- writes ----------
     def insert_asset(self, account_id, total_asset, cash, market_value, frozen_cash, update_time):
-        self._conn.execute(
-            "INSERT INTO account_assets(account_id,total_asset,cash,market_value,frozen_cash,update_time) "
-            "VALUES(?,?,?,?,?,?)",
-            (account_id, total_asset, cash, market_value, frozen_cash, update_time),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO account_assets(account_id,total_asset,cash,market_value,frozen_cash,update_time) "
+                "VALUES(?,?,?,?,?,?)",
+                (account_id, total_asset, cash, market_value, frozen_cash, update_time),
+            )
+            self._conn.commit()
 
     def upsert_positions(self, poll_seq, rows):
-        for r in rows:
-            self._conn.execute(
-                "INSERT INTO positions(poll_seq,account_id,stock_code,volume,can_use_volume,open_price,"
-                "market_value,frozen_volume,on_road_volume,yesterday_volume,update_time) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (poll_seq, r.get("account_id", ""), r["stock_code"], r.get("volume"), r.get("can_use_volume"),
-                 r.get("open_price"), r.get("market_value"), r.get("frozen_volume"),
-                 r.get("on_road_volume"), r.get("yesterday_volume"), r.get("update_time", "")),
-            )
-        self._conn.commit()
+        with self._lock:
+            for r in rows:
+                self._conn.execute(
+                    "INSERT INTO positions(poll_seq,account_id,stock_code,volume,can_use_volume,open_price,"
+                    "market_value,frozen_volume,on_road_volume,yesterday_volume,update_time) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (poll_seq, r.get("account_id", ""), r["stock_code"], r.get("volume"), r.get("can_use_volume"),
+                     r.get("open_price"), r.get("market_value"), r.get("frozen_volume"),
+                     r.get("on_road_volume"), r.get("yesterday_volume"), r.get("update_time", "")),
+                )
+            self._conn.commit()
 
     def insert_trade(self, r):
-        self._conn.execute(
-            "INSERT OR IGNORE INTO trades(account_id,stock_code,order_type,traded_id,traded_time,"
-            "traded_price,traded_volume,traded_amount,order_id,received_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (r.get("account_id"), r.get("stock_code"), r.get("order_type"), r.get("traded_id"),
-             r.get("traded_time"), r.get("traded_price"), r.get("traded_volume"),
-             r.get("traded_amount"), r.get("order_id"), r.get("received_at", "")),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO trades(account_id,stock_code,order_type,traded_id,traded_time,"
+                "traded_price,traded_volume,traded_amount,order_id,received_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (r.get("account_id"), r.get("stock_code"), r.get("order_type"), r.get("traded_id"),
+                 r.get("traded_time"), r.get("traded_price"), r.get("traded_volume"),
+                 r.get("traded_amount"), r.get("order_id"), r.get("received_at", "")),
+            )
+            self._conn.commit()
 
     def insert_order(self, r):
-        self._conn.execute(
-            "INSERT INTO orders(account_id,stock_code,order_id,order_sysid,order_time,order_type,"
-            "order_volume,price_type,price,traded_volume,traded_price,order_status,status_msg,received_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (r.get("account_id"), r.get("stock_code"), r.get("order_id"), r.get("order_sysid"),
-             r.get("order_time"), r.get("order_type"), r.get("order_volume"), r.get("price_type"),
-             r.get("price"), r.get("traded_volume"), r.get("traded_price"), r.get("order_status"),
-             r.get("status_msg"), r.get("received_at", "")),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO orders(account_id,stock_code,order_id,order_sysid,order_time,order_type,"
+                "order_volume,price_type,price,traded_volume,traded_price,order_status,status_msg,received_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (r.get("account_id"), r.get("stock_code"), r.get("order_id"), r.get("order_sysid"),
+                 r.get("order_time"), r.get("order_type"), r.get("order_volume"), r.get("price_type"),
+                 r.get("price"), r.get("traded_volume"), r.get("traded_price"), r.get("order_status"),
+                 r.get("status_msg"), r.get("received_at", "")),
+            )
+            self._conn.commit()
 
-    def insert_alert(self, rule, stock_code, message, triggered_at):
-        self._conn.execute(
-            "INSERT INTO alerts(rule,stock_code,message,triggered_at) VALUES(?,?,?,?)",
-            (rule, stock_code or "", message, triggered_at),
-        )
-        self._conn.commit()
+    def insert_alert(self, rule, stock_code, message, triggered_at, window_minutes=60) -> bool:
+        """同规则同代码 60 分钟内不重复写。返回 True=已插入, False=被去重跳过。"""
+        code = stock_code or ""
+        with self._lock:
+            dt = None
+            try:
+                dt = datetime.strptime(triggered_at, "%Y-%m-%d %H:%M:%S")
+            except (TypeError, ValueError):
+                dt = None
+            if dt is not None:
+                cutoff = (dt - timedelta(minutes=window_minutes)).strftime("%Y-%m-%d %H:%M:%S")
+                row = self._conn.execute(
+                    "SELECT 1 FROM alerts WHERE rule=? AND stock_code=? AND triggered_at >= ? LIMIT 1",
+                    (rule, code, cutoff),
+                ).fetchone()
+                if row is not None:
+                    return False  # 窗口内有同规则同代码告警 -> 去重
+            # 时间无法解析时 fail-open: 直接插入, 不中断告警
+            self._conn.execute(
+                "INSERT INTO alerts(rule,stock_code,message,triggered_at) VALUES(?,?,?,?)",
+                (rule, code, message, triggered_at),
+            )
+            self._conn.commit()
+            return True
 
     # ---------- queries ----------
     def _rows(self, sql, args=()):
-        return [dict(zip([d[0] for d in self._conn.execute(sql, args).description],
-                         row)) for row in self._conn.execute(sql, args).fetchall()]
+        with self._lock:
+            cur = self._conn.execute(sql, args)
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
 
     def latest_asset(self, account_id=None):
         sql = "SELECT * FROM account_assets"

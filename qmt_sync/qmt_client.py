@@ -33,13 +33,13 @@ class QmtCallback:
     def __init__(self, engine):
         self._engine = engine
 
-    def on_stock_trade(self, trader, account, trade):
+    def on_stock_trade(self, trade):
         try:
             self._engine.on_trade(trade)
         except Exception as exc:  # noqa: BLE001
             logger.exception("on_stock_trade failed: %s", exc)
 
-    def on_stock_order(self, trader, account, order):
+    def on_stock_order(self, order):
         try:
             self._engine.on_order(order)
         except Exception as exc:  # noqa: BLE001

@@ -28,3 +28,22 @@ def test_prev_day_asset(tmp_path):
     db.insert_asset("A", 99000.0, 0, 0, 0, "2026-08-12 10:00:00")
     prev = db.prev_day_last_asset("A", "2026-08-12")
     assert prev["total_asset"] == 100000.0
+
+def test_alert_60min_dedup(tmp_path):
+    db = QmtDb(str(tmp_path / "t.db"))
+    assert db.insert_alert("position_ratio", "600000.SH", "m1", "2026-08-12 10:00:00") is True
+    # 同规则同代码 30 分钟后 -> 去重, 返回 False, 不落库
+    assert db.insert_alert("position_ratio", "600000.SH", "m2", "2026-08-12 10:30:00") is False
+    assert len(db.query_alerts()) == 1
+    # 不同代码 -> 插入
+    assert db.insert_alert("position_ratio", "600519.SH", "m3", "2026-08-12 10:30:00") is True
+    # 同规则同代码 61 分钟后 -> 插入
+    assert db.insert_alert("position_ratio", "600000.SH", "m4", "2026-08-12 11:01:00") is True
+    assert len(db.query_alerts()) == 3
+
+def test_alert_dedup_fail_open_on_bad_time(tmp_path):
+    db = QmtDb(str(tmp_path / "t.db"))
+    # 非法时间戳 -> fail-open, 直接插入(不中断告警)
+    assert db.insert_alert("daily_loss", "", "m1", "not-a-time") is True
+    assert db.insert_alert("daily_loss", "", "m2", "not-a-time") is True
+    assert len(db.query_alerts()) == 2

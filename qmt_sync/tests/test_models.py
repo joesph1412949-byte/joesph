@@ -19,4 +19,12 @@ def test_trade_from_xt():
                          traded_volume=100, traded_amount=850.0, order_id="o1")
     t = TradeRecord.from_xt(xt)
     assert t.traded_volume == 100 and t.stock_code == "600000.SH"
+    assert t.traded_time == "2026-08-12 09:30:00"  # 紧凑时间被规整
     assert t.received_at and len(t.received_at) == 19
+
+def test_trade_from_xt_noncompact_time():
+    xt = SimpleNamespace(account_id="8888", stock_code="600000.SH", order_type=23,
+                         traded_id="t10", traded_time="2026-08-12 09:30:00", traded_price=8.5,
+                         traded_volume=100, traded_amount=850.0, order_id="o1")
+    t = TradeRecord.from_xt(xt)
+    assert t.traded_time == "2026-08-12 09:30:00"  # 非紧凑时间原样透传
