@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
-"""四模型评分：首板/妖股/势能/节点 + 综合分 + 组合分级 + 强弱区间。"""
+"""三模型个股评分(首板/妖股/势能) + 节点(仅市场闸门) + 综合分 + 组合分级 + 强弱区间。
+综合分 = first_board*0.30 + monster*0.30 + momentum*0.25 (最高 5.95);
+分级用 best/second 绝对阈值; 强弱区间纯按最强模型分, 与节点无关。"""
 
 # 模型权重(节点已退出个股综合分, 只当市场闸门)
 MODEL_WEIGHTS = {
@@ -19,7 +21,10 @@ MODEL_FACTORS = {
 
 class ModelScorer:
     def score_stock(self, factors):
-        """输入完整因子字典 {因子: 0/1}，返回模型评分结果。缺失因子按0计。"""
+        """输入完整因子字典 {因子: 0/1}，返回模型评分结果。缺失因子按0计。
+        综合分 = first_board*0.30 + monster*0.30 + momentum*0.25 (最高 5.95);
+        分级: A best≥6 / B best≥5 且 second≥3 / C best≥4 / D best≥3 / else E;
+        强弱区间纯按最强模型分, 与节点无关。"""
         model_scores = {}
         for model, names in MODEL_FACTORS.items():
             model_scores[model] = sum(1 for n in names if factors.get(n) == 1)

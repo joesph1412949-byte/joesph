@@ -102,9 +102,15 @@ class ScreenRunner:
                 auto = {}
             # 合并手填因子 + 东财个股因子(Y1/Y5/F7/Y7/S5/Y6/Y2), 失败自动跳过 → 回落手填
             float_mv = (lu.get("float_volume") or 0) * (lu.get("last") or 0)
-            fund = self.fund_feed.compute_for_stock(code, float_mv=float_mv)
+            try:
+                fund = self.fund_feed.compute_for_stock(code, float_mv=float_mv)
+            except Exception as e:
+                # 东财因子整体失败 → 按空因子处理, 绝不 500
+                logger.warning("东财个股因子 %s 计算失败, 按空因子处理: %r", code, e)
+                fund = {}
             auto_plus = dict(auto)
-            auto_plus.update({k: v["score"] for k, v in fund.items()})
+            auto_plus.update({k: (v.get("score") if isinstance(v, dict) else 0)
+                              for k, v in fund.items()})
             factors = self.store.merge(auto_plus, code)
             scores = self.scorer.score_stock(factors)
             # 来源: QMT自动 / 东财fundamental / 手填manual

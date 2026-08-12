@@ -92,7 +92,13 @@ class FundamentalFeed:
 
     def _ztpool(self, date_yyyymmdd):
         """getTopicZTPool → data.pool 列表; 非交易日(data.pool==null)/空 → None。
-        请求失败 / 解析失败 → 抛异常(由 compute_for_stock 捕获, 该因子 fail-open)。"""
+        按日缓存键 'ztpool:YYYYMMDD' 与各股票无关, 一天只请求一次(全股票共用);
+        结果无论 list 还是 None(非交易日)都缓存, 避免每只股重复请求同日池。
+        请求失败 / 解析失败 → 抛异常(不写缓存, 由 compute_for_stock 捕获, 该因子 fail-open)。"""
+        cache_key = "ztpool:%s" % date_yyyymmdd
+        if cache_key in self._cache:
+            cached = self._cache[cache_key]
+            return list(cached) if isinstance(cached, list) else None
         resp = self.http_get(
             "https://push2ex.eastmoney.com/getTopicZTPool",
             params={"ut": "7eea3edcaed734bea9cbfc24409ed989", "dpt": "wz.ztzt",
@@ -103,11 +109,17 @@ class FundamentalFeed:
         d = resp.json()
         data = d.get("data") if isinstance(d, dict) else None
         if data is None:
+            self._cache[cache_key] = None
             return None
         pool = data.get("pool")
         if pool is None:
+            self._cache[cache_key] = None
             return None
-        return pool if isinstance(pool, list) else []
+        result = pool if isinstance(pool, list) else []
+        self._cache[cache_key] = result
+        if self.cache_path:
+            self._save_cache()
+        return result
 
     def _hybk_history(self):
         """近 RECENT_DAYS-1 个交易日的全部涨停池 hybk 集合(按日缓存, 全股票共用)。
@@ -288,9 +300,12 @@ class FundamentalFeed:
         if key in self._cache:
             return dict(self._cache[key])
         out = {}
-        y1 = self._small_cap(float_mv)
-        if y1:
-            out["Y1"] = y1
+        try:
+            y1 = self._small_cap(float_mv)
+            if y1:
+                out["Y1"] = y1
+        except Exception as e:
+            logger.warning("东财因子 %s(%s) 计算失败, 回落手填: %r", "Y1", code, e)
         for name, fn in [("Y5", self._concepts), ("F7", self._novel_concept),
                          ("Y7", self._dragon_tiger), ("S5", self._financing),
                          ("Y2", self._shareholders), ("Y6", self._event)]:

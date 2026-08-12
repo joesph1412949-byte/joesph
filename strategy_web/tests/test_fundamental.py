@@ -308,6 +308,15 @@ def test_compute_for_stock_never_raises_on_http_failure():
     assert out["Y1"]["score"] == 1
 
 
+def test_compute_for_stock_non_numeric_float_mv_fails_open_y1():
+    # 非数值 float_mv(如字符串)→ Y1 被捕获跳过, compute_for_stock 不抛、不崩(fail-open)
+    http = FakeHTTP(_base_routes())
+    f = FundamentalFeed(http_get=http, cache_path=None)
+    out = f.compute_for_stock("000001.SZ", float_mv="not-a-number")
+    assert "Y1" not in out
+    assert set(out.keys()) <= {"Y5", "F7", "Y7", "Y2", "Y6"}
+
+
 def test_compute_for_stock_y1_zero_still_cached():
     f = FundamentalFeed(http_get=FakeHTTP(default_exc=RuntimeError("down")),
                         cache_path=None)
@@ -340,5 +349,29 @@ def test_hybk_history_cached_shared_across_stocks():
     f.compute_for_stock("000001.SZ")
     n_first = len(http.calls)
     f.compute_for_stock("000002.SZ")
-    # 第二只股只多 1 次今日池请求(Y5/Y7/Y2/Y6 共 4 次端点 + 今日池 1 次), 不再回溯历史
-    assert len(http.calls) - n_first == 5
+    # 第二只股只多 4 次请求(Y5/Y7/Y2/Y6): 今日池与历史池均已按日缓存, 不再回溯历史
+    assert len(http.calls) - n_first == 4
+
+
+def test_ztpool_today_cached_shared_across_stocks():
+    # 今日涨停池按日缓存(ztpool:YYYYMMDD): 两只股对今日池总共只发 1 次请求
+    pool_by_date = {
+        dk(0): [_pool_row("000001", "全新技术题材"), _pool_row("000002", "另一个新题材")],
+        dk(1): [_pool_row("999999", "旧题材A")],
+        dk(3): [_pool_row("999999", "旧题材B")],
+        dk(4): [_pool_row("999999", "旧题材C")],
+        dk(5): [_pool_row("999999", "旧题材D")],
+    }
+    http = FakeHTTP(_base_routes(pool_by_date=pool_by_date))
+    f = FundamentalFeed(http_get=http, cache_path=None)
+    today = dk(0)
+    f.compute_for_stock("000001.SZ")
+    ztpool_after_first = [u for u, p in http.calls if "getTopicZTPool" in u]
+    assert sum(1 for u, p in http.calls
+               if "getTopicZTPool" in u and (p or {}).get("date") == today) == 1
+    f.compute_for_stock("000002.SZ")
+    ztpool_total = [u for u, p in http.calls if "getTopicZTPool" in u]
+    # 第二只股零 ztpool 请求(今日池与历史池均命中缓存), 今日池总数仍为 1
+    assert len(ztpool_total) == len(ztpool_after_first)
+    assert sum(1 for u, p in http.calls
+               if "getTopicZTPool" in u and (p or {}).get("date") == today) == 1

@@ -29,6 +29,10 @@ __pycache__/
 *.pyo
 .pytest_cache/
 
+# Runtime data (auto-generated, never commit)
+fundamental_cache.json
+manual_factors.json
+
 # OS
 .DS_Store
 Thumbs.db

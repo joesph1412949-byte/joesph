@@ -98,10 +98,22 @@ class FakeScorer:
     def score_stock(self, factors):
         fb = sum(1 for n in ["F1","F2","F3","F4","F5","F6","F7"] if factors.get(n)==1)
         mo = sum(1 for n in ["Y1","Y2","Y3","Y4","Y5","Y6","Y7"] if factors.get(n)==1)
-        best = max(fb, mo)
-        grade = "A" if best >= 6 else ("B" if best >= 5 else ("C" if best >= 4 else "E"))
-        return {"first_board":fb,"monster":mo,"momentum":0,"node":0,
-                "composite":round(fb*0.3+mo*0.3,2),
+        mom = 0
+        best = max(fb, mo, mom)
+        second = sorted([fb, mo, mom])[-2]
+        # 与 models.py score_stock 的分级阈值一致
+        if best >= 6:
+            grade = "A"
+        elif best >= 5 and second >= 3:
+            grade = "B"
+        elif best >= 4:
+            grade = "C"
+        elif best >= 3:
+            grade = "D"
+        else:
+            grade = "E"
+        return {"first_board":fb,"monster":mo,"momentum":mom,"node":0,
+                "composite":round(fb*0.3+mo*0.3+mom*0.25,2),
                 "grade":grade,"strength":"强" if best>=5 else "弱","position":"50%"}
 
     def classify_market(self, node_score):
@@ -230,6 +242,22 @@ def test_screen_survives_em_feed_failure():
     assert r["environment_ok"] is True
     assert r["candidates"][0]["code"] == "002859.SZ"
     assert eng.calls[0][1] is None
+
+
+def test_screen_survives_fund_feed_failure():
+    # 东财个股因子计算抛异常 → 按空因子处理, 不 500, 手填因子仍合并
+    from models import ModelScorer
+
+    class FailingFundFeed(FakeFundFeed):
+        def compute_for_stock(self, code, float_mv=None):
+            raise RuntimeError("fund feed down")
+    r = ScreenRunner(ds=FakeDS(), engine=FakeEngine(), store=FakeStore(),
+                     scorer=ModelScorer(),
+                     em_feed=FakeEastMoneyFeed(stats=DEFAULT_EM),
+                     fund_feed=FailingFundFeed()).run()
+    cand = r["candidates"][0]
+    assert cand["factors"]["F7"] == 1              # 手填因子仍在
+    assert cand["auto_manual"]["F7"] == "manual"
 
 
 def test_screen_sorts_candidates_by_composite_desc():
