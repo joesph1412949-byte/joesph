@@ -119,3 +119,23 @@ def test_screen_writes_snapshot(client, tmp_path, monkeypatch):
     assert data["summary"]["a_count"] == 1
     # 原子写: 不残留 tmp 文件
     assert not (tmp_path / "screen_result.json.tmp").exists()
+
+
+def test_screen_latest_returns_snapshot(client, tmp_path, monkeypatch):
+    import json as _json
+    snap = tmp_path / "screen_result.json"
+    monkeypatch.setattr(app_module, "SNAPSHOT_PATH", snap)
+    client.post("/api/screen")  # 先跑一次落盘
+    r = client.get("/api/screen/latest")
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["ok"] is True
+    assert data["generated_at"]
+    assert data["candidates"][0]["code"] == "002859.SZ"
+
+
+def test_screen_latest_no_snapshot(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(app_module, "SNAPSHOT_PATH", tmp_path / "nope.json")
+    r = client.get("/api/screen/latest")
+    assert r.status_code == 404
+    assert r.get_json()["ok"] is False

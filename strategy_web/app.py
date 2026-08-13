@@ -77,6 +77,18 @@ def screen():
         return jsonify({"error": "选股失败: %r" % e}), 500
 
 
+@app.route("/api/screen/latest")
+def screen_latest():
+    if not SNAPSHOT_PATH.is_file():
+        return jsonify({"ok": False, "error": "尚未选股, 请先调用 /api/screen"}), 404
+    try:
+        data = _json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
+        data["ok"] = True
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"ok": False, "error": "快照读取失败: %r" % e}), 500
+
+
 @app.route("/api/stock/<code>/kline")
 def stock_kline(code):
     try:
