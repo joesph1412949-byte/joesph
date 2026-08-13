@@ -34,6 +34,8 @@ fundamental_cache.json
 manual_factors.json
 screen_result.json
 screen_result.json.tmp
+limitup_result.json
+limitup_result.json.tmp
 
 # OS
 .DS_Store

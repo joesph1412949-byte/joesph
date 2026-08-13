@@ -25,6 +25,7 @@ manual_store_obj = ManualStore()
 
 # 选股结果快照路径(供 /api/screen/latest 秒读; 测试可 monkeypatch)
 SNAPSHOT_PATH = Path(__file__).parent / "screen_result.json"
+LIMITUP_SNAPSHOT_PATH = Path(__file__).parent / "limitup_result.json"
 
 
 def _save_snapshot(result: dict) -> dict:
@@ -39,6 +40,18 @@ def _save_snapshot(result: dict) -> dict:
     tmp = SNAPSHOT_PATH.with_suffix(".json.tmp")
     tmp.write_text(_json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
     os.replace(tmp, SNAPSHOT_PATH)
+    return snapshot
+
+
+def _save_limitup_snapshot(limit_ups):
+    """涨停股列表落盘快照(原子写), 供 GET 秒读。"""
+    snapshot = {
+        "generated_at": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "data": limit_ups,
+    }
+    tmp = LIMITUP_SNAPSHOT_PATH.with_suffix(".json.tmp")
+    tmp.write_text(_json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, LIMITUP_SNAPSHOT_PATH)
     return snapshot
 
 
@@ -87,6 +100,74 @@ def screen_latest():
         return jsonify(data)
     except Exception as e:
         return jsonify({"ok": False, "error": "快照读取失败: %r" % e}), 500
+
+
+@app.route("/api/market/kline", methods=["GET"])
+def market_kline():
+    if not ds_obj._connected:
+        return jsonify({"error": "QMT未连接, 请先打开QMT并开启miniQMT"}), 400
+    codes = [c.strip() for c in (request.args.get("codes") or "").split(",") if c.strip()]
+    if not codes:
+        return jsonify({"error": "缺少 codes 参数"}), 400
+    days = int(request.args.get("days", 120))
+    period = request.args.get("period", "1d")
+    try:
+        kline_map = ds_obj.get_kline_bulk(codes, days=days, period=period)
+    except DataSourceError as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    data = {}
+    for code, df in kline_map.items():
+        item = {
+            "dates": [_fmt_date(t) for t in df["time"]],
+            "open": [float(x) for x in df["open"]],
+            "high": [float(x) for x in df["high"]],
+            "low": [float(x) for x in df["low"]],
+            "close": [float(x) for x in df["close"]],
+            "volume": [int(v) for v in df["volume"]],
+        }
+        if "amount" in df.columns:
+            item["amount"] = [float(a) for a in df["amount"]]
+        data[code] = item
+    if not data:
+        return jsonify({"ok": False, "error": "无法获取任何股票的K线"}), 500
+    return jsonify({"ok": True, "data": data})
+
+
+@app.route("/api/market/limitup", methods=["GET", "POST"])
+def market_limitup():
+    if request.method == "POST":
+        if not ds_obj._connected:
+            return jsonify({"error": "QMT未连接, 请先打开QMT并开启miniQMT"}), 400
+        try:
+            ticks = ds_obj.get_full_market_ticks()
+            limit_ups = ds_obj.get_limit_up_stocks(ticks)
+        except DataSourceError as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+        snap = _save_limitup_snapshot(limit_ups)
+        snap["ok"] = True
+        return jsonify(snap)
+    if not LIMITUP_SNAPSHOT_PATH.is_file():
+        return jsonify({"ok": False, "error": "尚未刷新, 请先 POST /api/market/limitup"}), 404
+    try:
+        data = _json.loads(LIMITUP_SNAPSHOT_PATH.read_text(encoding="utf-8"))
+        data["ok"] = True
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"ok": False, "error": "快照读取失败: %r" % e}), 500
+
+
+@app.route("/api/market/tick", methods=["GET"])
+def market_tick():
+    if not ds_obj._connected:
+        return jsonify({"error": "QMT未连接, 请先打开QMT并开启miniQMT"}), 400
+    codes = [c.strip() for c in (request.args.get("codes") or "").split(",") if c.strip()]
+    if not codes:
+        return jsonify({"error": "缺少 codes 参数"}), 400
+    try:
+        ticks = ds_obj.get_full_market_ticks(codes)
+    except DataSourceError as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "data": ticks})
 
 
 @app.route("/api/stock/<code>/kline")

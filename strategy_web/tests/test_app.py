@@ -139,3 +139,65 @@ def test_screen_latest_no_snapshot(client, tmp_path, monkeypatch):
     r = client.get("/api/screen/latest")
     assert r.status_code == 404
     assert r.get_json()["ok"] is False
+
+
+def test_market_kline_bulk(client, monkeypatch):
+    import pandas as pd, numpy as np
+    n = 120
+    ts = (pd.date_range("2026-01-01", periods=n, freq="B").astype("int64") // 10**6).tolist()
+    class FakeDS:
+        _connected = True
+        def get_kline_bulk(self, codes, days=120, period="1d"):
+            return {c: pd.DataFrame({"time": ts, "open": np.full(n,10.0),
+                                     "high": np.full(n,10.5), "low": np.full(n,9.5),
+                                     "close": np.full(n,10.2), "volume": np.full(n,100000),
+                                     "amount": np.full(n,1e6)}) for c in codes}
+    monkeypatch.setattr(app_module, "ds_obj", FakeDS())
+    r = client.get("/api/market/kline?codes=600000.SH,000001.SZ&days=120")
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["ok"] is True
+    assert set(data["data"].keys()) == {"600000.SH", "000001.SZ"}
+    assert len(data["data"]["600000.SH"]["close"]) == 120
+
+def test_market_kline_requires_codes(client):
+    r = client.get("/api/market/kline")
+    assert r.status_code == 400
+
+def test_market_tick(client, monkeypatch):
+    class FakeDS:
+        _connected = True
+        def get_full_market_ticks(self, codes=None):
+            return {"600000.SH": {"lastPrice": 10.5, "lastClose": 10.0}}
+    monkeypatch.setattr(app_module, "ds_obj", FakeDS())
+    r = client.get("/api/market/tick?codes=600000.SH")
+    assert r.status_code == 200
+    assert r.get_json()["data"]["600000.SH"]["lastPrice"] == 10.5
+
+def test_market_tick_requires_codes(client):
+    r = client.get("/api/market/tick")
+    assert r.status_code == 400
+
+def test_market_limitup_refresh_and_read(client, tmp_path, monkeypatch):
+    snap = tmp_path / "limitup_result.json"
+    monkeypatch.setattr(app_module, "LIMITUP_SNAPSHOT_PATH", snap)
+    class FakeDS:
+        _connected = True
+        def get_full_market_ticks(self, codes=None):
+            return {"600000.SH": {"lastPrice": 10.5}}
+        def get_limit_up_stocks(self, ticks=None):
+            return [{"code": "600000.SH", "name": "浦发银行", "last": 10.5}]
+    monkeypatch.setattr(app_module, "ds_obj", FakeDS())
+    r = client.post("/api/market/limitup")
+    assert r.status_code == 200
+    assert snap.is_file()
+    assert r.get_json()["data"][0]["code"] == "600000.SH"
+    r2 = client.get("/api/market/limitup")
+    assert r2.status_code == 200
+    assert r2.get_json()["data"][0]["code"] == "600000.SH"
+
+def test_market_limitup_no_snapshot(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(app_module, "LIMITUP_SNAPSHOT_PATH", tmp_path / "nope.json")
+    r = client.get("/api/market/limitup")
+    assert r.status_code == 404
+    assert r.get_json()["ok"] is False
