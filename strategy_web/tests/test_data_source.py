@@ -74,6 +74,7 @@ xtdata_mod.get_full_tick = _fake_get_full_tick
 xtdata_mod.get_instrument_detail_list = _fake_get_instrument_detail_list
 xtdata_mod.get_instrument_detail = lambda c: (_fake_get_instrument_detail_list([c]).get(c))
 xtdata_mod.download_history_data = lambda *a, **k: None
+xtdata_mod.download_history_data2 = lambda *a, **k: None
 xtdata_mod.get_market_data_ex = lambda *a, **k: {"002859.SZ": _make_kline_df(),
                                                   "600353.SH": _make_kline_df(),
                                                   "000001.SZ": _make_kline_df(),
@@ -191,3 +192,26 @@ def test_connect_raises_when_miniqmt_unreachable(monkeypatch):
     d = DataSource()
     with pytest.raises(DataSourceError):
         d.connect()
+
+def test_get_kline_bulk_batches_codes_once(monkeypatch):
+    calls = {"codes": None}
+    def spy_dl2(codes, period, start_time="", end_time=""):
+        calls["codes"] = list(codes)
+    monkeypatch.setattr(xtdata_mod, "download_history_data2", spy_dl2)
+    d = DataSource()
+    d._connected = True
+    k = d.get_kline_bulk(["002859.SZ", "600353.SH"], days=250)
+    assert calls["codes"] == ["002859.SZ", "600353.SH"]   # 批量下载一次
+    assert set(k.keys()) == {"002859.SZ", "600353.SH"}    # 只含请求的 codes
+
+def test_get_kline_bulk_skips_missing_code():
+    d = DataSource()
+    d._connected = True
+    k = d.get_kline_bulk(["002859.SZ", "999999.SZ"], days=250)
+    assert "002859.SZ" in k
+    assert "999999.SZ" not in k      # mock get_market_data_ex 无 999999 → 跳过
+
+def test_get_kline_bulk_requires_connect():
+    d = DataSource()
+    with pytest.raises(DataSourceError):
+        d.get_kline_bulk(["002859.SZ"])

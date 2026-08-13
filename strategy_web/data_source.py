@@ -115,6 +115,27 @@ class DataSource:
         except Exception as e:
             raise DataSourceError("获取 %s K线失败: %r" % (code, e))
 
+    def get_kline_bulk(self, codes, days=250, period="1d"):
+        """批量拉多只股票日K线, 返回 {code: DataFrame}。失败个股跳过。"""
+        if not self._connected:
+            raise DataSourceError("未连接，请先调用 connect()")
+        codes = list(codes)
+        if not codes:
+            return {}
+        try:
+            xtdata.download_history_data2(codes, period, start_time="", end_time="")
+            time.sleep(0.05)
+            k = xtdata.get_market_data_ex([], codes, period=period,
+                                          start_time="", end_time="", count=days)
+            out = {}
+            for c in codes:
+                df = (k or {}).get(c)
+                if df is not None and len(df) > 0:
+                    out[c] = df
+            return out
+        except Exception as e:
+            raise DataSourceError("批量获取K线失败: %r" % e)
+
     # ---------- instrument 详情 ----------
     def get_instrument(self, code):
         try:
