@@ -27,9 +27,6 @@ def _make_kline_df(n=120):
         "amount": np.full(n, 1e6),
     })
 
-def _fake_connect():
-    return None
-
 def _fake_get_full_tick(codes):
     return {
         "002859.SZ": {
@@ -71,7 +68,8 @@ def _fake_get_instrument_detail_list(codes):
                       "OpenDate":"19910101","ExchangeID":"SZ"}
     return out
 
-xtdata_mod.connect = _fake_connect
+# 真实 xtdata 无 connect(); 不设 connect 属性, 以捕获 connect() 误用 xtdata.connect() 的回归
+xtdata_mod.get_sector_list = lambda: ["沪深A股", "沪深B股"]
 xtdata_mod.get_full_tick = _fake_get_full_tick
 xtdata_mod.get_instrument_detail_list = _fake_get_instrument_detail_list
 xtdata_mod.get_instrument_detail = lambda c: (_fake_get_instrument_detail_list([c]).get(c))
@@ -177,3 +175,19 @@ def test_get_sector_stocks(ds):
 def test_get_index_kline(ds):
     df = ds.get_index_kline("000001.SH")
     assert "close" in df.columns
+
+
+def test_connect_probes_sector_list_and_sets_connected():
+    # 真实 xtdata 无 connect 方法, connect() 应靠 get_sector_list 探针确认链路
+    d = DataSource()
+    d.connect()
+    assert d._connected is True
+
+
+def test_connect_raises_when_miniqmt_unreachable(monkeypatch):
+    def _boom():
+        raise ConnectionError("RPC down")
+    monkeypatch.setattr(xtdata_mod, "get_sector_list", _boom)
+    d = DataSource()
+    with pytest.raises(DataSourceError):
+        d.connect()

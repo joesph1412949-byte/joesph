@@ -26,8 +26,9 @@ class DataSource:
         if xtdata is None:
             raise DataSourceError("xtquant 未安装或无法导入")
         try:
-            xtdata.connect()
-            time.sleep(1)
+            # 该 xtquant 版本无 xtdata.connect(); miniQMT 通过 RPC 自动连接,
+            # 用一次轻量行情探针确认链路可用
+            xtdata.get_sector_list()
             self._connected = True
         except Exception as e:
             raise DataSourceError("连接 QMT miniQMT 失败: %r" % e)

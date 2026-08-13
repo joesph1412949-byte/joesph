@@ -135,4 +135,7 @@ if __name__ == "__main__":
     # debug 模式(带 reloader)后台运行不稳定, 生产/常驻用 APP_DEBUG=0 关闭
     import os
     debug = os.environ.get("APP_DEBUG", "1") != "0"
+    # 本机主机名含非 UTF-8 字节(GBK), socket.getfqdn 会 UnicodeDecodeError 崩掉 werkzeug 绑定端口
+    import socket as _socket
+    _socket.getfqdn = lambda name: name
     app.run(host="127.0.0.1", port=5000, debug=debug)
