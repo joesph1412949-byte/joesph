@@ -38,7 +38,7 @@ class FactorEngine:
                    if sector_map.get(c["code"]) == sector)
 
     def compute_factors(self, code, tick, detail, ds, sector_map,
-                        limit_ups=None, market=None):
+                        limit_ups=None, market=None, kline=None, index_kline=None):
         """计算单只股票的自动因子。返回 {因子名: {"score":0/1, "note":str}}"""
         last = tick.get("lastPrice") or 0
         last_close = tick.get("lastClose") or 0
@@ -46,10 +46,11 @@ class FactorEngine:
         float_vol = detail.get("FloatVolume") or 0
         sealed = bool((tick.get("askPrice") or [0])[0] == 0)
 
-        try:
-            kline = ds.get_kline(code, days=250)
-        except Exception:
-            kline = None
+        if kline is None:
+            try:
+                kline = ds.get_kline(code, days=250)
+            except Exception:
+                kline = None
 
         out = {}
 
@@ -113,7 +114,9 @@ class FactorEngine:
         # ---- F6 大盘配合 ----
         f6 = 0
         try:
-            idx = ds.get_index_kline("000001.SH", days=30)
+            idx = index_kline
+            if idx is None:
+                idx = ds.get_index_kline("000001.SH", days=30)
             if idx is not None and len(idx) >= 21:
                 closes = idx["close"].tolist()
                 ma20 = sum(closes[-20:]) / 20

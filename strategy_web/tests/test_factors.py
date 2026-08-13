@@ -264,3 +264,26 @@ def test_N4_real_data_low_board():
     em = {"daily_counts": [20, 30, 25, 20, 30], "yesterday_codes": [], "max_boards": 4}
     m = eng.compute_market_factors(ds, ticks, limit_ups=[], em=em)
     assert m["N4"]["score"] == 0
+
+
+def test_compute_factors_uses_injected_kline_and_index():
+    # 传入 kline/index_kline 后, 不再回调 ds.get_kline/get_index_kline
+    calls = {"kline": 0, "index": 0}
+    class SpyDS(FakeDS):
+        def get_kline(self, code, days=120):
+            calls["kline"] += 1
+            return super().get_kline(code, days)
+        def get_index_kline(self, code, days=60):
+            calls["index"] += 1
+            return super().get_index_kline(code, days)
+    kline = make_kline(list(np.linspace(10, 30, 300)), [100000]*300)
+    idx = make_kline([3000]*60, [100000]*60)
+    ds = SpyDS(kline_map={"000001.SZ": kline}, index_map={"000001.SH": idx})
+    eng = FactorEngine()
+    tick = {"lastPrice":30.0,"lastClose":29.0,"sealed":True,"amount":1e6,"volume":200000}
+    detail = {"UpStopPrice":33.0,"FloatVolume":1e8}
+    r = eng.compute_factors("000001.SZ", tick, detail, ds, sector_map={},
+                            kline=kline, index_kline=idx)
+    assert calls["kline"] == 0        # 注入后不再逐只拉
+    assert calls["index"] == 0        # 注入后不再重复拉指数
+    assert "F6" in r and "S4" in r    # 用注入数据仍算得出因子
