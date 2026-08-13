@@ -103,3 +103,19 @@ def test_screen_disconnected_returns_400(client, monkeypatch):
     r = client.post("/api/screen")
     assert r.status_code == 400
     assert "QMT未连接" in r.get_json()["error"]
+
+
+def test_screen_writes_snapshot(client, tmp_path, monkeypatch):
+    import json as _json
+    snap = tmp_path / "screen_result.json"
+    monkeypatch.setattr(app_module, "SNAPSHOT_PATH", snap)
+    r = client.post("/api/screen")
+    assert r.status_code == 200
+    assert snap.is_file()
+    data = _json.loads(snap.read_text(encoding="utf-8"))
+    assert data["generated_at"]          # 非空时间戳
+    assert data["environment_ok"] is True
+    assert data["candidates"][0]["code"] == "002859.SZ"
+    assert data["summary"]["a_count"] == 1
+    # 原子写: 不残留 tmp 文件
+    assert not (tmp_path / "screen_result.json.tmp").exists()

@@ -6,6 +6,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import os
+import json as _json
+
 import datetime as _dt
 
 from flask import Flask, jsonify, render_template, request
@@ -19,6 +22,24 @@ app = Flask(__name__)
 # 全局单例（测试时可用 monkeypatch 替换）
 ds_obj = DataSource()
 manual_store_obj = ManualStore()
+
+# 选股结果快照路径(供 /api/screen/latest 秒读; 测试可 monkeypatch)
+SNAPSHOT_PATH = Path(__file__).parent / "screen_result.json"
+
+
+def _save_snapshot(result: dict) -> dict:
+    """选股成功后落盘快照(原子写), 供 latest 秒读。"""
+    snapshot = {
+        "generated_at": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "market": result.get("market"),
+        "environment_ok": result.get("environment_ok"),
+        "candidates": result.get("candidates"),
+        "summary": result.get("summary"),
+    }
+    tmp = SNAPSHOT_PATH.with_suffix(".json.tmp")
+    tmp.write_text(_json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, SNAPSHOT_PATH)
+    return snapshot
 
 
 def _get_screen_runner():
@@ -48,6 +69,7 @@ def screen():
         return jsonify({"error": "QMT未连接, 请先打开QMT并开启miniQMT"}), 400
     try:
         result = _get_screen_runner().run()
+        _save_snapshot(result)
         return jsonify(result)
     except DataSourceError as e:
         return jsonify({"error": str(e)}), 500
