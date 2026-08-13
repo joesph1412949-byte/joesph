@@ -163,6 +163,7 @@ async function showStockDetail(code) {
       api("/api/stock/" + code + "/kline"),
       api("/api/stock/" + code + "/manual"),
     ]);
+    if (kl.error) { alert("K线加载失败: " + kl.error); return; }
     renderKline(kl);
     renderFactors(state.screenResult, code, manual);
   } catch (e) { alert("加载失败: " + e); }
