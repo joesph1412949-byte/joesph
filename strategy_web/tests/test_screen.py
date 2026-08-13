@@ -45,6 +45,9 @@ class FakeDS:
                              "low": np.linspace(9,19,days), "close": np.linspace(10,20,days),
                              "volume": np.full(days,100000), "amount": np.full(days,1e6)})
 
+    def get_kline_bulk(self, codes, days=250, period="1d"):
+        return {c: self.get_kline(c, days) for c in codes}
+
     def get_instruments_bulk(self, codes):
         return {c: self.details[c] for c in codes if c in self.details}
 
@@ -155,7 +158,7 @@ def test_screen_passes_real_tick_and_detail_to_engine():
         def __init__(self):
             self.calls = []
         def compute_factors(self, code, tick, detail, ds, sector_map,
-                            limit_ups=None, market=None):
+                            limit_ups=None, market=None, kline=None, index_kline=None):
             self.calls.append((code, tick, detail))
             return FakeEngine.compute_factors(self, code, tick, detail, ds,
                                               sector_map, limit_ups, market)
@@ -304,3 +307,29 @@ def test_screen_merges_fundamental_and_marks_source():
     assert cand["auto_manual"]["Y1"] == "fundamental"
     assert cand["auto_manual"]["F1"] == "auto"     # QMT 因子
     assert cand["auto_manual"]["F7"] == "manual"   # 手填因子
+
+
+def test_screen_batches_kline_and_index_once():
+    calls = {"kline_bulk": 0, "index": 0}
+    class SpyDS(FakeDS):
+        def get_kline_bulk(self, codes, days=250, period="1d"):
+            calls["kline_bulk"] += 1
+            return {c: self.get_kline(c, days) for c in codes}
+        def get_index_kline(self, code, days=60):
+            calls["index"] += 1
+            return super().get_index_kline(code, days)
+    class SpyEngine(FakeEngine):
+        def compute_factors(self, code, tick, detail, ds, sector_map,
+                            limit_ups=None, market=None, kline=None, index_kline=None):
+            self.seen = (kline, index_kline)
+            return FakeEngine.compute_factors(self, code, tick, detail, ds,
+                                              sector_map, limit_ups, market)
+    eng = SpyEngine()
+    r = ScreenRunner(ds=SpyDS(), engine=eng, store=FakeStore(), scorer=FakeScorer(),
+                     em_feed=FakeEastMoneyFeed(stats=DEFAULT_EM),
+                     fund_feed=FakeFundFeed()).run()
+    assert r["candidates"][0]["code"] == "002859.SZ"
+    assert calls["kline_bulk"] == 1        # 批量拉一次
+    assert calls["index"] == 1             # 指数拉一次
+    assert eng.seen[0] is not None         # kline 已注入
+    assert eng.seen[1] is not None         # index_kline 已注入

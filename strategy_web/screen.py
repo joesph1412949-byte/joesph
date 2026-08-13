@@ -82,6 +82,19 @@ class ScreenRunner:
         if not result["environment_ok"]:
             return result
 
+        # 预拉指数K线 + 批量涨停股K线(提速: 避免每只涨停股重复拉取)
+        index_kline = None
+        try:
+            index_kline = self.ds.get_index_kline("000001.SH", days=30)
+        except Exception:
+            index_kline = None
+        kline_map = {}
+        if limit_ups:
+            try:
+                kline_map = self.ds.get_kline_bulk([u["code"] for u in limit_ups], days=250)
+            except Exception:
+                kline_map = {}
+
         # 5. 板块映射（供 F4/S6）
         sector_map = self._build_sector_map(limit_ups)
 
@@ -93,7 +106,9 @@ class ScreenRunner:
                 detail = {"UpStopPrice": lu.get("up_stop_price"),
                           "FloatVolume": lu.get("float_volume")}
                 auto_raw = self.engine.compute_factors(code, tick, detail, self.ds,
-                                                       sector_map, limit_ups, None)
+                                                       sector_map, limit_ups, None,
+                                                       kline=kline_map.get(code),
+                                                       index_kline=index_kline)
                 # 拍扁: compute_factors 返回 {因子:{score,note}}, merge/score 需扁平 {因子:0/1}
                 auto = {k: (v.get("score", 0) if isinstance(v, dict) else v)
                         for k, v in auto_raw.items()}
