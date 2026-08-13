@@ -109,7 +109,10 @@ def market_kline():
     codes = [c.strip() for c in (request.args.get("codes") or "").split(",") if c.strip()]
     if not codes:
         return jsonify({"error": "缺少 codes 参数"}), 400
-    days = int(request.args.get("days", 120))
+    try:
+        days = int(request.args.get("days", 120))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "days 参数非法"}), 400
     period = request.args.get("period", "1d")
     try:
         kline_map = ds_obj.get_kline_bulk(codes, days=days, period=period)

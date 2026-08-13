@@ -164,6 +164,18 @@ def test_market_kline_requires_codes(client):
     r = client.get("/api/market/kline")
     assert r.status_code == 400
 
+
+def test_market_kline_invalid_days_returns_400(client, monkeypatch):
+    class FakeDS:
+        _connected = True
+        def get_kline_bulk(self, codes, days=120, period="1d"):
+            return {}
+    monkeypatch.setattr(app_module, "ds_obj", FakeDS())
+    r = client.get("/api/market/kline?codes=600000.SH&days=abc")
+    assert r.status_code == 400
+    assert r.get_json()["ok"] is False
+    assert "days" in r.get_json()["error"]
+
 def test_market_tick(client, monkeypatch):
     class FakeDS:
         _connected = True
