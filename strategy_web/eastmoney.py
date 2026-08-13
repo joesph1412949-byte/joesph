@@ -80,7 +80,7 @@ class EastMoneyFeed:
 
     @staticmethod
     def _pool_to_stocks(pool):
-        """data.pool 条目 → [{code, name, boards}]。boards = continuousBoardCount(连板数)。"""
+        """data.pool 条目 → [{code, name, boards}]。boards = lbc(连板数, 东财真实字段)。"""
         out = []
         for item in pool or []:
             if not isinstance(item, dict):
@@ -89,7 +89,7 @@ class EastMoneyFeed:
             if not code:
                 continue
             name = item.get("n") or item.get("name") or ""
-            boards = item.get("continuousBoardCount") or 0
+            boards = item.get("lbc") or 0
             out.append({"code": str(code), "name": str(name), "boards": int(boards)})
         return out
 

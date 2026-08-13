@@ -44,8 +44,8 @@ class FakeHTTP:
 
 
 def _stocks(*pairs):
-    """构造涨停池条目: (code, name, boards) -> dict(用 continuousBoardCount 字段)"""
-    return [{"c": c, "n": n, "continuousBoardCount": b} for c, n, b in pairs]
+    """构造涨停池条目: (code, name, boards) -> dict(用东财真实字段 lbc=连板数)"""
+    return [{"c": c, "n": n, "lbc": b} for c, n, b in pairs]
 
 
 # ---------- fetch_limit_up_pool ----------
