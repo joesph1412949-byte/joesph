@@ -32,6 +32,8 @@ __pycache__/
 # Runtime data (auto-generated, never commit)
 fundamental_cache.json
 manual_factors.json
+screen_result.json
+screen_result.json.tmp
 
 # OS
 .DS_Store
