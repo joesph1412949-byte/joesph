@@ -309,12 +309,19 @@ def test_connection_error_fail_open(monkeypatch):
 
 
 def test_run_qmt_not_connected_transparent(monkeypatch):
-    import urllib.error
     def _handler(req, timeout=None):
-        raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", None, _FakeResp(400, json.dumps({"error": "QMT未连接"})))
+        return _FakeResp(400, json.dumps({"error": "QMT未连接"}))
     _patch_urlopen(monkeypatch, _handler)
     out = json.loads(StrategyScreenTool().execute(operation="run"))
     assert out["ok"] is False and "QMT未连接" in out["error"]
+
+
+def test_latest_no_snapshot_transparent(monkeypatch):
+    def _handler(req, timeout=None):
+        return _FakeResp(404, json.dumps({"ok": False, "error": "尚未选股, 请先调用 /api/screen"}))
+    _patch_urlopen(monkeypatch, _handler)
+    out = json.loads(StrategyScreenTool().execute(operation="latest"))
+    assert out["ok"] is False and "尚未选股" in out["error"]
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -384,8 +391,12 @@ class StrategyScreenTool(BaseTool):
     def _request(self, path: str, method: str, timeout: int) -> tuple[int, str]:
         req = urllib.request.Request(self._base_url + path, data=b"" if method == "POST" else None,
                                      method=method)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, resp.read().decode("utf-8")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.status, resp.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            # 非 2xx 也把 body 读出返回, 由各 operation 决定怎么透出
+            return exc.code, exc.read().decode("utf-8")
 
     def _truncate(self, data: dict, kw: dict) -> dict:
         top_n = kw.get("top_n")
@@ -409,14 +420,12 @@ class StrategyScreenTool(BaseTool):
         return json.dumps(self._truncate(data, kw), ensure_ascii=False)
 
     def _run(self, kw: dict) -> str:
-        try:
-            status, body = self._request("/api/screen", "POST", 180)
-        except urllib.error.HTTPError as exc:
+        status, body = self._request("/api/screen", "POST", 180)
+        data = json.loads(body)
+        if status != 200:
             # strategy_web 明确返回的错误(QMT未连接/选股失败)透出, 不吞
-            data = json.loads(exc.read().decode("utf-8"))
             return json.dumps({"ok": False, "error": data.get("error", "选股失败")},
                               ensure_ascii=False)
-        data = json.loads(body)
         return json.dumps(self._truncate(data, kw), ensure_ascii=False)
 
     def _health(self) -> str:
@@ -432,7 +441,7 @@ class StrategyScreenTool(BaseTool):
 cd D:/Vibe-Trading && .venv/Scripts/python.exe -m pytest tests/test_strategy_screen_tool.py -q
 ```
 
-Expected: PASS(6 tests)。
+Expected: PASS(7 tests)。
 
 - [ ] **Step 5: 验证自动注册**
 
