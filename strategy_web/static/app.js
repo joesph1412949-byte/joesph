@@ -97,10 +97,17 @@ function renderCandidates(candidates) {
     const s = c.scores;
     const tr = document.createElement("tr");
     tr.className = "grade-" + s.grade;
+    // 综合分(排名依据)醒目列: 加粗放大 + 进度条(相对上限7.0) + 按等级着色
+    const pct = Math.max(0, Math.min(100, (s.composite / 7.0) * 100));
+    const gc = "grade-" + s.grade;
     tr.innerHTML = `<td>${c.code}</td><td>${c.name}</td>
       <td>${s.first_board}</td><td>${s.monster}</td><td>${s.momentum}</td>
-      <td>${s.composite}</td>
-      <td><b>${s.grade}</b></td><td>${s.strength}</td>`;
+      <td class="composite-cell">
+        <div class="composite-value ${gc}">${s.composite}<span class="c-max">/7</span></div>
+        <div class="composite-bar"><div class="composite-bar-fill ${gc}" style="width:${pct}%"></div></div>
+      </td>
+      <td><span class="g-badge ${gc}">${s.grade}</span></td>
+      <td>${s.strength}${s.position ? `<br><span class="pos-hint">${s.position}</span>` : ""}</td>`;
     tr.style.cursor = "pointer";
     tr.onclick = () => showStockDetail(c.code);
     tbody.appendChild(tr);

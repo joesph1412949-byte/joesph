@@ -1,12 +1,34 @@
 # -*- coding: utf-8 -*-
 """数据层：封装 xtdata 的所有数据获取。
 所有方法都通过 DataSource 实例调用，便于测试时注入 mock。"""
+import inspect as _inspect
 import time
 
 try:
     from xtquant import xtdata
 except Exception:
     xtdata = None
+
+# 跨 xtquant 版本兼容：新版 download_history_data 支持 incrementally=(增量下载, 更快)；
+# 旧版(QMT 当前自带)不支持, 传了会 TypeError → K线接口 500。
+# 用签名探测一次；探测失败按"不支持"处理(不传该参数只是退化回全量下载, 结果不变,
+# 绝不会再因旧版 xtquant 崩)。
+try:
+    _DL_HAS_INCREMENTALLY = bool(
+        xtdata is not None and
+        "incrementally" in _inspect.signature(xtdata.download_history_data).parameters)
+except Exception:
+    _DL_HAS_INCREMENTALLY = False
+
+
+def _download_history(code, period, start_time="", end_time=""):
+    """跨版本下载K线。新版传 incrementally=True；旧版不传(功能等价, 仅慢一点)。"""
+    if _DL_HAS_INCREMENTALLY:
+        xtdata.download_history_data(code, period, start_time=start_time,
+                                     end_time=end_time, incrementally=True)
+    else:
+        xtdata.download_history_data(code, period, start_time=start_time,
+                                     end_time=end_time)
 
 
 class DataSourceError(Exception):
@@ -94,15 +116,14 @@ class DataSource:
             raise DataSourceError("未连接，请先调用 connect()")
         period = "1d"
         try:
-            xtdata.download_history_data(code, period, start_time="", end_time="",
-                                         incrementally=True)
+            _download_history(code, period)
             time.sleep(0.05)
             k = xtdata.get_market_data_ex([], [code], period=period,
                                           start_time="", end_time="", count=days)
             df = (k or {}).get(code)
             if df is None or len(df) == 0:
                 # 首次可能需全量下载
-                xtdata.download_history_data(code, period, incrementally=True)
+                _download_history(code, period)
                 time.sleep(0.05)
                 k = xtdata.get_market_data_ex([], [code], period=period,
                                               start_time="", end_time="", count=days)
@@ -170,8 +191,7 @@ class DataSource:
         if not self._connected:
             raise DataSourceError("未连接，请先调用 connect()")
         try:
-            xtdata.download_history_data(index_code, "1d", start_time="", end_time="",
-                                         incrementally=True)
+            _download_history(index_code, "1d")
             time.sleep(0.05)
             k = xtdata.get_market_data_ex([], [index_code], period="1d",
                                           start_time="", end_time="", count=days)

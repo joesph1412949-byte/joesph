@@ -1,14 +1,11 @@
 # -*- coding: utf-8 -*-
 """三模型个股评分(首板/妖股/势能) + 节点(仅市场闸门) + 综合分 + 组合分级 + 强弱区间。
-综合分 = first_board*0.30 + monster*0.30 + momentum*0.25 (最高 5.95);
+综合分 = 最强*0.60 + 次强*0.25 + 第三*0.15 (最高 7.0), 突出最强模型;
 分级用 best/second 绝对阈值; 强弱区间纯按最强模型分, 与节点无关。"""
 
-# 模型权重(节点已退出个股综合分, 只当市场闸门)
-MODEL_WEIGHTS = {
-    "first_board": 0.30,
-    "monster": 0.30,
-    "momentum": 0.25,
-}
+# 综合分权重(按三模型分从高到低): 最强×0.60 + 次强×0.25 + 第三×0.15, 上限 7.0。
+# 与等级/强度同源(都看最强模型), 消除"综合分与等级打架"; 突出单模型绝活, 提升区分度。
+COMPOSITE_WEIGHTS = (0.60, 0.25, 0.15)
 
 # 因子归属
 MODEL_FACTORS = {
@@ -22,7 +19,7 @@ MODEL_FACTORS = {
 class ModelScorer:
     def score_stock(self, factors):
         """输入完整因子字典 {因子: 0/1}，返回模型评分结果。缺失因子按0计。
-        综合分 = first_board*0.30 + monster*0.30 + momentum*0.25 (最高 5.95);
+        综合分 = 最强*0.60 + 次强*0.25 + 第三*0.15 (最高 7.0);
         分级: A best≥6 / B best≥5 且 second≥3 / C best≥4 / D best≥3 / else E;
         强弱区间纯按最强模型分, 与节点无关。"""
         model_scores = {}
@@ -34,13 +31,15 @@ class ModelScorer:
         mom = model_scores["momentum"]
         nd = model_scores["node"]
 
-        composite = (fb * MODEL_WEIGHTS["first_board"] +
-                     mo * MODEL_WEIGHTS["monster"] +
-                     mom * MODEL_WEIGHTS["momentum"])
+        # 综合分: 三模型分从高到低加权, 突出最强模型(与等级/强度同源)
+        ordered = sorted([fb, mo, mom], reverse=True)
+        composite = (ordered[0] * COMPOSITE_WEIGHTS[0] +
+                     ordered[1] * COMPOSITE_WEIGHTS[1] +
+                     ordered[2] * COMPOSITE_WEIGHTS[2])
 
         # 组合分级 A-E（绝对阈值，节点只当市场闸门）
-        best = max(fb, mo, mom)
-        second = sorted([fb, mo, mom])[-2]
+        best = ordered[0]
+        second = ordered[1]
         if best >= 6:
             grade = "A"
         elif best >= 5 and second >= 3:

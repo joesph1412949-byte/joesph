@@ -60,10 +60,21 @@ def _get_screen_runner():
 
 
 def _fmt_date(t):
-    """K线 time 字段转日期字符串。xtdata 返回毫秒级 epoch int；测试 mock 可能是 datetime。"""
+    """K线时间 → 'YYYY-MM-DD'。xtdata 新版 time 列是毫秒级 epoch int；
+    旧版(QMT 当前自带)无 time 列, 日期在 int64 索引(YYYYMMDD)上；测试 mock 可能是 datetime。"""
     if hasattr(t, "date"):
         return str(t.date())
+    if isinstance(t, int) and 19000000 < t < 21000000:  # YYYYMMDD 整数索引
+        s = str(t)
+        return "%s-%s-%s" % (s[:4], s[4:6], s[6:8])
     return _dt.datetime.fromtimestamp(int(t) / 1000.0).strftime("%Y-%m-%d")
+
+
+def _kline_dates(df):
+    """K线日期序列, 兼容新旧 xtquant 两种 schema: 新版有 'time' 列；旧版无该列, 日期在索引上。"""
+    if "time" in df.columns:
+        return [_fmt_date(t) for t in df["time"]]
+    return [_fmt_date(t) for t in df.index]
 
 
 @app.route("/")
@@ -121,7 +132,7 @@ def market_kline():
     data = {}
     for code, df in kline_map.items():
         item = {
-            "dates": [_fmt_date(t) for t in df["time"]],
+            "dates": _kline_dates(df),
             "open": [float(x) for x in df["open"]],
             "high": [float(x) for x in df["high"]],
             "low": [float(x) for x in df["low"]],
@@ -181,7 +192,7 @@ def stock_kline(code):
         detail = ds_obj.get_instrument(code)
         # OHLC 用于前端 ECharts 蜡烛图 (spec §4③)
         return jsonify({
-            "dates": [_fmt_date(t) for t in df["time"]],
+            "dates": _kline_dates(df),
             "opens": [float(x) for x in df["open"]],
             "closes": [float(x) for x in df["close"]],
             "highs": [float(x) for x in df["high"]],

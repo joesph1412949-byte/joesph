@@ -69,3 +69,37 @@ tr.grade-D { background: #f1f8e9; }
            background: #2980b9; }
 .src-tag.src-auto { background: #2980b9; }
 .src-tag.src-manual { background: #e67e22; }
+
+/* 综合分(排名依据)醒目列: 加粗放大 + 进度条 + 按等级着色 */
+.composite-cell { min-width: 96px; }
+.composite-value { font-size: 20px; font-weight: 800; line-height: 1.1; }
+.composite-value .c-max { font-size: 11px; font-weight: 400; color: #aaa; margin-left: 2px; }
+.composite-value.grade-A { color: #e67e22; }
+.composite-value.grade-B { color: #27ae60; }
+.composite-value.grade-C { color: #2980b9; }
+.composite-value.grade-D { color: #8bc34a; }
+.composite-bar { width: 84px; height: 5px; background: #eee; border-radius: 3px;
+                 margin-top: 4px; overflow: hidden; }
+.composite-bar-fill { height: 100%; border-radius: 3px; }
+.composite-bar-fill.grade-A { background: #e67e22; }
+.composite-bar-fill.grade-B { background: #27ae60; }
+.composite-bar-fill.grade-C { background: #2980b9; }
+.composite-bar-fill.grade-D { background: #8bc34a; }
+
+/* 等级徽标 */
+.g-badge { display: inline-block; min-width: 24px; text-align: center; padding: 2px 8px;
+           border-radius: 10px; font-weight: 700; font-size: 13px; color: #fff; }
+.g-badge.grade-A { background: #e67e22; }
+.g-badge.grade-B { background: #27ae60; }
+.g-badge.grade-C { background: #2980b9; }
+.g-badge.grade-D { background: #8bc34a; }
+
+/* 强度 + 仓位提示 */
+.pos-hint { font-size: 11px; color: #888; }
+
+/* 指标图例(避免三个指标误会) */
+.metric-legend { background: #fff8e1; border-left: 4px solid #e67e22; border-radius: 6px;
+                 padding: 10px 14px; margin-top: 12px; font-size: 13px; color: #555;
+                 line-height: 1.7; }
+.metric-legend b { color: #333; }
+.metric-legend .legend-key { font-weight: 700; color: #e67e22; }
