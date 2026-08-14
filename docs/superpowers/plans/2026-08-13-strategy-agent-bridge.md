@@ -22,42 +22,49 @@
 | 目标 | 解释器 | 命令 |
 |------|--------|------|
 | strategy_web 测试 | Python 3.12 | `cd d:/cc-joesph/strategy_web && C:/Users/28037/AppData/Local/Programs/Python/Python312/python.exe -m pytest tests/ -q` |
-| Vibe-Trading 工具测试 | venv 3.12 | `cd D:/Vibe-Trading && .venv/Scripts/python.exe -m pytest tests/test_strategy_screen_tool.py -q` |
+| Vibe-Trading 工具测试 | venv 3.12 | `cd D:/Vibe-Trading && .venv/Scripts/python.exe -m pytest agent/tests/test_strategy_screen_tool.py -q` |
 
 ---
 
 ### Task 0: 给 Python 3.7 装 strategy_web 运行依赖
 
 **Files:**
-- 无代码改动(纯环境准备)
+- 无代码改动(纯环境准备, 已由 controller 执行完成)
 
-**说明:** strategy_web 运行时需 `xtdata`(Py3.7 已有)+ flask/requests/numpy/pandas。Python 3.7 已 EOL,numpy/pandas 必须 pin 到兼容旧版本,否则装不上或运行崩。
+**说明:** strategy_web 运行时需 `xtdata`(xtquant)+ flask/requests/numpy/pandas。Python 3.7 已 EOL,依赖必须 pin 兼容版本。**关键坑: 不能把整个 `D:\QMT\bin.x64\Lib\site-packages` 挂进 PYTHONPATH** —— 那里有 QMT 自带的 numpy 1.19.1 / pandas 0.22.0(cp36 二进制),会污染 Py3.7 的 numpy/pandas 导致 import 失败。正确做法: 用目录 junction 把 xtquant 单独链接进 Py3.7。
 
-- [ ] **Step 1: 安装依赖(兼容 Python 3.7 的版本)**
+- [ ] **Step 1: 安装依赖(flask 必须 2.1.x, 2.2.x 在 Py3.7 上因 Werkzeug unbound_message 崩)**
 
 ```bash
+export NO_PROXY='*' no_proxy='*' HTTP_PROXY='' HTTPS_PROXY='' http_proxy='' https_proxy=''
 /c/Users/28037/AppData/Local/Programs/Python/Python37/python.exe -m pip install \
-  "numpy==1.21.6" "pandas==1.3.5" "flask==2.2.5" "requests==2.31.0" \
+  "numpy==1.21.6" "pandas==1.3.5" "flask==2.1.3" "requests==2.31.0" \
   -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-- [ ] **Step 2: 验证导入**
+- [ ] **Step 2: 把 xtquant 链接进 Py3.7(目录 junction, 不复制 42MB)**
 
 ```bash
-PYTHONPATH=/d/QMT/bin.x64/Lib/site-packages /c/Users/28037/AppData/Local/Programs/Python/Python37/python.exe -c "import xtquant.xtdata, flask, numpy, pandas, requests; print('all OK')"
+powershell.exe -NoProfile -Command "New-Item -ItemType Junction -Path 'C:\Users\28037\AppData\Local\Programs\Python\Python37\Lib\site-packages\xtquant' -Target 'D:\QMT\bin.x64\Lib\site-packages\xtquant'"
 ```
 
-Expected: 打印 `all OK`。
-
-- [ ] **Step 3: 验证 strategy_web 可 import(离线, 不连 QMT)**
+- [ ] **Step 3: 验证导入(不带 PYTHONPATH)**
 
 ```bash
-cd /d/cc-joesph/strategy_web && PYTHONPATH=/d/QMT/bin.x64/Lib/site-packages /c/Users/28037/AppData/Local/Programs/Python/Python37/python.exe -c "import app; print('app imports OK')"
+/c/Users/28037/AppData/Local/Programs/Python/Python37/python.exe -c "import xtquant.xtdata, flask, numpy, pandas, requests; print('all OK')"
+```
+
+Expected: 打印 `all OK`(numpy 1.21.6 / pandas 1.3.5 / flask 2.1.3)。
+
+- [ ] **Step 4: 验证 strategy_web 可 import(离线, 不连 QMT)**
+
+```bash
+cd /d/cc-joesph/strategy_web && /c/Users/28037/AppData/Local/Programs/Python/Python37/python.exe -c "import app; print('app imports OK')"
 ```
 
 Expected: 打印 `app imports OK`(xtdata 在 try/except 内, 连接与否不影响 import)。
 
-> 若 Step 1 报 numpy/pandas 无兼容 wheel(3.7),改用 `numpy==1.20.3 pandas==1.2.5`;若 factors.py/fundamental.py 用到 pandas 2.x 新 API,需在 Task 1/2 实施时按 1.3.5 兼容改写(记录为 deviation)。
+> 网络: pip 走系统代理(127.0.0.1:7897)时若代理工具没开会 ProxyError, 需先 `export NO_PROXY='*'` 绕过。
 
 ---
 
@@ -326,7 +333,7 @@ def test_latest_no_snapshot_transparent(monkeypatch):
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `cd D:/Vibe-Trading && .venv/Scripts/python.exe -m pytest tests/test_strategy_screen_tool.py -q`
+Run: `cd D:/Vibe-Trading && .venv/Scripts/python.exe -m pytest agent/tests/test_strategy_screen_tool.py -q`
 Expected: FAIL — `ModuleNotFoundError: No module named 'src.tools.strategy_screen_tool'`。
 
 - [ ] **Step 3: 实现工具**
@@ -446,10 +453,10 @@ Expected: PASS(7 tests)。
 - [ ] **Step 5: 验证自动注册**
 
 ```bash
-cd D:/Vibe-Trading && .venv/Scripts/python.exe -c "from src.tools import build_registry; print('strategy_screen' in build_registry().tool_names)"
+cd D:/Vibe-Trading && .venv/Scripts/python.exe -c "from src.tools import build_registry; print('strategy_screen' in build_registry())"
 ```
 
-Expected: 打印 `True`。
+Expected: 打印 `True`(ToolRegistry 支持 `in` 成员判断)。
 
 - [ ] **Step 6: 提交(D:\Vibe-Trading 仓库)**
 
@@ -498,7 +505,9 @@ PROCS = [
         "name": "strategy_web",
         "cmd": [PY37, "app.py"],
         "cwd": r"d:\cc-joesph\strategy_web",
-        "env": {"PYTHONPATH": QMT_LIB, "APP_DEBUG": "0"},
+        # 不带 PYTHONPATH: xtquant 已通过 junction 链接进 Py3.7 site-packages,
+        # 挂 QMT_LIB 会污染 numpy/pandas (QMT 自带 cp36 二进制)
+        "env": {"APP_DEBUG": "0"},
     },
     {
         "name": "vibe_backend",

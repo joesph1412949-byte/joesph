@@ -103,10 +103,11 @@ class EastMoneyFeed:
         return self._pool_to_stocks(pool)
 
     def get_market_stats(self):
-        """尽力而为，绝不抛异常。返回 {"daily_counts","yesterday_codes","max_boards"} 或 None。
+        """尽力而为，绝不抛异常。返回 {"daily_counts","yesterday_codes","yesterday_boards","max_boards"} 或 None。
         - daily_counts: 今天之前最近 5 个交易日（回溯算法）的涨停家数，近→远。
           凑齐 <3 个交易日 → 返回 None（不可用）。
         - yesterday_codes: 最近一个交易日的涨停代码列表。
+        - yesterday_boards: 最近一个交易日中连板数≥2 的代码列表（供 N4 晋级率计算）。
         - max_boards: 今日涨停池的最高连板数（今日非交易日/空池 → 0）。
         任一步失败（EastMoneyError）→ 返回 None，调用方回退到代理算法。"""
         today = date.today()
@@ -119,6 +120,7 @@ class EastMoneyFeed:
 
         daily_counts = []
         yesterday_codes = []
+        yesterday_boards = []
         first_day_found = False
         day = today - timedelta(days=1)
         # 回溯上限：覆盖春节/十一等长假，同时防止无限循环
@@ -139,6 +141,8 @@ class EastMoneyFeed:
             # 若最近交易日空池(0家), 需让 yesterday_codes 保持 [] → N3 走兜底, 不能误取更早一天。
             if not first_day_found:
                 yesterday_codes = [s["code"] for s in stocks]
+                # 连板≥2 的代码列表 → N4 晋级率(昨日连板股今日继续涨停占比)
+                yesterday_boards = [s["code"] for s in stocks if s["boards"] >= 2]
                 first_day_found = True
             day -= timedelta(days=1)
 
@@ -147,5 +151,6 @@ class EastMoneyFeed:
         return {
             "daily_counts": daily_counts,
             "yesterday_codes": yesterday_codes,
+            "yesterday_boards": yesterday_boards,
             "max_boards": max_boards,
         }

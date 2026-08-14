@@ -196,3 +196,49 @@ def test_get_market_stats_never_raises():
     http = FakeHTTP({today.strftime("%Y%m%d"): RuntimeError("down")})
     feed = EastMoneyFeed(http_get=http)
     assert feed.get_market_stats() is None
+
+
+def test_get_market_stats_yesterday_boards_collected():
+    # 回归(修复): N4 晋级率需要"昨日连板≥2"的代码列表 → get_market_stats 必须携带。
+    today = date.today()
+
+    def d(offset):
+        return (today - timedelta(days=offset)).strftime("%Y%m%d")
+
+    http = FakeHTTP({
+        d(0): {"data": {"pool": _stocks(("000001", "A", 4), ("000002", "B", 1))}},
+        d(1): {"data": {"pool": _stocks(("000010", "X", 2), ("000011", "Y", 1),
+                                         ("000012", "Z", 5))}},
+        d(2): {"data": {"pool": None}},
+        d(3): {"data": {"pool": _stocks(("000020", "W", 1))}},
+        d(4): {"data": {"pool": _stocks(("000021", "V", 1))}},
+        d(5): {"data": {"pool": _stocks(("000022", "U", 1))}},
+        d(6): {"data": {"pool": _stocks(("000023", "T", 1))}},
+    })
+    stats = EastMoneyFeed(http_get=http).get_market_stats()
+    assert stats is not None
+    # 最近交易日(d1)涨停池: 000010(2板) / 000011(1板) / 000012(5板)
+    # → yesterday_codes 全部, yesterday_boards 只收连板≥2 的
+    assert stats["yesterday_codes"] == ["000010", "000011", "000012"]
+    assert stats["yesterday_boards"] == ["000010", "000012"]
+
+
+def test_get_market_stats_yesterday_boards_empty_when_all_first_boards():
+    today = date.today()
+
+    def d(offset):
+        return (today - timedelta(days=offset)).strftime("%Y%m%d")
+
+    http = FakeHTTP({
+        d(0): {"data": {"pool": _stocks(("000001", "A", 1))}},
+        d(1): {"data": {"pool": _stocks(("000010", "X", 1), ("000011", "Y", 1))}},
+        d(2): {"data": {"pool": None}},
+        d(3): {"data": {"pool": _stocks(("000020", "W", 1))}},
+        d(4): {"data": {"pool": _stocks(("000021", "V", 1))}},
+        d(5): {"data": {"pool": _stocks(("000022", "U", 1))}},
+        d(6): {"data": {"pool": _stocks(("000023", "T", 1))}},
+    })
+    stats = EastMoneyFeed(http_get=http).get_market_stats()
+    assert stats is not None
+    assert stats["yesterday_codes"] == ["000010", "000011"]
+    assert stats["yesterday_boards"] == []   # 昨日全是首板(1板)

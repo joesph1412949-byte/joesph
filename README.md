@@ -92,11 +92,15 @@ python app.py
 
 ```bash
 cd strategy_web
-python -m pytest tests/ -q    # 95 passed
+python -m pytest tests/ -q    # 全部离线; 含 因子/模型/编排/东财/桥安全闸门 回归测试
 ```
 
 ## 说明
 
 - 本应用**不做真实下单**。用户明确不使用 `.REAL_ARMED` 安全臂机制,依赖 QMT 自带安全保护。
+- **真实盘桥安全闸门**(`qmt_signal_bridge_real.py`):
+  - **授权文件**:只有 `D:/QMT_SIGNALS/real/armed.txt` 存在且内容含当天日期(`YYYYMMDD`)时,pending 信号才会被消费下单,防止误触;
+  - **当日去重**:同一股票代码每个自然日最多下单一次(记录在 `D:/QMT_SIGNALS/real/placed_today.json`),防止重复发单;
+  - `strategy_close_pick.py send` 会校验候选清单生成日期(默认 3 天内,覆盖周末;过期需 `--force` 强制发送)。
 - 数据源:个股K线 / 全市场盘口 / 行业板块来自 xtquant(miniQMT);N1/N3/N4 来自东方财富公开涨停池接口。
 - 手动因子存于 `strategy_web/manual_factors.json`;损坏的 JSON 会被保留为 `manual_factors.json.corrupt-<时间戳>` 并告警,不静默覆盖。

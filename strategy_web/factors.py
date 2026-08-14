@@ -2,6 +2,9 @@
 """因子引擎：计算 24 个量化因子中能用 xtdata 数据自动算的部分。
 自动算的 16 个：F1 F2 F3 F4 F5 F6 Y3 Y4 S2 S3 S4 S6 N1 N2 N4 N5
 手填的 8 个：F7 Y1 Y2 Y5 Y6 Y7 S1 S5 S7（在 manual_store.py / 网页手填）"""
+import re
+from datetime import datetime
+
 import numpy as np
 
 
@@ -26,6 +29,31 @@ def _tick_key_for_em_code(code):
     if code.startswith(("8", "4", "92")):
         return code + ".BJ"
     return code
+
+
+def _parse_timetag_hhmm(ts):
+    """timetag → (hh, mm)。兼容三种格式:
+    - 字符串 "YYYYMMDD HH:MM:SS"(旧版 QMT)
+    - 字符串 "YYYY-MM-DD HH:MM:SS"(ISO)
+    - 毫秒级 epoch int(新版 xtquant, 见 app.py _fmt_date 注释)
+    无法解析 → None(F2 保持 0, 不误判)。"""
+    if ts is None:
+        return None
+    if isinstance(ts, (int, float)):
+        # 13位毫秒 or 10位秒
+        try:
+            sec = ts / 1000.0 if ts > 1e11 else ts
+            dt = datetime.fromtimestamp(sec)
+            return (dt.hour, dt.minute)
+        except Exception:
+            return None
+    m = re.search(r"(\d{1,2}):(\d{2})", str(ts))
+    if not m:
+        return None
+    try:
+        return (int(m.group(1)), int(m.group(2)))
+    except (TypeError, ValueError):
+        return None
 
 
 class FactorEngine:
@@ -63,10 +91,12 @@ class FactorEngine:
             # 近历史每日是否涨停: 当日收盘 >= 基于"前一日收盘"算的涨停价。
             # 只扫 closes[:-1] 排除今日——被评分的股票今日封死涨停, 今日收盘==涨停价,
             # 若不排除会把每个首板都误判成"已有涨停"→ F1 恒 0。
-            # (修复: ①排除今日, ②涨停价基于前一日收盘而非当日 close——后者的原实现
-            #  对正常正价格恒不成立, 使"近历史有涨停"分支成死代码)
+            # 窗口: 只回看最近 20 个交易日(不含今日)。修复: 原实现扫全部历史K线,
+            # 导致"250天前涨停过、近20日首板"的股票被误判为老涨停 → F1 恒 0,
+            # 与 note "近20日无涨停" 自相矛盾。
+            start = max(1, len(closes) - 20)
             prev_limit = False
-            for i in range(1, len(closes) - 1):
+            for i in range(start, len(closes) - 1):
                 limit_px = round(closes[i - 1] * (1 + ratio), 2)
                 if closes[i] >= limit_px - 0.01:
                     prev_limit = True
@@ -77,14 +107,8 @@ class FactorEngine:
         # ---- F2 早封板 ----
         f2 = 0
         if sealed:
-            ts = tick.get("timetag") or ""
-            # timetag 形如 "20260811 14:05:06"
-            try:
-                hh = int(ts.split(" ")[1].split(":")[0])
-                mm = int(ts.split(" ")[1].split(":")[1])
-                f2 = 1 if (hh, mm) <= (10, 0) else 0
-            except Exception:
-                f2 = 0
+            hm = _parse_timetag_hhmm(tick.get("timetag"))
+            f2 = 1 if hm is not None and hm <= (10, 0) else 0
         out["F2"] = {"score": f2, "note": "封板时间≤10:00" if f2 else "未封板或封板时间晚于10:00"}
 
         # ---- F3 封单强度 ----
@@ -275,24 +299,47 @@ class FactorEngine:
             n3_note = "首板股今日均涨 %.2f%% (兜底)" % avg_chg if chgs else "首板溢价为负(兜底)"
 
         # ---- N2 情绪周期 ----
+        # 修复: 原实现 if>=50 / elif>=20 两个分支都给 1, 分支逻辑无效。
+        # 改为: >=50 家直接判暖; 20~49 家需叠加封板率>60% 佐证, 否则不判暖。
         n2 = 0
         n2_note = "情绪周期判断需连板数据, 简化以涨停家数近似"
         if len(limit_ups) >= 50:
             n2 = 1
         elif len(limit_ups) >= 20:
-            n2 = 1
+            sealed_cnt = sum(1 for lu in limit_ups if lu.get("sealed"))
+            sealed_ratio = sealed_cnt / len(limit_ups) if limit_ups else 0.0
+            if sealed_ratio > 0.6:
+                n2 = 1
         n2_note = "涨停家数 %d, 情绪偏暖" % len(limit_ups) if n2 else \
                   "涨停家数 %d, 情绪偏冷" % len(limit_ups)
 
         # ---- N4 连板高度 ----
-        # 真数据(东财): 规格规则为"最高连板≥5 或 晋级率>25%"。em 只携带 max_boards
-        # (东财涨停池无晋级率数据), 晋级率>25% 子句无法从 em 计算, 故阈值仅用最高连板≥5。
+        # 真数据(东财): 规格规则为"最高连板≥5 或 晋级率>25%"。
+        # 修复: em 现携带 yesterday_boards(昨日连板≥2的代码), 可算真实晋级率:
+        #   晋级率 = 昨日连板股中今日继续涨停的数量 / 昨日连板股总数。
+        # 昨日代码为东财裸6位, 今日涨停池 code 带交易所后缀 → 用 _tick_key_for_em_code 对齐。
         n4 = 0
         max_boards = em.get("max_boards") if em else None
         if max_boards is not None:
-            n4 = 1 if max_boards >= 5 else 0
-            n4_note = "最高连板 %d 板 >= 5 (东财真数据)" % max_boards if n4 else \
-                      "最高连板 %d 板 < 5 (东财真数据)" % max_boards
+            # 晋级率: 昨日连板股今日仍涨停的占比(东财真数据)
+            yesterday_boards = em.get("yesterday_boards") or []
+            today_codes = {lu.get("code") for lu in limit_ups}
+            advanced = sum(1 for c in yesterday_boards
+                           if _tick_key_for_em_code(c) in today_codes)
+            if yesterday_boards:
+                adv_ratio = advanced / len(yesterday_boards)
+            else:
+                adv_ratio = 0.0
+            if max_boards >= 5:
+                n4 = 1
+                n4_note = "最高连板 %d 板 >= 5 (东财真数据)" % max_boards
+            elif adv_ratio > 0.25:
+                n4 = 1
+                n4_note = "昨日连板晋级率 %.0f%% > 25%% (东财真数据)" % (adv_ratio * 100)
+            else:
+                n4_note = ("最高连板 %d 板 < 5 且晋级率 %.0f%% (东财真数据)"
+                           % (max_boards, adv_ratio * 100)) if yesterday_boards else \
+                          "最高连板 %d 板 < 5 且昨日无连板股 (东财真数据)" % max_boards
         else:
             n4_note = "连板数据需历史K线, 简化以涨停家数+封板率近似"
             if len(limit_ups) >= 30:

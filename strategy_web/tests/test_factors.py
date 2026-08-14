@@ -287,3 +287,158 @@ def test_compute_factors_uses_injected_kline_and_index():
     assert calls["kline"] == 0        # 注入后不再逐只拉
     assert calls["index"] == 0        # 注入后不再重复拉指数
     assert "F6" in r and "S4" in r    # 用注入数据仍算得出因子
+
+
+# ---------- 修复回归: F1 只看近20日窗口 ----------
+
+def test_F1_old_limitup_beyond_20_days_still_first_board():
+    # 回归(修复): 原实现扫全部历史K线, 250天前某天涨停过 → 近20日首板被误判成"老涨停"。
+    # 修复后 F1 只回看最近20个交易日, 250天前的涨停不影响今日首板。
+    closes = [10.0]*100 + [11.0] + [10.0]*148 + [11.0]  # 索引100(第101天)有涨停, 今日=11.0
+    kline = make_kline(closes, [100000]*250)
+    ds = FakeDS(kline_map={"000001.SZ": kline})
+    eng = FactorEngine()
+    tick = {"lastPrice":11.0,"lastClose":10.0,"sealed":True,
+            "amount":1e6,"volume":200000}
+    detail = {"UpStopPrice":11.0,"FloatVolume":1e8}   # 今日首板在涨停价
+    r = eng.compute_factors("000001.SZ", tick, detail, ds, sector_map={})
+    assert r["F1"]["score"] == 1
+    assert "无涨停" in r["F1"]["note"]
+
+def test_F1_limitup_within_20_days_not_first_board():
+    # 反向: 近20日窗口内(如10天前)有涨停 → 今日涨停不算首板
+    closes = [10.0]*240 + [11.0, 11.0] + [12.1]  # 倒数第3天(11.0=前一日10.0的+10%)涨停
+    kline = make_kline(closes, [100000]*243)
+    ds = FakeDS(kline_map={"000001.SZ": kline})
+    eng = FactorEngine()
+    tick = {"lastPrice":12.1,"lastClose":11.0,"sealed":True,
+            "amount":1e6,"volume":200000}
+    detail = {"UpStopPrice":12.1,"FloatVolume":1e8}
+    r = eng.compute_factors("000001.SZ", tick, detail, ds, sector_map={})
+    assert r["F1"]["score"] == 0
+    assert "已有涨停" in r["F1"]["note"]
+
+
+# ---------- 修复回归: F2 timetag 兼容 epoch 毫秒 ----------
+
+def test_F2_string_timetag_early_seal():
+    ds = FakeDS()
+    eng = FactorEngine()
+    tick = {"lastPrice":11.0,"lastClose":10.0,"sealed":True,
+            "timetag":"20260811 09:30:00","amount":1e6,"volume":200000}
+    detail = {"UpStopPrice":11.0,"FloatVolume":1e8}
+    r = eng.compute_factors("000001.SZ", tick, detail, ds, sector_map={})
+    assert r["F2"]["score"] == 1
+
+def test_F2_string_timetag_late_seal():
+    ds = FakeDS()
+    eng = FactorEngine()
+    tick = {"lastPrice":11.0,"lastClose":10.0,"sealed":True,
+            "timetag":"20260811 14:05:06","amount":1e6,"volume":200000}
+    detail = {"UpStopPrice":11.0,"FloatVolume":1e8}
+    r = eng.compute_factors("000001.SZ", tick, detail, ds, sector_map={})
+    assert r["F2"]["score"] == 0
+
+def test_F2_epoch_ms_timetag_early_seal():
+    # 回归(修复): 新版 xtquant timetag 是毫秒级 epoch int, 原实现按字符串 split 直接崩 → F2 恒 0。
+    import datetime as _dt
+    ds = FakeDS()
+    eng = FactorEngine()
+    ts_ms = int(_dt.datetime(2026, 8, 11, 9, 30).timestamp() * 1000)
+    tick = {"lastPrice":11.0,"lastClose":10.0,"sealed":True,
+            "timetag":ts_ms,"amount":1e6,"volume":200000}
+    detail = {"UpStopPrice":11.0,"FloatVolume":1e8}
+    r = eng.compute_factors("000001.SZ", tick, detail, ds, sector_map={})
+    assert r["F2"]["score"] == 1
+
+def test_F2_epoch_ms_timetag_late_seal():
+    import datetime as _dt
+    ds = FakeDS()
+    eng = FactorEngine()
+    ts_ms = int(_dt.datetime(2026, 8, 11, 14, 5).timestamp() * 1000)
+    tick = {"lastPrice":11.0,"lastClose":10.0,"sealed":True,
+            "timetag":ts_ms,"amount":1e6,"volume":200000}
+    detail = {"UpStopPrice":11.0,"FloatVolume":1e8}
+    r = eng.compute_factors("000001.SZ", tick, detail, ds, sector_map={})
+    assert r["F2"]["score"] == 0
+
+def test_F2_no_timetag_keeps_zero():
+    ds = FakeDS()
+    eng = FactorEngine()
+    tick = {"lastPrice":11.0,"lastClose":10.0,"sealed":True,
+            "amount":1e6,"volume":200000}   # 无 timetag
+    detail = {"UpStopPrice":11.0,"FloatVolume":1e8}
+    r = eng.compute_factors("000001.SZ", tick, detail, ds, sector_map={})
+    assert r["F2"]["score"] == 0
+
+
+# ---------- 修复回归: N2 情绪周期区分强度 ----------
+
+def test_N2_many_limitups_warm():
+    ds = FakeDS()
+    eng = FactorEngine()
+    ticks = {"000001.SZ": {"amount": 1e12}}
+    limit_ups = [{"code": "00000%d.SZ" % i, "sealed": True} for i in range(55)]
+    m = eng.compute_market_factors(ds, ticks, limit_ups=limit_ups)
+    assert m["N2"]["score"] == 1   # >=50 直接暖
+
+def test_N2_20_49_with_high_seal_ratio_warm():
+    # 回归(修复): 原实现 20~49 家无条件给1; 修复后需封板率>60% 才判暖。
+    ds = FakeDS()
+    eng = FactorEngine()
+    ticks = {"000001.SZ": {"amount": 1e12}}
+    limit_ups = [{"code": "00000%d.SZ" % i, "sealed": (i % 5 != 0)} for i in range(30)]
+    # 封板 24/30 = 80% > 60% → 暖
+    m = eng.compute_market_factors(ds, ticks, limit_ups=limit_ups)
+    assert m["N2"]["score"] == 1
+
+def test_N2_20_49_with_very_low_seal_ratio_cold():
+    ds = FakeDS()
+    eng = FactorEngine()
+    ticks = {"000001.SZ": {"amount": 1e12}}
+    limit_ups = [{"code": "00000%d.SZ" % i, "sealed": False} for i in range(30)]
+    m = eng.compute_market_factors(ds, ticks, limit_ups=limit_ups)
+    assert m["N2"]["score"] == 0   # 封板率 0% → 不判暖
+
+
+# ---------- 修复回归: N4 昨日连板晋级率真数据 ----------
+
+def test_N4_promotion_ratio_real_data_hit():
+    ds = FakeDS()
+    eng = FactorEngine()
+    ticks = {"000001.SZ": {"amount": 1e12}}
+    em = {"daily_counts": [20, 30, 25, 20, 30],
+          "yesterday_codes": ["000001", "000002", "000003"],
+          "yesterday_boards": ["000001", "000002", "000003"],   # 昨日3只连板
+          "max_boards": 4}                                       # 今日最高连板 <5
+    # 今日涨停池含 000001.SZ 与 000002.SZ → 晋级 2/3 = 66.7% > 25% → N4=1
+    limit_ups = [{"code": "000001.SZ"}, {"code": "000002.SZ"}]
+    m = eng.compute_market_factors(ds, ticks, limit_ups=limit_ups, em=em)
+    assert m["N4"]["score"] == 1
+    assert "晋级率" in m["N4"]["note"]
+
+def test_N4_promotion_ratio_real_data_miss():
+    ds = FakeDS()
+    eng = FactorEngine()
+    ticks = {"000001.SZ": {"amount": 1e12}}
+    em = {"daily_counts": [20, 30, 25, 20, 30],
+          "yesterday_codes": ["000001", "000002", "000003"],
+          "yesterday_boards": ["000001", "000002", "000003"],
+          "max_boards": 4}   # 最高连板<5 且 晋级率 0/3=0% ≤25% → N4=0
+    limit_ups = [{"code": "600000.SH"}]   # 今日涨停不含昨日连板股
+    m = eng.compute_market_factors(ds, ticks, limit_ups=limit_ups, em=em)
+    assert m["N4"]["score"] == 0
+
+def test_N4_high_boards_still_wins_with_low_ratio():
+    # 最高连板>=5 优先满足 → 即使晋级率低也判1(规格"或"关系)
+    ds = FakeDS()
+    eng = FactorEngine()
+    ticks = {"000001.SZ": {"amount": 1e12}}
+    em = {"daily_counts": [20, 30, 25, 20, 30],
+          "yesterday_codes": ["000001"],
+          "yesterday_boards": ["000001"],
+          "max_boards": 6}
+    limit_ups = [{"code": "600000.SH"}]   # 晋级率 0%
+    m = eng.compute_market_factors(ds, ticks, limit_ups=limit_ups, em=em)
+    assert m["N4"]["score"] == 1
+    assert "最高连板" in m["N4"]["note"]

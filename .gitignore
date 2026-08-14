@@ -45,6 +45,21 @@ Thumbs.db
 .claude/
 .superpowers/
 
+# 本地量化运行数据(绝不提交)
+QMT_SIGNALS/
+close_pick_state.json
+qmt_signal_bridge.py.bak
+log/
+pickle_cache/
+git_ignore_folder/
+nb_dump.txt
+path.txt
+
+# 第三方 clone / 杂物
+ppt-master-main/
+Stock/
+文件桥接.ipynb
+
 # Downloaded plugins source
 superpowers-main/
 

@@ -10,6 +10,7 @@ import os
 import json as _json
 
 import datetime as _dt
+import threading as _threading
 
 from flask import Flask, jsonify, render_template, request
 
@@ -22,6 +23,9 @@ app = Flask(__name__)
 # 全局单例（测试时可用 monkeypatch 替换）
 ds_obj = DataSource()
 manual_store_obj = ManualStore()
+
+# 选股单飞锁: /api/screen 同时只允许一个选股流程(耗时 1~2 分钟)
+_screen_lock = _threading.Lock()
 
 # 选股结果快照路径(供 /api/screen/latest 秒读; 测试可 monkeypatch)
 SNAPSHOT_PATH = Path(__file__).parent / "screen_result.json"
@@ -91,6 +95,10 @@ def health():
 def screen():
     if not ds_obj._connected:
         return jsonify({"error": "QMT未连接, 请先打开QMT并开启miniQMT"}), 400
+    # 单飞锁: 选股耗时 1~2 分钟, 浏览器连点会并发跑多个选股同时打爆东财接口。
+    # 进行中再请求 → 409 提示稍候(不排队)。
+    if not _screen_lock.acquire(blocking=False):
+        return jsonify({"error": "选股进行中, 请稍候(上次选股尚未完成)"}), 409
     try:
         result = _get_screen_runner().run()
         _save_snapshot(result)
@@ -99,6 +107,8 @@ def screen():
         return jsonify({"error": str(e)}), 500
     except Exception as e:
         return jsonify({"error": "选股失败: %r" % e}), 500
+    finally:
+        _screen_lock.release()
 
 
 @app.route("/api/screen/latest")

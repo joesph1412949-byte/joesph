@@ -129,7 +129,7 @@ Vibe-Trading agent ──strategy_screen 工具──┤
 用 `start` 后台拉起四进程,各自指定正确解释器与工作目录:
 
 1. qmt_sync(watch 模式):`Python37\python.exe -m qmt_sync --account-id 88869979`,cwd `d:\cc-joesph`,env `PYTHONPATH=D:\QMT\bin.x64\Lib\site-packages`
-2. strategy_web:`Python37\python.exe app.py`,cwd `d:\cc-joesph\strategy_web`,env 同上 + `APP_DEBUG=0`
+2. strategy_web:`Python37\python.exe app.py`,cwd `d:\cc-joesph\strategy_web`,env `APP_DEBUG=0`(**不带 PYTHONPATH**——xtquant 已通过 junction 链接进 Py3.7 site-packages,挂整个 QMT 目录会污染 numpy/pandas)
 3. Vibe-Trading 后端:`D:\Vibe-Trading\.venv\Scripts\vibe-trading.exe serve --port 8899`,cwd `D:\Vibe-Trading`
 4. Vibe-Trading 前端:`npm run dev`,cwd `D:\Vibe-Trading\frontend`
 
