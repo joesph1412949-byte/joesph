@@ -69,6 +69,7 @@ class DataProvider:
         from prism.context import FactorContext
         ticks = {}
         limit_ups = []
+        index_kline = None
         if self.connected:
             try:
                 ticks = self.ds.get_full_market_ticks()
@@ -79,9 +80,14 @@ class DataProvider:
             # 不再重复全市场拉取。仅预热非空结果, 失败/空不写缓存(保持可重试)。
             if limit_ups and self._limit_ups_cache is None:
                 self._limit_ups_cache = limit_ups
+            # N1 兜底需要 880368 涨停指数(迁移规则: ds.get_index_kline→ctx.index_kline)
+            try:
+                index_kline = self.ds.get_index_kline("880368.SH", days=8)
+            except Exception:
+                index_kline = None
         em = self.get_market_stats()
         ctx = FactorContext(code="__MARKET__", ticks=ticks, limit_ups=limit_ups,
-                            em=em or {})
+                            em=em or {}, index_kline=index_kline)
         return ctx
 
     def build_stock_context(self, code, kline=None, index_kline=None,
@@ -90,6 +96,7 @@ class DataProvider:
         from prism.context import FactorContext
         tick = {}
         float_mv = None
+        float_vol = None
         if self.connected:
             try:
                 ticks = self.ds.get_full_market_ticks([code])
@@ -99,6 +106,7 @@ class DataProvider:
             try:
                 det = self.ds.get_instrument(code)
                 float_mv = (det.get("FloatVolume") or 0) * (tick.get("lastPrice") or 0)
+                float_vol = det.get("FloatVolume")
             except Exception:
                 pass
         if kline is None and self.connected:
@@ -114,7 +122,7 @@ class DataProvider:
         manual = self.manual.get_manual(code)
         return FactorContext(
             code=code, tick=tick, kline=kline, index_kline=index_kline,
-            sector_map=sector_map or {}, float_mv=float_mv,
+            sector_map=sector_map or {}, float_mv=float_mv, float_vol=float_vol,
             limit_ups=self.get_limit_ups(),
             em=self.get_market_stats() or {}, fund=fund, manual=manual,
             last=tick.get("lastPrice"), last_close=tick.get("lastClose"),

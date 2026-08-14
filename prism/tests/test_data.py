@@ -137,6 +137,32 @@ def test_context_from_provider_delegates():
     assert ctx.kline is None
 
 
+class _F3DS(FakeDS):
+    """带 get_instrument(FloatVolume) 与 get_index_kline 的假 DS(供 F3/N1 数据扩展)。"""
+
+    def get_instrument(self, code):
+        return {"FloatVolume": 2e8}
+
+    def get_index_kline(self, index_code, days=60):
+        return "idx-kline-%s" % index_code
+
+
+def test_build_stock_context_provides_float_vol_for_f3():
+    """F3 需要流通股本(FloatVolume): ctx.get("float_vol") 必须携带。"""
+    p = FakeProvider()
+    p.ds = _F3DS()
+    ctx = p.build_stock_context("600000.SH")
+    assert ctx.get("float_vol") == 2e8
+
+
+def test_build_market_context_provides_880368_index_for_n1():
+    """N1 兜底需要 880368 涨停指数: ctx.index_kline 必须携带(供 N1 因子)。"""
+    p = FakeProvider()
+    p.ds = _F3DS()
+    ctx = p.build_market_context()
+    assert ctx.index_kline == "idx-kline-880368.SH"
+
+
 def test_build_stock_context_fail_open_when_ds_raises():
     """真实 DataProvider 构造(注入假 DS): ds.get_kline 抛异常仍返回上下文(fail-open)。
 
