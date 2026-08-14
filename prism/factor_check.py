@@ -18,7 +18,9 @@ def run_checks(scan=True):
     from prism import registry as reg
     if scan:
         reg.reset()
-        reg.scan_factors("prism.factors")
+        # force=True: 进程可能已 import 过 prism.factors, 无 force 时 importlib
+        # 一次性语义使重扫为 no-op → FACTORS 空 → 静默假阴性
+        reg.scan_factors("prism.factors", force=True)
     out = []
     for fid, meta in sorted(reg.FACTORS.items()):
         func = meta["func"]
