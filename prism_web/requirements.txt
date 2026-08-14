@@ -1,0 +1,7 @@
+# 运行依赖（pip 可装部分）
+# 注意: xtquant(以及其依赖的 pandas 旧版本)来自 QMT / miniQMT 自带的 Python 环境,
+#      不要用 pip 安装, 运行前请把 QMT 的 Python 目录加入 sys.path / 环境。
+flask>=2.0
+requests>=2.20
+numpy>=1.20
+pandas>=1.3

@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>量化选股策略看板</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/echarts.min.js"></script>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>量化选股策略看板</h1>
+    <span id="conn-status" class="badge">未连接</span>
+    <button id="btn-screen" onclick="fetchScreen()">开始选股</button>
+  </header>
+
+  <nav id="tabs">
+    <button class="tab active" data-tab="market" onclick="switchTab('market')">市场环境</button>
+    <button class="tab" data-tab="candidates" onclick="switchTab('candidates')">候选列表</button>
+    <button class="tab" data-tab="compare" onclick="switchTab('compare')">模型对比</button>
+    <button class="tab" data-tab="detail" onclick="switchTab('detail')">单股详情</button>
+  </nav>
+
+  <main>
+    <section id="tab-market" class="tab-panel active">
+      <div id="market-banner"></div>
+      <div id="node-cards" class="cards"></div>
+      <div id="market-stats"></div>
+    </section>
+
+    <section id="tab-candidates" class="tab-panel">
+      <table id="cand-table">
+        <thead><tr>
+          <th>代码</th><th>名称</th><th>首板</th><th>妖股</th><th>势能</th>
+          <th title="排名依据：综合分 = 最强模型×0.6 + 次强×0.25 + 第三×0.15，上限 7.0。列表按它从高到低排，粗体+进度条更醒目。">综合分</th>
+          <th title="资质把关：看最强模型够不够绝对线。A≥6 / B≥5(且次强≥3) / C≥4 / D≥3。防止『样样都会、没绝活』的股票排太高。">等级</th>
+          <th title="仓位上限：极强→75% / 强→50% / 中等→30% / 弱→只观察。">强度</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="metric-legend">
+        <b>三个指标怎么配合用：</b>
+        <span class="legend-key">综合分</span>(醒目列/进度条)决定<b>排名</b>，看谁排前面；
+        <span class="legend-key">等级</span>(徽标)做<b>资质把关</b>，一招鲜才能上 A，防止平庸股排太高；
+        <span class="legend-key">强度</span>(含仓位提示)决定<b>敢上多大仓位</b>。
+        三者同源，等级≈强度，记作：排到前 → 验资质 → 定仓位。
+      </div>
+    </section>
+
+    <section id="tab-compare" class="tab-panel">
+      <div id="class-tiles" class="cards"></div>
+      <div id="radar-chart" class="chart"></div>
+      <div id="bar-chart" class="chart"></div>
+    </section>
+
+    <section id="tab-detail" class="tab-panel">
+      <h2 id="detail-title">点击候选列表选择股票</h2>
+      <div id="detail-layout">
+        <div id="kline-chart" class="chart"></div>
+        <div id="factor-table"></div>
+      </div>
+    </section>
+  </main>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
