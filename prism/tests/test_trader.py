@@ -100,8 +100,9 @@ def test_run_daily_paused_returns_paused(tmp_path, monkeypatch):
 class _FakeProvider:
     """run_daily 全流程假数据源: 涨停池 + 上下文构建。"""
 
-    def __init__(self, limit_ups):
+    def __init__(self, limit_ups, up_price=None):
         self._lus = limit_ups
+        self._up_price = up_price
 
     def build_market_context(self):
         from prism.context import FactorContext
@@ -113,7 +114,8 @@ class _FakeProvider:
 
     def build_stock_context(self, code):
         from prism.context import FactorContext
-        return FactorContext(code=code, tick={"lastPrice": 10.5})
+        return FactorContext(code=code, tick={"lastPrice": 10.5},
+                             up_price=self._up_price, last=10.5)
 
 
 @pytest.fixture(autouse=True)
@@ -157,3 +159,47 @@ def test_run_daily_full_flow(tmp_path, monkeypatch):
         assert data["volume"] == 200
         assert data["strategy_id"] == "flow"
         assert data["status"] == "pending"
+
+
+def _flow_strategy():
+    """run_daily real 保护测试用策略(与 full_flow 同构)。"""
+    return {
+        "id": "flow",
+        "market_gate": {"threshold": 3, "factors": ["NG1", "NG2", "NG3"]},
+        "scoring_models": [{"id": "m1", "factors": ["AS1"]}],
+        "composite": {"mode": "sum"},
+        "filters": {"candidate_min_model": 1},
+    }
+
+
+def test_generate_signals_price_zero_when_no_up_stop_price():
+    """候选缺 up_stop_price 时信号 price=0(桥端按对手价市价单); real 拒单在 run_daily。"""
+    result = {
+        "environment_ok": True,
+        "candidates": [{"code": "600000.SH", "scores": {"composite": 5.0}}],
+    }
+    sigs = trader.generate_signals(result, {"id": "x"}, env="real")
+    assert len(sigs) == 1 and sigs[0]["price"] == 0
+
+
+def test_run_daily_real_rejects_without_up_stop_price(tmp_path, monkeypatch):
+    """补充(审查要求): env=real 且候选全缺 up_stop_price → 拒单并返回 error。"""
+    monkeypatch.setattr(trader, "SIGNAL_ROOT", tmp_path)
+    provider = _FakeProvider([{"code": "600000.SH"}])   # up_price=None
+    result = trader.run_daily(_flow_strategy(), provider, env="real")
+    assert result["signals_written"] == 0
+    assert "error" in result and "up_stop_price" in result["error"]
+    assert not (tmp_path / "real" / "pending").exists()
+
+
+def test_run_daily_real_allows_with_up_stop_price(tmp_path, monkeypatch):
+    """补充: env=real 且候选带 up_stop_price → 正常生成信号, price 为涨停价。"""
+    monkeypatch.setattr(trader, "SIGNAL_ROOT", tmp_path)
+    provider = _FakeProvider([{"code": "600000.SH"}], up_price=10.55)
+    result = trader.run_daily(_flow_strategy(), provider, env="real")
+    assert "error" not in result
+    assert result["signals_written"] == 1
+    files = list((tmp_path / "real" / "pending").glob("*.json"))
+    assert len(files) == 1
+    data = json.loads(files[0].read_text(encoding="utf-8"))
+    assert data["price"] == 10.55

@@ -113,6 +113,24 @@ def test_evaluate_stock_shape():
     assert r["factors"]["A2"] == 0
 
 
+def test_evaluate_stock_carries_up_stop_price_and_last():
+    """候选 dict 必须带 up_stop_price/last(交易信号价格来源)。"""
+    s = engine.load_strategy(_mk_strategy())
+    ctx = FactorContext(code="600000.SH", up_price=10.55, last=10.5)
+    r = engine.evaluate_stock("600000.SH", ctx, s)
+    assert r["up_stop_price"] == 10.55
+    assert r["last"] == 10.5
+
+
+def test_evaluate_stock_up_price_none_passthrough():
+    """ctx.up_price 缺失时保留 None(不造 0), 由 trader 端兜底。"""
+    s = engine.load_strategy(_mk_strategy())
+    ctx = FactorContext(code="600000.SH")
+    r = engine.evaluate_stock("600000.SH", ctx, s)
+    assert r["up_stop_price"] is None
+    assert r["last"] is None
+
+
 def test_run_screen_gate_blocks():
     s = engine.load_strategy(_mk_strategy())
     # 市场节点分 1 < 门槛3 → 环境不达标

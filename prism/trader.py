@@ -5,6 +5,11 @@
 消费字段: order_id / action / stock_code / price / volume / account_id)。
 安全: 真实盘(env=real)下桥只消费授权文件存在时的信号; 本模块还提供
 PAUSE_FILE 一键暂停(存在该文件即不生成新信号)。
+
+价格语义: 信号 price=0 时桥端按对手价市价单处理(pr_type=2); 若策略
+要求涨停价排队买入, 需确保 engine 候选带 up_stop_price(engine.evaluate_stock
+已透出 ctx.up_price)。真实盘(env=real)下 run_daily 会拒绝全缺
+up_stop_price 的候选, 防止误按市价单。
 """
 import json
 import uuid
@@ -27,6 +32,12 @@ def generate_signals(result, strategy, env="sim", volume=100):
     result: run_screen 的输出 {environment_ok, candidates, ...}。
     每只候选股生成一条 BUY 信号; 环境不达标返回空列表。
     信号额外携带 strategy_id / composite, 便于盘后追溯。
+
+    价格语义: price 取候选的 up_stop_price, 缺失时为 0 —— 桥端收到
+    price=0 会按对手价市价单处理(pr_type=2); 若策略要求涨停价限价
+    买入, 需确保 engine 候选带 up_stop_price(engine.evaluate_stock
+    已透出 ctx.up_price)。真实盘保护在 run_daily 层(全缺 up_stop_price
+    即拒绝), 本函数不额外拦截, 保持 sim/real 输出一致。
     """
     if not result.get("environment_ok"):
         return []
@@ -74,7 +85,8 @@ def run_daily(strategy, provider, env="sim", volume=100, archive=None):
     (gate) 预计算 → 涨停池 → 逐股上下文 → run_screen → archive 回调 →
     generate_signals → write_signals。
 
-    返回 {"environment_ok", "candidates", "signals_written", "paused"}。
+    返回 {"environment_ok", "candidates", "signals_written", "paused"};
+    env="real" 且候选全缺 up_stop_price 时返回 "error" 字段并拒单。
     """
     if check_paused():
         return {"environment_ok": False, "candidates": [],
@@ -105,6 +117,17 @@ def run_daily(strategy, provider, env="sim", volume=100, archive=None):
             archive(result.get("candidates", []))
         except Exception:
             pass
+    candidates = result.get("candidates", [])
+    # 真实盘保护(审查要求): 候选全缺 up_stop_price 时拒绝生成信号。
+    # 桥端对 price=0 按对手价市价单处理(pr_type=2), 与"涨停价排队买入"
+    # 语义不符, 真实盘下宁可拒单也不误按市价单。sim 环境行为不变。
+    if env == "real" and candidates and not any(
+            c.get("up_stop_price") for c in candidates):
+        return {"environment_ok": result["environment_ok"],
+                "candidates": candidates,
+                "signals_written": 0, "paused": False,
+                "error": ("real盘候选缺 up_stop_price, 已拒绝生成信号: "
+                          "桥端 price=0 会按对手价市价单处理, 与涨停价排队买入不符")}
     signals = generate_signals(result, strat, env=env, volume=volume)
     written = write_signals(signals, env=env)
     return {"environment_ok": result["environment_ok"],

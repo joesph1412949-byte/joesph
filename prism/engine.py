@@ -129,9 +129,16 @@ def compute_model_scores(ctx, strategy):
 
 
 def evaluate_stock(code, ctx, strategy):
-    """单股完整评估。ctx 由调用方构造(数据适配层负责填数据)。"""
+    """单股完整评估。ctx 由调用方构造(数据适配层负责填数据)。
+
+    候选 dict 额外携带 up_stop_price / last(直接透出 ctx 字段):
+    交易信号以涨停价排队买入需要 up_stop_price; ctx.up_price 可能为
+    None, 保留 None(由 trader 端兜底为 0 —— 桥端 price=0 按对手价
+    市价单处理, 真实盘下 run_daily 会拒绝无价候选, 见 trader.py)。
+    """
     scores, factors = _compute_scores(ctx, strategy)
-    return {"code": code, "scores": scores, "factors": factors}
+    return {"code": code, "scores": scores, "factors": factors,
+            "up_stop_price": ctx.up_price, "last": ctx.last}
 
 
 def run_screen(strategy, market_ctx, gate_factors=None, stock_contexts=None):
