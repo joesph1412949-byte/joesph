@@ -14,15 +14,23 @@ class FakeDS:
     除简报给定的 get_limit_up_stocks/get_kline 外, 补 _connected 与
     get_full_market_ticks —— DataProvider.connected/get_limit_ups 会读它们,
     缺了无法走到假数据(fail-open 会静默吞掉)。
+    tick 带 askPrice/bidPrice: build_stock_context 用 askPrice[0]==0 判断
+    sealed(F2/F3 依赖); get_instrument 提供 UpStopPrice/FloatVolume。
     """
 
     _connected = True
 
     def get_full_market_ticks(self, codes=None):
-        return {"600000.SH": {"lastPrice": 10.5}}
+        return {"600000.SH": {"lastPrice": 10.5, "lastClose": 10.0,
+                              "askPrice": [0, 0, 0, 0, 0],
+                              "bidPrice": [10.5, 10.49, 0, 0, 0],
+                              "bidVol": [1000000, 0, 0, 0, 0]}}
 
     def get_limit_up_stocks(self, ticks=None):
         return [{"code": "600000.SH", "name": "浦发", "last": 10.5}]
+
+    def get_instrument(self, code):
+        return {"UpStopPrice": 11.0, "FloatVolume": 2e8}
 
     def get_kline(self, code, days=120):
         return None
@@ -153,6 +161,82 @@ def test_build_stock_context_provides_float_vol_for_f3():
     p.ds = _F3DS()
     ctx = p.build_stock_context("600000.SH")
     assert ctx.get("float_vol") == 2e8
+
+
+def test_build_stock_context_injects_up_price_and_sealed():
+    """回归: F1/F2/F3 依赖 up_price/sealed, 数据层必须注入(曾硬编码 None)。
+
+    生产链路 F1(需 up_price)/F2(需 sealed)/F3(需 sealed+float_vol) 曾恒为 0,
+    因为 build_stock_context 硬编码 up_price=None/sealed=None; Task 5 迁移测试
+    手动注入这些字段绕过数据层, 掩盖了问题。
+    """
+    p = FakeProvider()
+    ctx = p.build_stock_context("600000.SH")
+    assert ctx.up_price == 11.0              # 从 instrument 详情 UpStopPrice 取
+    assert ctx.sealed is True                # 从 tick askPrice[0]==0 判断
+    assert ctx.get("float_vol") == 2e8       # F3 用
+
+
+def test_build_stock_context_sealed_false_when_ask_has_price():
+    """sealed 分支: askPrice 首档 > 0 → 未封板(False), 不能误判为封板。"""
+    class AskHasPriceDS(FakeDS):
+        def get_full_market_ticks(self, codes=None):
+            return {"600000.SH": {"lastPrice": 10.5, "lastClose": 10.0,
+                                  "askPrice": [10.51, 10.52, 0, 0, 0]}}
+
+    p = FakeProvider()
+    p.ds = AskHasPriceDS()
+    ctx = p.build_stock_context("600000.SH")
+    assert ctx.sealed is False
+
+
+def test_build_stock_context_sealed_none_when_tick_missing_ask():
+    """fail-open: tick 无 askPrice 字段时 sealed 保持 None, 不得误判为封板。"""
+    class NoAskDS(FakeDS):
+        def get_full_market_ticks(self, codes=None):
+            return {"600000.SH": {"lastPrice": 10.5, "lastClose": 10.0}}
+
+    p = FakeProvider()
+    p.ds = NoAskDS()
+    ctx = p.build_stock_context("600000.SH")
+    assert ctx.sealed is None
+    assert ctx.up_price == 11.0             # instrument 详情不受 tick 缺失影响
+
+
+def test_data_layer_to_factors_smoke_f1_f2_f3():
+    """冒烟: 假 DS 构造含 askPrice/UpStopPrice/FloatVolume 数据, 走
+    build_stock_context → 因子 compute → F1/F2/F3 必须能拿到正确输入出分
+    (曾因数据层硬编码 None 而恒 0, 迁移测试手动注入掩盖)。"""
+    import pandas as pd
+    from prism import registry as reg
+
+    closes = [10.0] * 249 + [11.0]           # 今日涨停(11.0), 近20日无涨停
+    kline = pd.DataFrame({
+        "time": pd.date_range("2026-01-01", periods=250, freq="B"),
+        "open": closes, "high": [c * 1.02 for c in closes],
+        "low": [c * 0.98 for c in closes], "close": closes,
+        "volume": [100000] * 250, "amount": [c * 100000 * 100 for c in closes],
+    })
+
+    class SmokeDS(FakeDS):
+        def get_kline(self, code, days=250):
+            return kline
+
+        def get_full_market_ticks(self, codes=None):
+            return {"600000.SH": {"lastPrice": 11.0, "lastClose": 10.0,
+                                  "askPrice": [0, 0, 0, 0, 0],
+                                  "bidPrice": [11.0, 10.99, 0, 0, 0],
+                                  "bidVol": [2000000, 0, 0, 0, 0],
+                                  "timetag": "20260811 09:30:00"}}
+
+    reg.scan_factors("prism.factors", force=True)
+    p = FakeProvider()
+    p.ds = SmokeDS()
+    ctx = p.build_stock_context("600000.SH")
+    assert ctx.up_price == 11.0 and ctx.sealed is True
+    for fid in ("F1", "F2", "F3"):
+        res = reg.get_factor(fid)["func"](ctx)
+        assert res["score"] == 1, "%s 应为 1: %s" % (fid, res["note"])
 
 
 def test_build_market_context_provides_880368_index_for_n1():

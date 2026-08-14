@@ -97,16 +97,23 @@ class DataProvider:
         tick = {}
         float_mv = None
         float_vol = None
+        up_price = None
+        sealed = None
         if self.connected:
             try:
                 ticks = self.ds.get_full_market_ticks([code])
                 tick = ticks.get(code, {})
             except Exception:
                 pass
+            # sealed: askPrice 首档为 0 → 封板(与旧 factors.py 同公式)。
+            # askPrice 字段缺失时保持 None(fail-open), 避免把无数据误判为封板。
+            ask = tick.get("askPrice")
+            sealed = bool((ask or [0])[0] == 0) if ask is not None else None
             try:
                 det = self.ds.get_instrument(code)
                 float_mv = (det.get("FloatVolume") or 0) * (tick.get("lastPrice") or 0)
                 float_vol = det.get("FloatVolume")
+                up_price = det.get("UpStopPrice")
             except Exception:
                 pass
         if kline is None and self.connected:
@@ -126,7 +133,7 @@ class DataProvider:
             limit_ups=self.get_limit_ups(),
             em=self.get_market_stats() or {}, fund=fund, manual=manual,
             last=tick.get("lastPrice"), last_close=tick.get("lastClose"),
-            up_price=None, sealed=None)
+            up_price=up_price, sealed=sealed)
 
 
 # 模块级单例: 旧代码/脚本直接 `from prism.data import provider` 取用。
