@@ -139,7 +139,7 @@ Expected: FAIL(module prism not found / registry 无 factor 属性)
 # -*- coding: utf-8 -*-
 """Prism — 可配置因子库策略系统。"""
 from . import registry  # noqa: F401
-from .engine import load_strategy  # noqa: F401  (Task 3 前注释掉, 避免 import 错误)
+# NOTE: Task 3 完成后追加: from .engine import load_strategy  (engine 尚不存在时不要加)
 
 __version__ = "0.1.0"
 ```
@@ -578,6 +578,21 @@ Expected: FAIL(module prism.engine not found)
 
 - [ ] **Step 3: 实现**
 
+追加 `prism/__init__.py` 的 engine 导出(此时 engine.py 已存在):
+```python
+# prism/__init__.py 末尾追加
+from .engine import load_strategy  # noqa: F401
+```
+
+`prism/strategies/__init__.py`:
+```python
+# -*- coding: utf-8 -*-
+"""策略配置目录。"""
+from pathlib import Path
+
+STRATEGIES_DIR = Path(__file__).parent
+```
+
 `prism/strategies/default.json`:
 ```json
 {
@@ -978,11 +993,47 @@ git commit -m "feat(prism): 数据适配层(复用现有数据源封装因子上
 - Consumes: Task 1/2/3(registry/context/engine);现有 `strategy_web/factors.py` 的旧实现(作为比对基准)
 - Produces: 24 个已注册因子 id 与旧版一一对应, 行为一致
 
-**因子清单(24 个, id → 文件名):**
-- F1→factor_f1_first_board.py, F2→factor_f2_early_seal.py, F3→factor_f3_seal_strength.py, F4→factor_f4_sector_resonance.py, F5→factor_f5_volume_accum.py, F6→factor_f6_market_support.py, F7→factor_f7_novel_theme.py
-- Y1→factor_y1_small_cap.py, Y2→factor_y2_clean_chips.py, Y3→factor_y3_volume_spike.py, Y4→factor_y4_ma_bullish.py, Y5→factor_y5_multi_concept.py, Y6→factor_y6_event_catalyst.py, Y7→factor_y7_hot_money.py
-- S1→factor_s1_manual.py, S2→factor_s2_volume_density.py, S3→factor_s3_breakout.py, S4→factor_s4_ma_long.py, S5→factor_s5_financing.py, S6→factor_s6_sector_strength.py, S7→factor_s7_manual.py
-- N1→factor_n1_limitup_index.py, N2→factor_n2_sentiment.py, N3→factor_n3_first_board_premium.py, N4→factor_n4_chain_height.py, N5→factor_n5_total_amount.py
+**因子清单(24 个, id → 新文件名 → 旧代码位置):**
+
+| 因子 | 新文件 | 旧代码位置(strategy_web/) |
+|---|---|---|
+| F1 | factor_f1_first_board.py | factors.py `compute_factors` 的 `# ---- F1 首板确认 ----` 段 |
+| F2 | factor_f2_early_seal.py | 同上 `# ---- F2 早封板 ----` 段(用 _parse_timetag_hhmm) |
+| F3 | factor_f3_seal_strength.py | 同上 `# ---- F3 封单强度 ----` 段 |
+| F4 | factor_f4_sector_resonance.py | 同上 `# ---- F4 板块共振 ----` 段(用 ctx.sector_map) |
+| F5 | factor_f5_volume_accum.py | 同上 `# ---- F5 量价堆积 ----` 段 |
+| F6 | factor_f6_market_support.py | 同上 `# ---- F6 大盘配合 ----` 段(用 ctx.index_kline) |
+| F7 | factor_f7_novel_theme.py | fundamental.py `_novel_concept`(东财, 数据在 ctx.fund["F7"]) |
+| Y1 | factor_y1_small_cap.py | fundamental.py `_small_cap`(数据在 ctx.fund["Y1"]) |
+| Y2 | factor_y2_clean_chips.py | fundamental.py `_shareholders`(数据在 ctx.fund["Y2"]) |
+| Y3 | factor_y3_volume_spike.py | factors.py `# ---- Y3 倍量突破 ----` 段 |
+| Y4 | factor_y4_ma_bullish.py | factors.py `# ---- Y4 均线多头 ----` 段 |
+| Y5 | factor_y5_multi_concept.py | fundamental.py `_concepts`(数据在 ctx.fund["Y5"]) |
+| Y6 | factor_y6_event_catalyst.py | fundamental.py `_event`(数据在 ctx.fund["Y6"]) |
+| Y7 | factor_y7_hot_money.py | fundamental.py `_dragon_tiger`(数据在 ctx.fund["Y7"]) |
+| S1 | factor_s1_manual.py | manual_store.py 手填(数据在 ctx.manual["S1"]) |
+| S2 | factor_s2_volume_density.py | factors.py `# ---- S2 量价堆积密度 ----` 段 |
+| S3 | factor_s3_breakout.py | factors.py `# ---- S3 最小阻力突破 ----` 段 |
+| S4 | factor_s4_ma_long.py | factors.py `# ---- S4 均线系统 ----` 段 |
+| S5 | factor_s5_financing.py | manual_store.py 手填(数据在 ctx.manual["S5"]; 东财接口探针未确认, 保持手填) |
+| S6 | factor_s6_sector_strength.py | factors.py `# ---- S6 板块共振强度 ----` 段(用 ctx.sector_map) |
+| S7 | factor_s7_manual.py | manual_store.py 手填(数据在 ctx.manual["S7"]) |
+| N1 | factor_n1_limitup_index.py | factors.py `compute_market_factors` 的 `# ---- N1 涨停指数 ----` 段 |
+| N2 | factor_n2_sentiment.py | 同上 `# ---- N2 情绪周期 ----` 段 |
+| N3 | factor_n3_first_board_premium.py | 同上 `# ---- N3 首板溢价 ----` 段 |
+| N4 | factor_n4_chain_height.py | 同上 `# ---- N4 连板高度 ----` 段 |
+| N5 | factor_n5_total_amount.py | 同上 `# ---- N5 两市成交额 ----` 段 |
+
+**迁移规则(implementer 必须遵守):**
+1. 逻辑从旧代码逐行移植,`id`/阈值/判定**保持不变**
+2. 数据引用改 ctx 字段:旧 `tick.get("lastPrice")`→`ctx.last`;`detail.get("UpStopPrice")`→`ctx.up_price`;`tick.get("askPrice")[0]==0`→`ctx.sealed`;`ds.get_index_kline`→`ctx.index_kline`;`sector_map`→`ctx.sector_map`;`limit_ups`→`ctx.limit_ups`;`ds.get_kline`→`ctx.kline`
+3. 东财因子(F7/Y1/Y2/Y5/Y6/Y7):旧 fundamental.py 的计算逻辑由数据层调用(prism.data 已封装),因子文件只需 `fund = ctx.fund.get("F7")` 后取 score;fund 缺失 → `{"score": 0, "note": "东财数据缺失"}`
+4. 手填因子(S1/S5/S7):`ctx.manual.get("S1")`;缺失 → 0
+5. N 系因子输入:旧实现用 `limit_ups`(涨停池列表)+ `em`(东财统计) + `ticks`(全市场),ctx 已含 `limit_ups`/`em`;`ticks` 经 ctx.get("ticks") 取
+6. 每个因子文件都带 `from prism.registry import factor` 装饰器
+7. 市场类(N 系)因子 category="node",其余按归属(first_board/monster/momentum)
+
+**注意**: F2 的 `_parse_timetag_hhmm` 帮助函数放 `prism/context.py` 同级 `prism/_utils.py`(新建, 从 factors.py 复制), F2 因子 import 它。
 
 - [ ] **Step 1: 写失败测试** `prism/tests/test_factor_migration.py`(先做 F1 与 Y3 两个样例, 其余因子逐一加同构用例)
 
