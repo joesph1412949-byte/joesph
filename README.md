@@ -108,6 +108,18 @@ python app.py
   统一日志 `setup_logging`(按天滚动, `log/` 目录);
   `watchdog.py` 进程守护(监控 5000/8899/5899, 挂了自动拉起),
   `install_watchdog.bat`(管理员运行一次)注册开机自启。
+- **卖出策略**(`exit_rules.py` + `strategy_close_pick.py exit`):买入发单后自动记账到
+  `positions.json`;`exit` 命令拉持仓最新价,按 **止盈(+8%)/止损(-5%)/持有 N 天强制平仓**
+  三规则判定,触发则发 **SELL** 信号走同一信号通道(桥已支持卖出):
+
+  ```bash
+  python strategy_close_pick.py exit                    # 默认规则巡检
+  python strategy_close_pick.py exit --take-profit 0.10 --stop-loss 0.06 --hold-days 3
+  python strategy_close_pick.py exit --price 12.50      # 指定 SELL 委托价(默认市价)
+  ```
+
+- **仓位/资金管理**:`send` 时查询账户可用资金,单只按 `POSITION_RATIO`(默认 30%)
+  预算计算股数(向下取整 100 股倍数);资金通道不可用时回退固定 `VOLUME`。
 
 ## 测试
 
@@ -116,7 +128,7 @@ python app.py
 ```bash
 cd strategy_web
 python -m pytest tests/ -q    # 全部离线; 含 因子/模型/编排/东财/桥安全/绩效/回测 回归测试
-cd .. && python -m pytest tests/ -q   # 回测引擎测试(项目根 tests/)
+cd .. && python -m pytest tests/ -q   # 回测引擎 + 卖出规则测试(项目根 tests/)
 ```
 
 ## 说明

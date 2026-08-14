@@ -35,14 +35,23 @@ except Exception:
 from xtquant import xtdata
 
 from common import SIGNAL_ROOT, SECTORS, limit_ratio_for_code, with_market_suffix
+from exit_rules import PositionBook
 
 # ====================== 配置区 ======================
 ENV = "sim"                          # "sim"模拟盘 / "real"真实盘
 STATE_FILE = Path(__file__).parent / "close_pick_state.json"   # 候选清单存盘
-VOLUME = 100                         # 每只 100 股
+POSITIONS_FILE = Path(__file__).parent / "positions.json"      # 持仓档案(卖出策略用)
+VOLUME = 100                         # 每只 100 股(无资金查询时的兜底)
 MAX_PICKS = 5                        # 每天最多选几只(防止一次发太多)
 ACCOUNT = ""                         # 留空让 QMT 端自动用登录账号
 MAX_PICK_AGE_DAYS = 3                # send 允许的清单最大年龄(天): 覆盖周末(周五选→周一发=3天)
+
+# 仓位/资金管理: 单只占用可用资金的最高比例(0.30 = 最多用 30% 资金买一只)
+POSITION_RATIO = 0.30
+# 卖出策略默认参数(exit 命令用, 可 --take-profit/--stop-loss/--hold-days 覆盖)
+TAKE_PROFIT_PCT = 0.08               # 止盈: +8%
+STOP_LOSS_PCT = 0.05                 # 止损: -5%
+MAX_HOLD_DAYS = 5                    # 持有 N 个自然日后强制平仓
 # ===================================================
 
 LIMIT_RATIO_CACHE = {}
@@ -120,13 +129,15 @@ def screen_today(close_approx=None):
     return picks
 
 
-def send_signal(stock_code, price, volume, account_id=""):
-    order_id = "BUY_%s" % uuid.uuid4().hex[:8]
+def send_signal(stock_code, price, volume, account_id="", action="BUY"):
+    """写买入/卖出信号到 pending 目录。action: "BUY" / "SELL"(桥已支持 SELL)。"""
+    prefix = "SELL" if action == "SELL" else "BUY"
+    order_id = "%s_%s" % (prefix, uuid.uuid4().hex[:8])
     signal = {
         "order_id": order_id,
-        "action": "BUY",
+        "action": action,
         "stock_code": stock_code,
-        "order_type": "BUY",
+        "order_type": action,
         "price": price,
         "volume": volume,
         "account_id": account_id,
@@ -138,6 +149,68 @@ def send_signal(stock_code, price, volume, account_id=""):
     (pending_dir / ("%s.json" % order_id)).write_text(
         json.dumps(signal, ensure_ascii=False, indent=2), encoding="utf-8")
     return order_id
+
+
+# ---------------- 持仓档案(卖出策略用) ----------------
+
+def load_positions():
+    if POSITIONS_FILE.exists():
+        try:
+            return PositionBook.from_json(
+                json.loads(POSITIONS_FILE.read_text(encoding="utf-8")))
+        except Exception:
+            pass
+    return PositionBook()
+
+
+def save_positions(book):
+    POSITIONS_FILE.write_text(
+        json.dumps(book.all(), ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def record_buy_positions(picks):
+    """买入信号发出后记账: 以"明日涨停价"作为买入成本价记录持仓。"""
+    book = load_positions()
+    for p in picks:
+        price = limit_up_price(p["close"], p["ratio"])
+        book.add(p["code"], p["name"], buy_price=price,
+                 buy_date=date.today().isoformat())
+    save_positions(book)
+    print("持仓档案已更新: %d 只 (%s)" % (len(picks), POSITIONS_FILE))
+
+
+# ---------------- 仓位/资金管理 ----------------
+
+def query_available_cash():
+    """查询账户可用资金(需 QMT 交易通道)。失败/未连接 → None(调用方回退固定 VOLUME)。"""
+    try:
+        from xtquant import xttrader, xttype
+        import time as _t
+        cb = xttrader.XtQuantTraderCallback.__new__(xttrader.XtQuantTraderCallback)
+        trader = xttrader.XtQuantTrader(r"D:\QMT\userdata_mini", int(_t.time()), cb)
+        trader.start()
+        if trader.connect() != 0:
+            return None
+        acc = xttype.StockAccount(ACCOUNT)
+        trader.subscribe(acc)
+        asset = trader.query_stock_asset(acc)
+        return float(getattr(asset, "cash", 0) or 0)
+    except Exception:
+        return None
+
+
+def calc_buy_volume(price, available_cash):
+    """按仓位管理计算单只买入股数: 可用资金 × POSITION_RATIO ÷ 挂单价,
+    向下取整到 100 股倍数。资金不可用/不足 → 回退固定 VOLUME。"""
+    if price <= 0:
+        return VOLUME
+    if available_cash is None or available_cash <= 0:
+        return VOLUME
+    budget = available_cash * POSITION_RATIO
+    shares = int(budget / price // 100 * 100)
+    if shares < 100:
+        return VOLUME
+    return shares
 
 
 def cmd_screen(args):
@@ -199,9 +272,21 @@ def cmd_send(args):
         print("目标: sim 模拟盘")
     else:
         print("!! 目标: real 真实盘 !! 请确认 QMT 登录的是真实资金账号")
-    print("将发 %d 只买入信号 (各 %d 股, 挂次日涨停价):" % (len(picks), VOLUME))
+
+    # 仓位/资金管理: 查询可用资金, 按 POSITION_RATIO 计算每只股数
+    cash = query_available_cash()
+    if cash:
+        print("账户可用资金: %.2f 元 (单只仓位上限 %.0f%%)"
+              % (cash, POSITION_RATIO * 100))
+    else:
+        print("未查询到账户资金(QMT交易通道不可用), 按固定股数 %d 股/只" % VOLUME)
+    vols = {p["code"]: calc_buy_volume(limit_up_price(p["close"], p["ratio"]), cash)
+            for p in picks}
+    print("将发 %d 只买入信号:" % len(picks))
     for p in picks:
-        print("  %s %s 挂单 %.2f" % (p["code"], p["name"], limit_up_price(p["close"], p["ratio"])))
+        print("  %s %s 挂单 %.2f x %d 股"
+              % (p["code"], p["name"], limit_up_price(p["close"], p["ratio"]),
+                 vols[p["code"]]))
 
     if not args.yes:
         r = input("确认写入 pending? [y/N] ").strip().lower()
@@ -210,18 +295,93 @@ def cmd_send(args):
             return
 
     for p in picks:
-        oid = send_signal(p["code"], limit_up_price(p["close"], p["ratio"]), VOLUME, ACCOUNT)
+        oid = send_signal(p["code"], limit_up_price(p["close"], p["ratio"]),
+                          vols[p["code"]], ACCOUNT)
         print("  已发 %s %s -> %s" % (p["code"], p["name"], oid))
+    # 卖出策略: 买入信号发出即记账(成本=挂单价), 供 exit 命令后续判定
+    record_buy_positions(picks)
     print("\n[%s] 发单完成。切到 QMT 看桥日志 ORDER..., 再查委托面板。" % ENV)
+
+
+def cmd_exit(args):
+    """卖出策略: 拉持仓最新价, 按 止盈/止损/持有期 规则判定, 触发则发 SELL 信号。"""
+    print("=" * 62)
+    print("卖出巡检 exit | %s" % datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    print("规则: 止盈 +%.0f%% / 止损 -%.0f%% / 持有 %d 天强制"
+          % (args.take_profit * 100, args.stop_loss * 100, args.hold_days))
+    book = load_positions()
+    if not book.all():
+        print("持仓档案为空 (%s)。请先 send 发单(会自动记账)。" % POSITIONS_FILE)
+        return
+
+    # 拉持仓最新价(全市场盘口)
+    codes = list(book.all().keys())
+    ticks = {}
+    try:
+        ticks = xtdata.get_full_tick(codes)
+    except Exception as e:
+        print("拉行情失败: %r" % e)
+        return
+    last_prices = {}
+    for code in codes:
+        t = ticks.get(code) or {}
+        lp = t.get("lastPrice") or 0
+        if lp > 0:
+            last_prices[code] = lp
+
+    hits = book.evaluate_all(last_prices, take_profit_pct=args.take_profit,
+                             stop_loss_pct=args.stop_loss,
+                             max_hold_days=args.hold_days)
+    if not hits:
+        print("无触发卖出的持仓 (%d 只巡检完毕)" % len(codes))
+        return
+
+    if ENV == "sim":
+        print("目标: sim 模拟盘")
+    else:
+        print("!! 目标: real 真实盘 !! 请确认 QMT 登录的是真实资金账号")
+    print("触发卖出 %d 只:" % len(hits))
+    for code, pos, action, reason in hits:
+        print("  %s %s 现价 %.2f 成本 %.2f | %s"
+              % (code, pos.get("name"), last_prices.get(code, 0),
+                 pos.get("buy_price"), reason))
+
+    if not args.yes:
+        r = input("确认写入 SELL 信号? [y/N] ").strip().lower()
+        if r != "y":
+            print("已取消。")
+            return
+
+    for code, pos, action, reason in hits:
+        volume = int(pos.get("volume") or 0)
+        if volume <= 0:
+            print("  %s 无股数记录, 跳过(请手工处理)" % code)
+            continue
+        # SELL 用市价(price=0), 桥端按对手价成交; 也支持 --price 指定
+        oid = send_signal(code, args.price or 0, volume, ACCOUNT, action="SELL")
+        print("  已发 SELL %s %s x%d -> %s (%s)" % (code, pos.get("name"),
+                                                    volume, oid, reason))
+        book.remove(code)
+    save_positions(book)
+    print("\n[%s] SELL 发单完成, 持仓档案已更新(已触发者移除)。" % ENV)
 
 
 def main():
     ap = argparse.ArgumentParser(description="收盘涨停科技股策略")
-    ap.add_argument("cmd", choices=["screen", "send"])
+    ap.add_argument("cmd", choices=["screen", "send", "exit"])
     ap.add_argument("--code", help="send 时只发指定股票代码")
-    ap.add_argument("--yes", action="store_true", help="send 时跳过确认")
+    ap.add_argument("--yes", action="store_true", help="跳过确认")
     ap.add_argument("--force", action="store_true",
                     help="send 时强制发送过期(>1天)的候选清单")
+    # 卖出策略参数
+    ap.add_argument("--take-profit", type=float, default=TAKE_PROFIT_PCT,
+                    help="止盈幅度(默认0.08=+8%%)")
+    ap.add_argument("--stop-loss", type=float, default=STOP_LOSS_PCT,
+                    help="止损幅度(默认0.05=-5%%)")
+    ap.add_argument("--hold-days", type=int, default=MAX_HOLD_DAYS,
+                    help="持有 N 个自然日后强制平仓(默认5)")
+    ap.add_argument("--price", type=float, default=0.0,
+                    help="exit 时 SELL 委托价(默认0=市价/对手价)")
     args = ap.parse_args()
 
     xtdata.connect()
@@ -229,6 +389,8 @@ def main():
 
     if args.cmd == "screen":
         cmd_screen(args)
+    elif args.cmd == "exit":
+        cmd_exit(args)
     else:
         cmd_send(args)
 

@@ -51,6 +51,7 @@ Thumbs.db
 # 本地量化运行数据(绝不提交)
 QMT_SIGNALS/
 close_pick_state.json
+positions.json
 qmt_signal_bridge.py.bak
 log/
 pickle_cache/
