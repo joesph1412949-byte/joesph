@@ -10,19 +10,33 @@ import os
 import json as _json
 
 import datetime as _dt
+import logging
 import threading as _threading
 
 from flask import Flask, jsonify, render_template, request
 
+sys.path.insert(0, str(Path(__file__).parent.parent))  # 项目根(common.py)
+from common import setup_logging
+
 from data_source import DataSource, DataSourceError
 from manual_store import ManualStore
+from perf_store import PerfStore
 from screen import ScreenRunner
 
+logger = setup_logging("strategy_web")
+
 app = Flask(__name__)
+
+
+def _kline_close_source(code, kdays):
+    """绩效回填的行情源: 从 QMT 拉 K线。返回含 close 列的 DataFrame。"""
+    return ds_obj.get_kline(code, days=kdays)
+
 
 # 全局单例（测试时可用 monkeypatch 替换）
 ds_obj = DataSource()
 manual_store_obj = ManualStore()
+perf_store_obj = PerfStore(kline_source=_kline_close_source)
 
 # 选股单飞锁: /api/screen 同时只允许一个选股流程(耗时 1~2 分钟)
 _screen_lock = _threading.Lock()
@@ -99,13 +113,29 @@ def screen():
     # 进行中再请求 → 409 提示稍候(不排队)。
     if not _screen_lock.acquire(blocking=False):
         return jsonify({"error": "选股进行中, 请稍候(上次选股尚未完成)"}), 409
+    logger.info("选股开始")
     try:
         result = _get_screen_runner().run()
         _save_snapshot(result)
+        # 绩效追踪: 候选清单自动存档(按日期), 供后续回填涨跌/统计胜率
+        if result.get("candidates"):
+            try:
+                perf_store_obj.archive_daily(result["candidates"])
+            except Exception as e:
+                logger.warning("绩效存档失败(不影响选股): %r", e)
+        logger.info("选股完成: 环境=%s 候选=%d (A%d/B%d/C%d/D%d)",
+                    result.get("environment_ok"),
+                    result.get("summary", {}).get("candidate_count", 0),
+                    result.get("summary", {}).get("a_count", 0),
+                    result.get("summary", {}).get("b_count", 0),
+                    result.get("summary", {}).get("c_count", 0),
+                    result.get("summary", {}).get("d_count", 0))
         return jsonify(result)
     except DataSourceError as e:
+        logger.error("选股失败(DataSourceError): %r", e)
         return jsonify({"error": str(e)}), 500
     except Exception as e:
+        logger.error("选股失败: %r", e, exc_info=True)
         return jsonify({"error": "选股失败: %r" % e}), 500
     finally:
         _screen_lock.release()
@@ -121,6 +151,27 @@ def screen_latest():
         return jsonify(data)
     except Exception as e:
         return jsonify({"ok": False, "error": "快照读取失败: %r" % e}), 500
+
+
+@app.route("/api/perf", methods=["GET"])
+def perf():
+    """绩效统计: 按等级(A-E)返回 候选数/已结算数/胜率/平均收益。"""
+    return jsonify({"ok": True, "days": perf_store_obj.list_days(),
+                    "summary": perf_store_obj.summary()})
+
+
+@app.route("/api/perf/backfill", methods=["POST"])
+def perf_backfill():
+    """用最新行情回填未结算存档的 N 日收益(N 默认 5)。需 QMT 已连接。"""
+    if not ds_obj._connected:
+        return jsonify({"error": "QMT未连接, 请先打开QMT并开启miniQMT"}), 400
+    try:
+        days = int(request.args.get("days", 5))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "days 参数非法"}), 400
+    result = perf_store_obj.backfill(days=days)
+    return jsonify({"ok": True, "result": result,
+                    "summary": perf_store_obj.summary()})
 
 
 @app.route("/api/market/kline", methods=["GET"])

@@ -34,10 +34,10 @@ except Exception:
 
 from xtquant import xtdata
 
+from common import SIGNAL_ROOT, SECTORS, limit_ratio_for_code, with_market_suffix
+
 # ====================== 配置区 ======================
-SIGNAL_ROOT = Path(r"D:/QMT_SIGNALS")
 ENV = "sim"                          # "sim"模拟盘 / "real"真实盘
-SECTORS = ["SW1电子", "SW1计算机", "SW1通信"]   # 科技行业池
 STATE_FILE = Path(__file__).parent / "close_pick_state.json"   # 候选清单存盘
 VOLUME = 100                         # 每只 100 股
 MAX_PICKS = 5                        # 每天最多选几只(防止一次发太多)
@@ -48,27 +48,12 @@ MAX_PICK_AGE_DAYS = 3                # send 允许的清单最大年龄(天): �
 LIMIT_RATIO_CACHE = {}
 
 
-def with_market_suffix(code):
-    code = str(code).strip()
-    if "." in code:
-        return code
-    if code[0] in "659":
-        return code + ".SH"
-    if code[0] in "032":
-        return code + ".SZ"
-    return code
-
-
 def limit_ratio(code):
-    """涨跌停幅度: 北交所30% / 创业科创20% / 主板10%; ST股5%由 name 判断"""
+    """涨跌停幅度: 北交所30% / 创业科创20% / 主板10%; ST股5%由 name 判断
+    (实现收敛到 common.limit_ratio_for_code, 本地仅保留缓存)"""
     if code in LIMIT_RATIO_CACHE:
         return LIMIT_RATIO_CACHE[code]
-    if code.startswith(("8", "4")):
-        r = 0.30
-    elif code.startswith(("300", "301", "688")):
-        r = 0.20
-    else:
-        r = 0.10
+    r = limit_ratio_for_code(code)
     LIMIT_RATIO_CACHE[code] = r
     return r
 

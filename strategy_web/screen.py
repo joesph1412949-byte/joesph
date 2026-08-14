@@ -2,6 +2,11 @@
 """选股流程编排：先判市场环境，达标才扫涨停池算分，输出候选清单。
 依赖 data_source / factors / manual_store / models，可注入假实现便于测试。"""
 import logging
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))  # 项目根(common.py)
+from common import SECTORS
 
 from data_source import DataSource
 from eastmoney import EastMoneyFeed
@@ -12,8 +17,7 @@ from models import ModelScorer
 
 logger = logging.getLogger(__name__)
 
-# 默认科技行业池（用于板块映射 F4/S6）
-SECTORS = ["SW1电子", "SW1计算机", "SW1通信"]
+# 默认科技行业池（用于板块映射 F4/S6, 定义收敛到 common.SECTORS）
 
 # 环境门槛：节点模型得分达标才选股（冰点期阈值）
 ENV_THRESHOLD = 3
@@ -31,17 +35,26 @@ class ScreenRunner:
         self.em_feed = em_feed or EastMoneyFeed()
         self.fund_feed = fund_feed or FundamentalFeed()
 
-    def _build_sector_map(self, limit_ups):
-        """涨停池 code → 所属行业。用科技行业板块反查。"""
+    def _build_sector_map(self, limit_ups, theme_map=None):
+        """涨停池 code → 所属行业/题材。用科技行业板块反查 + 东财题材映射叠加。
+        theme_map: 东财涨停池 {裸代码: 题材名}(em["today_theme_map"]), 提供题材维度。
+        题材优先(打板逻辑里题材比申万行业更贴近主线), 申万行业兜底。"""
         sector_map = {}
         ups = [u["code"] for u in limit_ups]
         if not ups:
             return sector_map
+        # 1) 申万行业兜底
         for sector in SECTORS:
             members = set(self.ds.get_sector_stocks(sector))
             for code in ups:
                 if code in members:
                     sector_map.setdefault(code, sector)
+        # 2) 东财题材叠加(优先级更高): 裸代码 → 带后缀后覆盖
+        if theme_map:
+            for code in ups:
+                theme = theme_map.get(code) or theme_map.get(code.split(".")[0])
+                if theme:
+                    sector_map[code] = theme
         return sector_map
 
     def run(self):
@@ -63,6 +76,9 @@ class ScreenRunner:
                          if market_factors.get(n, {}).get("score") == 1)
         stage = self.scorer.classify_market(node_score)
         total_amount = sum((t.get("amount") or 0) for t in ticks.values())
+        # 主线题材(东财涨停池按 hybk 聚合) — 供页面展示; em 不可用则为空
+        top_themes = (em or {}).get("top_themes") or []
+        theme_map = (em or {}).get("today_theme_map") or {}
 
         result = {
             "market": {
@@ -71,6 +87,7 @@ class ScreenRunner:
                 "factors": market_factors,
                 "total_amount": total_amount,
                 "limit_up_count": len(limit_ups),
+                "top_themes": top_themes[:10],   # 主线题材 Top10(涨停家数/连板高度排序)
             },
             "environment_ok": node_score >= ENV_THRESHOLD,
             "candidates": [],
@@ -95,8 +112,8 @@ class ScreenRunner:
             except Exception:
                 kline_map = {}
 
-        # 5. 板块映射（供 F4/S6）
-        sector_map = self._build_sector_map(limit_ups)
+        # 5. 板块映射（供 F4/S6）— 申万行业 + 东财题材(题材优先)
+        sector_map = self._build_sector_map(limit_ups, theme_map)
 
         # 6. 对涨停池每只算因子 + 评分
         for lu in limit_ups:

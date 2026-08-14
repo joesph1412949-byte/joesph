@@ -85,6 +85,29 @@ python app.py
 | `/api/screen` | POST | 跑完整选股流程,返回市场环境 + 候选清单 |
 | `/api/stock/<code>/kline` | GET | 个股 120 根 K线(OHLC + ma60 + 涨停价),如 `/api/stock/600519.SH/kline` |
 | `/api/stock/<code>/manual` | GET/POST | 读写手动填写的受限因子 |
+| `/api/perf` | GET | 绩效统计:按等级(A-E)的候选数/已结算/胜率/平均收益 |
+| `/api/perf/backfill` | POST | 用最新行情回填未结算存档的 N 日收益(默认5日,需QMT) |
+
+## 改进模块(2026-08)
+
+- **题材主线聚类**(`eastmoney.py aggregate_by_theme`):东财涨停池按 hybk 题材聚合,
+  识别当日主线题材(涨停家数/连板高度排序),输出 `market.top_themes` 供页面展示;
+  F4/S6 板块共振从纯申万行业扩展到**题材共振**(题材优先,申万兜底)。
+- **绩效追踪**(`perf_store.py`):每次选股自动按日期存档候选清单(`strategy_web/perf/YYYYMMDD.json`),
+  之后用行情回填 N 日实际涨跌,按 A-E 等级统计胜率/平均收益,验证打分体系有效性。
+- **回测框架**(`backtest.py` + `backtest_cli.py`):用东财历史涨停池回放简化选股规则
+  (环境门槛 + 主线题材 + 连板高度),统计胜率/盈亏比/最大回撤,支持参数网格对比。
+  无需 QMT,仅依赖东财公开接口(注意:历史涨停池约保留最近 20 个交易日):
+
+  ```bash
+  python backtest_cli.py --start 20260727 --end 20260813 --min-limit 30 --picks 3 --hold 3
+  python backtest_cli.py --start 20260727 --end 20260813 --compare    # 参数网格对比
+  ```
+
+- **工程整理**:公共配置收敛到 `common.py`(路径/行业池/后缀规则/涨跌停幅度),
+  统一日志 `setup_logging`(按天滚动, `log/` 目录);
+  `watchdog.py` 进程守护(监控 5000/8899/5899, 挂了自动拉起),
+  `install_watchdog.bat`(管理员运行一次)注册开机自启。
 
 ## 测试
 
@@ -92,7 +115,8 @@ python app.py
 
 ```bash
 cd strategy_web
-python -m pytest tests/ -q    # 全部离线; 含 因子/模型/编排/东财/桥安全闸门 回归测试
+python -m pytest tests/ -q    # 全部离线; 含 因子/模型/编排/东财/桥安全/绩效/回测 回归测试
+cd .. && python -m pytest tests/ -q   # 回测引擎测试(项目根 tests/)
 ```
 
 ## 说明

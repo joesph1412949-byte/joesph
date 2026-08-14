@@ -36,6 +36,9 @@ screen_result.json
 screen_result.json.tmp
 limitup_result.json
 limitup_result.json.tmp
+strategy_web/perf/
+backtest_compare_result.json
+backtest_compare_err.log
 
 # OS
 .DS_Store

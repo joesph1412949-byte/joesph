@@ -80,7 +80,8 @@ class EastMoneyFeed:
 
     @staticmethod
     def _pool_to_stocks(pool):
-        """data.pool 条目 → [{code, name, boards}]。boards = lbc(连板数, 东财真实字段)。"""
+        """data.pool 条目 → [{code, name, boards, theme}]。
+        boards = lbc(连板数, 东财真实字段); theme = hybk(题材/板块, 东财真实字段)。"""
         out = []
         for item in pool or []:
             if not isinstance(item, dict):
@@ -90,8 +91,32 @@ class EastMoneyFeed:
                 continue
             name = item.get("n") or item.get("name") or ""
             boards = item.get("lbc") or 0
-            out.append({"code": str(code), "name": str(name), "boards": int(boards)})
+            theme = item.get("hybk") or item.get("hyb") or ""
+            out.append({"code": str(code), "name": str(name),
+                        "boards": int(boards), "theme": str(theme)})
         return out
+
+    @staticmethod
+    def aggregate_by_theme(stocks):
+        """按题材(hybk)聚合涨停池 → 识别主线题材。
+
+        返回按 涨停家数降序、再按最高连板降序 排序的列表:
+        [{theme, count, max_boards, codes}]。无题材(theme 为空)的股票聚合到
+        "未知" 桶, 排在最后(主线识别只看有题材的)。"""
+        buckets = {}
+        for s in stocks or []:
+            theme = (s.get("theme") or "").strip() or "未知"
+            b = buckets.setdefault(theme, {"theme": theme, "count": 0,
+                                           "max_boards": 0, "codes": []})
+            b["count"] += 1
+            b["max_boards"] = max(b["max_boards"], int(s.get("boards") or 0))
+            b["codes"].append(s.get("code"))
+        result = [b for t, b in buckets.items() if t != "未知"]
+        result.sort(key=lambda b: (b["count"], b["max_boards"]), reverse=True)
+        unknown = buckets.get("未知")
+        if unknown:
+            result.append(unknown)
+        return result
 
     # ---------- 公开接口 ----------
     def fetch_limit_up_pool(self, date_yyyymmdd):
@@ -103,12 +128,14 @@ class EastMoneyFeed:
         return self._pool_to_stocks(pool)
 
     def get_market_stats(self):
-        """尽力而为，绝不抛异常。返回 {"daily_counts","yesterday_codes","yesterday_boards","max_boards"} 或 None。
+        """尽力而为，绝不抛异常。返回 {"daily_counts","yesterday_codes","yesterday_boards","max_boards","today_theme_map","top_themes"} 或 None。
         - daily_counts: 今天之前最近 5 个交易日（回溯算法）的涨停家数，近→远。
           凑齐 <3 个交易日 → 返回 None（不可用）。
         - yesterday_codes: 最近一个交易日的涨停代码列表。
         - yesterday_boards: 最近一个交易日中连板数≥2 的代码列表（供 N4 晋级率计算）。
         - max_boards: 今日涨停池的最高连板数（今日非交易日/空池 → 0）。
+        - today_theme_map: 今日涨停池 裸代码 → 题材(hybk), 供 F4/S6 题材共振。
+        - top_themes: 今日主线题材列表(按涨停家数/连板高度排序), 供市场环境展示。
         任一步失败（EastMoneyError）→ 返回 None，调用方回退到代理算法。"""
         today = date.today()
         try:
@@ -117,6 +144,8 @@ class EastMoneyFeed:
             return None
         today_stocks = self._pool_to_stocks(today_pool or [])
         max_boards = max((s["boards"] for s in today_stocks), default=0)
+        today_theme_map = {s["code"]: s["theme"] for s in today_stocks if s.get("theme")}
+        top_themes = self.aggregate_by_theme(today_stocks)
 
         daily_counts = []
         yesterday_codes = []
@@ -153,4 +182,6 @@ class EastMoneyFeed:
             "yesterday_codes": yesterday_codes,
             "yesterday_boards": yesterday_boards,
             "max_boards": max_boards,
+            "today_theme_map": today_theme_map,
+            "top_themes": top_themes,
         }

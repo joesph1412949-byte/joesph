@@ -333,3 +333,56 @@ def test_screen_batches_kline_and_index_once():
     assert calls["index"] == 1             # 指数拉一次
     assert eng.seen[0] is not None         # kline 已注入
     assert eng.seen[1] is not None         # index_kline 已注入
+
+
+# ---------- 题材主线聚类 ----------
+
+def test_screen_exposes_top_themes_in_market():
+    em = dict(DEFAULT_EM)
+    em["top_themes"] = [
+        {"theme": "机器人", "count": 3, "max_boards": 5, "codes": ["002859"]},
+        {"theme": "AI算力", "count": 2, "max_boards": 2, "codes": ["000001"]},
+    ]
+    r = ScreenRunner(ds=FakeDS(), engine=FakeEngine(), store=FakeStore(),
+                     scorer=FakeScorer(),
+                     em_feed=FakeEastMoneyFeed(stats=em),
+                     fund_feed=FakeFundFeed()).run()
+    assert r["market"]["top_themes"][0]["theme"] == "机器人"
+    assert r["market"]["top_themes"][0]["count"] == 3
+
+
+def test_screen_top_themes_empty_when_em_unavailable():
+    class FailFeed(FakeEastMoneyFeed):
+        def get_market_stats(self):
+            raise RuntimeError("eastmoney down")
+    r = ScreenRunner(ds=FakeDS(), engine=FakeEngine(), store=FakeStore(),
+                     scorer=FakeScorer(), em_feed=FailFeed(),
+                     fund_feed=FakeFundFeed()).run()
+    assert r["market"]["top_themes"] == []   # em 不可用 → 空, 不崩
+
+
+def test_build_sector_map_theme_overrides_sector():
+    # 题材优先级高于申万行业: 同一 code 有题材映射时, F4/S6 用题材而非行业
+    em = dict(DEFAULT_EM)
+    em["today_theme_map"] = {"002859": "机器人", "000001": "AI算力"}
+    r = ScreenRunner(ds=FakeDS(), engine=FakeEngine(), store=FakeStore(),
+                     scorer=FakeScorer(),
+                     em_feed=FakeEastMoneyFeed(stats=em),
+                     fund_feed=FakeFundFeed())
+    smap = r._build_sector_map(
+        [{"code": "002859.SZ"}, {"code": "000001.SZ"}],
+        theme_map=em["today_theme_map"])
+    assert smap.get("002859.SZ") == "机器人"     # 裸码 → 后缀命中题材
+    assert smap.get("000001.SZ") == "AI算力"
+    # 无题材映射的股票保持无映射(或申万兜底, 这里 FakeDS 无行业成分股)
+    assert "600000.SH" not in smap
+
+
+def test_build_sector_map_without_theme_falls_back():
+    # 无题材数据(em 无 today_theme_map) → 行为与原一致(申万兜底, FakeDS 为空)
+    r = ScreenRunner(ds=FakeDS(), engine=FakeEngine(), store=FakeStore(),
+                     scorer=FakeScorer(),
+                     em_feed=FakeEastMoneyFeed(stats=DEFAULT_EM),
+                     fund_feed=FakeFundFeed())
+    smap = r._build_sector_map([{"code": "002859.SZ"}])
+    assert smap.get("002859.SZ") is None

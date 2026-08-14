@@ -55,8 +55,8 @@ def test_fetch_limit_up_pool_parses_stocks():
     feed = EastMoneyFeed(http_get=FakeHTTP({"20260810": {"data": {"pool": pool}}}))
     stocks = feed.fetch_limit_up_pool("20260810")
     assert stocks == [
-        {"code": "000001", "name": "平安银行", "boards": 1},
-        {"code": "002859", "name": "洁美科技", "boards": 5},
+        {"code": "000001", "name": "平安银行", "boards": 1, "theme": ""},
+        {"code": "002859", "name": "洁美科技", "boards": 5, "theme": ""},
     ]
 
 
@@ -242,3 +242,98 @@ def test_get_market_stats_yesterday_boards_empty_when_all_first_boards():
     assert stats is not None
     assert stats["yesterday_codes"] == ["000010", "000011"]
     assert stats["yesterday_boards"] == []   # 昨日全是首板(1板)
+
+
+# ---------- 题材主线聚合(hybk) ----------
+
+def _stocks_with_theme(*triples):
+    """构造带题材的东财**原始**涨停池条目: (code, name, boards, theme) → {c,n,lbc,hybk}。
+    供 get_market_stats(内部会再过 _pool_to_stocks)直接使用。"""
+    return [{"c": c, "n": n, "lbc": b, "hybk": t} for c, n, b, t in triples]
+
+
+def test_aggregate_by_theme_ranks_by_count_then_boards():
+    # 走完整转换链路: 原始东财池 → _pool_to_stocks → aggregate_by_theme
+    raw = _stocks_with_theme(
+        ("000001", "A", 1, "机器人"),
+        ("000002", "B", 2, "机器人"),
+        ("000003", "C", 5, "机器人"),
+        ("000010", "X", 1, "AI算力"),
+        ("000011", "Y", 1, "AI算力"),
+        ("000020", "W", 3, "低空经济"),
+    )
+    stocks = EastMoneyFeed._pool_to_stocks(raw)
+    themes = EastMoneyFeed.aggregate_by_theme(stocks)
+    assert themes[0]["theme"] == "机器人"      # 3家 > 2家
+    assert themes[0]["count"] == 3
+    assert themes[0]["max_boards"] == 5
+    assert themes[1]["theme"] == "AI算力"
+    assert themes[1]["max_boards"] == 1        # 同级按连板高度排序
+    assert themes[2]["theme"] == "低空经济"
+    assert set(themes[0]["codes"]) == {"000001", "000002", "000003"}
+
+
+def test_aggregate_by_theme_unknown_bucket_last():
+    raw = _stocks_with_theme(
+        ("000001", "A", 1, "机器人"),
+        ("000002", "B", 1, ""),       # 无题材
+        ("000003", "C", 1, None),     # 无题材
+    )
+    stocks = EastMoneyFeed._pool_to_stocks(raw)
+    themes = EastMoneyFeed.aggregate_by_theme(stocks)
+    assert themes[0]["theme"] == "机器人"
+    assert themes[-1]["theme"] == "未知"       # 无题材聚到最后
+    assert themes[-1]["count"] == 2
+
+
+def test_aggregate_by_theme_empty():
+    assert EastMoneyFeed.aggregate_by_theme([]) == []
+    assert EastMoneyFeed.aggregate_by_theme(None) == []
+
+
+def test_get_market_stats_includes_theme_map_and_top_themes():
+    today = date.today()
+
+    def d(offset):
+        return (today - timedelta(days=offset)).strftime("%Y%m%d")
+
+    http = FakeHTTP({
+        d(0): {"data": {"pool": _stocks_with_theme(
+            ("000001", "A", 1, "机器人"), ("000002", "B", 3, "机器人"))}},
+        d(1): {"data": {"pool": _stocks(("000010", "X", 1))}},
+        d(2): {"data": {"pool": _stocks(("000020", "W", 1))}},
+        d(3): {"data": {"pool": _stocks(("000021", "V", 1))}},
+        d(4): {"data": {"pool": _stocks(("000022", "U", 1))}},
+        d(5): {"data": {"pool": _stocks(("000023", "T", 1))}},
+        d(6): {"data": {"pool": _stocks(("000024", "S", 1))}},
+    })
+    stats = EastMoneyFeed(http_get=http).get_market_stats()
+    assert stats is not None
+    # 今日涨停池: 000001/000002 都属于"机器人" → theme_map + top_themes
+    assert stats["today_theme_map"] == {"000001": "机器人", "000002": "机器人"}
+    assert stats["top_themes"][0]["theme"] == "机器人"
+    assert stats["top_themes"][0]["count"] == 2
+    assert stats["top_themes"][0]["max_boards"] == 3
+
+
+def test_get_market_stats_theme_fields_empty_without_hybk():
+    today = date.today()
+
+    def d(offset):
+        return (today - timedelta(days=offset)).strftime("%Y%m%d")
+
+    # 东财涨停池条目无 hybk 字段 → theme_map 为空, top_themes 为 [未知]
+    http = FakeHTTP({
+        d(0): {"data": {"pool": _stocks(("000001", "A", 1), ("000002", "B", 2))}},
+        d(1): {"data": {"pool": _stocks(("000010", "X", 1))}},
+        d(2): {"data": {"pool": _stocks(("000020", "W", 1))}},
+        d(3): {"data": {"pool": _stocks(("000021", "V", 1))}},
+        d(4): {"data": {"pool": _stocks(("000022", "U", 1))}},
+        d(5): {"data": {"pool": _stocks(("000023", "T", 1))}},
+        d(6): {"data": {"pool": _stocks(("000024", "S", 1))}},
+    })
+    stats = EastMoneyFeed(http_get=http).get_market_stats()
+    assert stats is not None
+    assert stats["today_theme_map"] == {}
+    assert stats["top_themes"] == [{"theme": "未知", "count": 2, "max_boards": 2,
+                                    "codes": ["000001", "000002"]}]

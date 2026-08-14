@@ -3,9 +3,14 @@
 自动算的 16 个：F1 F2 F3 F4 F5 F6 Y3 Y4 S2 S3 S4 S6 N1 N2 N4 N5
 手填的 8 个：F7 Y1 Y2 Y5 Y6 Y7 S1 S5 S7（在 manual_store.py / 网页手填）"""
 import re
+import sys
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).parent.parent))  # 项目根(common.py)
+from common import with_market_suffix as _with_market_suffix
 
 
 class FactorComputeError(Exception):
@@ -19,16 +24,9 @@ def _ma(series, n):
 def _tick_key_for_em_code(code):
     """东财裸代码(6位数字) → QMT ticks 字典键(带交易所后缀)。
     A股后缀约定: 6xxxxx→.SH, 0xxxxx/3xxxxx→.SZ, 8xxxxx/4xxxxx/92xxxx→.BJ。
-    已带后缀的键原样返回; 无法推断时原样返回(由调用方当作"找不到"处理)。"""
-    if "." in code:
-        return code
-    if code.startswith("6"):
-        return code + ".SH"
-    if code.startswith(("0", "3")):
-        return code + ".SZ"
-    if code.startswith(("8", "4", "92")):
-        return code + ".BJ"
-    return code
+    已带后缀的键原样返回; 无法推断时原样返回(由调用方当作"找不到"处理)。
+    (实现收敛到 common.py 单一规则, 避免多处重复后漂移)"""
+    return _with_market_suffix(code)
 
 
 def _parse_timetag_hhmm(ts):

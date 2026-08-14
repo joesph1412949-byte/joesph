@@ -136,9 +136,16 @@ def _safe_unlink(f):
         pass
 
 def _with_market_suffix(code):
+    # Keep in sync with common.py with_market_suffix. This file stays
+    # self-contained on purpose: QMT runs it as a pasted strategy where
+    # project-root imports are not available.
     code = str(code).strip()
     if "." in code:
         return code
+    if code.startswith("92"):
+        return code + ".BJ"                    # BJ 92xx (before the "9" branch)
+    if code.startswith(("8", "4")):
+        return code + ".BJ"
     if code.startswith(("6", "5", "9")):
         return code + ".SH"
     if code.startswith(("0", "3", "2")):
