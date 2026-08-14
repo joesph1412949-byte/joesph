@@ -49,6 +49,7 @@ class FakeProvider(DataProvider):
         self.fund_feed = None
         self.manual = _FakeManual()
         self._em_stats = None
+        self._limit_ups_cache = None
 
 
 def test_provider_builds_stock_context():
@@ -62,6 +63,70 @@ def test_provider_get_limit_ups():
     p = FakeProvider()
     ups = p.get_limit_ups()
     assert ups[0]["code"] == "600000.SH"
+
+
+def test_build_stock_context_includes_limit_ups():
+    """回归: ctx.limit_ups 必须包含涨停池(曾因 _lazy 标志未设置而恒空)。"""
+    p = FakeProvider()
+    ctx = p.build_stock_context("600000.SH")
+    assert ctx.limit_ups[0]["code"] == "600000.SH"
+
+
+class _CountingDS(FakeDS):
+    """在 FakeDS 上给 get_limit_up_stocks 加调用计数。"""
+
+    def __init__(self):
+        self.calls = 0
+
+    def get_limit_up_stocks(self, ticks=None):
+        self.calls += 1
+        return [{"code": "600000.SH", "name": "浦发", "last": 10.5}]
+
+
+def test_get_limit_ups_cached():
+    """缓存验证: 连续两次 get_limit_ups 只触发一次底层全市场拉取。"""
+    ds = _CountingDS()
+    p = FakeProvider()
+    p.ds = ds
+    p._limit_ups_cache = None
+    assert p.get_limit_ups()[0]["code"] == "600000.SH"
+    assert p.get_limit_ups()[0]["code"] == "600000.SH"
+    assert ds.calls == 1
+
+
+def test_get_limit_ups_not_cached_on_failure():
+    """失败不缓存: 底层抛异常返回 [] 且缓存保持 None, 下次调用会重试。"""
+    class BoomDS(FakeDS):
+        def get_limit_up_stocks(self, ticks=None):
+            raise RuntimeError("limit-up boom")
+
+    p = FakeProvider()
+    p.ds = BoomDS()
+    p._limit_ups_cache = None
+    assert p.get_limit_ups() == []
+    assert p._limit_ups_cache is None
+
+
+def test_build_market_context_warms_limit_ups_cache():
+    """市场上下文成功后预热缓存: 后续 get_limit_ups 不再重复全市场拉取。"""
+    ds = _CountingDS()
+    p = FakeProvider()
+    p.ds = ds
+    p._limit_ups_cache = None
+    ctx = p.build_market_context()
+    assert ctx.limit_ups[0]["code"] == "600000.SH"
+    assert p.get_limit_ups()[0]["code"] == "600000.SH"
+    assert ds.calls == 1
+
+
+def test_invalidate_clears_caches():
+    """invalidate 清空 provider 级缓存(盘后定时跑选股时刷新用)。"""
+    p = FakeProvider()
+    p._limit_ups_cache = [{"code": "600000.SH"}]
+    p._em_stats = {"some": "stats"}
+    p.invalidate()
+    assert p._limit_ups_cache is None
+    assert p._em_stats is None
 
 
 def test_context_from_provider_delegates():
