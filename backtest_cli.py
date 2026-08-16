@@ -35,9 +35,20 @@ _session = requests.Session() if requests is not None else None
 def qmt_kline_feed(code):
     """用 QMT 本地 K线(xtdata, 已连接的 miniQMT)拉历史日K → [(date, close), ...]。
 
-    优先于网络源: 本地数据无网络依赖、无限流、秒回。需要 QMT 已登录并开启
-    miniQMT(与 strategy_web 同一数据源)。失败 → []。
+    优先从 zt_history 缓存读(构建后秒回, 无网络); 缓存无此股 → 单只拉。
+    失败 → []。
     """
+    # 优先: zt_history 缓存(全市场K线已落盘)
+    try:
+        from prism.zt_history import _load_cache
+        _cache = _load_cache()
+        if _cache:
+            rec = _cache.get(str(code).strip().upper())
+            if rec and rec.get("dates"):
+                return list(zip(rec["dates"], rec["close"]))
+    except Exception:
+        pass
+    # 回退: 单只实时拉
     try:
         from xtquant import xtdata
         s = str(code).strip().upper()
@@ -92,7 +103,21 @@ def kline_feed(code):
 # ---------------------------------------------------------------- feeds
 
 def zt_feed(date_yyyymmdd):
-    """东财历史涨停池 → [{code, boards, theme}]。非交易日/失败 → []。"""
+    """东财历史涨停池 → [{code, boards, theme}]。非交易日/失败 → []。
+
+    优先用 QMT 历史K线生成(zt_history 缓存, 可回溯约1.5年, 无网络依赖);
+    缓存不存在时回退东财(仅最近约20天)。"""
+    # QMT 本地历史池(优先)
+    try:
+        from prism.zt_history import qmt_zt_feed, _load_cache
+        _cache = _load_cache()
+        if _cache:
+            pool = qmt_zt_feed(date_yyyymmdd, _cache)
+            if pool:
+                return pool
+    except Exception:
+        pass
+    # 回退: 东财(最近约20天)
     if requests is None:
         return []
     try:
