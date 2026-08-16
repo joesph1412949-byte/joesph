@@ -147,3 +147,160 @@ def test_backtest_compare_params_grid():
     for row in rows:
         assert "win_rate" in row and "avg_return_pct" in row
         assert "max_drawdown_pct" in row and "hold_days" in row
+
+
+# ---------------- I1(审查 Important): 回测数据适配层 + sell_rules 采纳 + 端到端 ----------------
+
+def test_backtest_stock_ctx_builds_dataframe():
+    """审查 I1: kline_feed 元组列表 → DataFrame(真实因子按 kline["close"]/len(kline) 访问)。"""
+    s = load_strategy(_mk_strategy())
+    bt = backtest.Backtester(s, zt_feed=lambda d: [], kline_feed=lambda c: [])
+    ctx = bt._stock_ctx("600000.SH",
+                        [("2026-07-01", 10.0), ("2026-07-02", 10.5)])
+    assert ctx.kline is not None
+    assert list(ctx.kline["close"]) == [10.0, 10.5]
+    assert list(ctx.kline["volume"]) == [1.0, 1.0]
+    assert len(ctx.kline) == 2
+    # 空 K线 → kline=None(因子 fail-open, 不崩)
+    ctx2 = bt._stock_ctx("600000.SH", [])
+    assert ctx2.kline is None
+    # 含脏行(close 非数值)→ 跳过, 不崩
+    ctx3 = bt._stock_ctx("600000.SH", [("2026-07-01", 10.0), ("2026-07-02", None)])
+    assert len(ctx3.kline) == 1
+
+
+def test_backtest_run_adopts_strategy_sell_rules():
+    """审查 I1: run() 默认采用策略配置 sell_rules(显式参数优先覆盖)。
+
+    K线 10→11.2(6根): 配置止盈5% → 07-04 10.6 触发(+6%≥5%);
+    硬编码默认止盈8% 会在 07-05 10.9 才触发。收益率差异证明规则来自配置。
+    """
+    s = {
+        "id": "e2e", "name": "端到端",
+        "market_gate": {"model": "node", "threshold": 1, "factors": ["N1"]},
+        "scoring_models": [
+            {"id": "m1", "name": "M1", "weight": 1.0,
+             "factors": [{"id": "A1", "op": ">", "threshold": 0}]},
+        ],
+        "composite": {"mode": "sum"},
+        "filters": {"candidate_min_model": 1},
+        "sell_rules": {"take_profit_pct": 0.05, "stop_loss_pct": 0.05,
+                       "max_hold_days": 5},
+    }
+    s = load_strategy(s)
+    start = date(2026, 7, 1)
+    closes = [10.0, 10.0, 10.3, 10.6, 10.9, 11.2]
+    dates = [(start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6)]
+
+    def zf(d):
+        return [{"code": "600000.SH", "boards": 1, "theme": "机器人"}] \
+            if d == "20260701" else []
+
+    def kf(code):
+        return list(zip(dates, closes))
+
+    bt = backtest.Backtester(s, zt_feed=zf, kline_feed=kf)
+    rep_cfg = bt.run(start, start + timedelta(days=2))          # 用策略配置 5% 止盈
+    rep_override = bt.run(start, start + timedelta(days=2),
+                          sell_rules={"take_profit_pct": 0.08,  # 显式覆盖 8% 止盈
+                                      "stop_loss_pct": 0.05,
+                                      "max_hold_days": 5})
+    assert rep_cfg["trades"] == 1
+    assert rep_override["trades"] == 1
+    # 5% 止盈 → 10.6 出场 ≈ 5.74%; 8% 止盈 → 10.9 出场 ≈ 8.73%
+    assert rep_cfg["avg_return_pct"] == pytest.approx(5.74, abs=0.05)
+    assert rep_override["avg_return_pct"] == pytest.approx(8.73, abs=0.05)
+    assert rep_cfg["avg_return_pct"] < rep_override["avg_return_pct"]
+
+
+def test_backtest_e2e_real_shaped_factors_with_fake_feeds():
+    """审查 I1 端到端: 默认形态策略 + 真实形态因子(DataFrame 访问 kline)+ 假 feeds。
+
+    ① 未注入 em/ticks: N3/N5 缺数据得 0 → 门槛不达标 → 空仓 + gate_notes 归因;
+    ② 注入 em/ticks: 门槛达标 → 选股成功(证明 DataFrame 适配层让真实形态因子命中);
+    ③ 卖出规则来自策略配置(见 test_backtest_run_adopts_strategy_sell_rules)。
+    """
+    # 真实形态节点因子(与 prism.factors 同逻辑形态)
+    @reg.factor(id="N1", name="涨停指数", category="node", description="")
+    def f_n1(ctx):
+        return {"score": 1 if (ctx.limit_ups or []) else 0, "note": "兜底"}
+
+    @reg.factor(id="N3", name="首板溢价", category="node", description="")
+    def f_n3(ctx):
+        ticks = ctx.get("ticks") or {}
+        chgs = []
+        for code in (ctx.em or {}).get("yesterday_codes") or []:
+            t = ticks.get(code) or {}
+            last, lc = t.get("lastPrice") or 0, t.get("lastClose") or 0
+            if last > 0 and lc > 0:
+                chgs.append((last / lc - 1) * 100)
+        avg = sum(chgs) / len(chgs) if chgs else 0.0
+        return {"score": 1 if avg > 0 else 0, "note": ""}
+
+    @reg.factor(id="N5", name="两市成交额", category="node", description="")
+    def f_n5(ctx):
+        ticks = ctx.get("ticks") or {}
+        total = sum((t.get("amount") or 0) for t in ticks.values())
+        return {"score": 1 if total >= 2e12 else 0, "note": ""}
+
+    # 真实形态个股因子: 按 DataFrame 访问 kline["close"](F1 同形态)
+    @reg.factor(id="A1", name="首板确认", category="first_board", description="")
+    def f_a1(ctx):
+        kline = ctx.kline
+        if kline is None or len(kline) < 2:
+            return {"score": 0, "note": "K线缺失"}
+        closes = kline["close"].tolist()
+        return {"score": 1 if closes[-1] > closes[0] else 0, "note": ""}
+
+    s = {
+        "id": "e2e", "name": "默认形态端到端",
+        "market_gate": {"model": "node", "threshold": 2,
+                        "factors": ["N1", "N3", "N5"]},
+        "scoring_models": [
+            {"id": "m1", "name": "M1", "weight": 1.0,
+             "factors": [{"id": "A1", "op": ">", "threshold": 0}]},
+        ],
+        "composite": {"mode": "sum"},
+        "filters": {"candidate_min_model": 1},
+        "sell_rules": {"take_profit_pct": 0.05, "stop_loss_pct": 0.05,
+                       "max_hold_days": 5},
+    }
+    s = load_strategy(s)
+    start = date(2026, 7, 1)
+    closes = [10.0, 10.0, 10.3, 10.6, 10.9, 11.2]
+    dates = [(start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6)]
+
+    def zf(d):
+        return [{"code": "600000.SH", "boards": 1, "theme": "机器人"}] \
+            if d == "20260701" else []
+
+    def kf(code):
+        return list(zip(dates, closes))
+
+    bt = backtest.Backtester(s, zt_feed=zf, kline_feed=kf)
+
+    # ① 未注入 em/ticks → N3/N5 缺数据得 0 → gate=1 < 2 → 空仓 + gate_notes 归因
+    rep = bt.run(start, start + timedelta(days=2))
+    assert rep["trades"] == 0
+    joined = "\n".join(rep["gate_notes"])
+    assert "N3" in joined and "N5" in joined
+    assert "N1" not in joined, "N1 兜底靠池子, 不应归因数据缺失"
+
+    # ② 注入 em/ticks → N3/N5 命中 → gate 达标 → 选股成功(DataFrame 适配层生效)
+    em = {"yesterday_codes": ["600000"]}
+    ticks = {"600000.SH": {"lastPrice": 10.5, "lastClose": 10.0,
+                           "amount": 2.5e12}}
+    rep2 = bt.run(start, start + timedelta(days=2), em=em, ticks=ticks)
+    assert rep2["trades"] == 1
+    assert rep2["avg_return_pct"] == pytest.approx(5.74, abs=0.05)
+    assert rep2["gate_notes"] == []
+
+
+def test_backtest_gate_notes_only_attributes_missing_data():
+    """审查 I1: gate_notes 只归因"缺注入数据"的门槛因子 0, 不把池子可算的 0 也算进去。"""
+    s = _mk_strategy()
+    s["market_gate"] = {"model": "node", "threshold": 1, "factors": ["N1"]}
+    s = load_strategy(s)
+    bt = backtest.Backtester(s, zt_feed=lambda d: [], kline_feed=lambda c: [])
+    rep = bt.run(date(2026, 7, 1), date(2026, 7, 3))
+    assert rep["gate_notes"] == []   # N1 兜底靠池子, 无注入数据依赖
