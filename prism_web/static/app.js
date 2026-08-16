@@ -461,7 +461,7 @@ async function runBacktest() {
   const end = document.getElementById("bt-end").value.replace(/-/g, "");
   if (!start || !end || start > end) { alert("请填写有效的起止日期"); return; }
   btn.disabled = true;
-  box.innerHTML = `<div class="hint">回测进行中…(东财数据, 每笔需拉K线, 请稍候)</div>`;
+  box.innerHTML = `<div class="hint">回测进行中…(QMT本地K线, 请稍候)</div>`;
   try {
     const data = await api(`/api/backtest?strategy=${strategy}&start=${start}&end=${end}`);
     if (!data.ok) { box.innerHTML = `<div class="error">回测失败: ${data.error || "未知错误"}</div>`; return; }
@@ -489,6 +489,7 @@ function renderBacktest(r) {
     ["夏普比", r.sharpe_ratio == null ? "-" : r.sharpe_ratio],
     ["最大回撤", r.max_drawdown_pct == null ? "-" : r.max_drawdown_pct + "%"],
     ["总收益(累加)", r.total_return_pct == null ? "-" : r.total_return_pct + "%"],
+    ["平均成本/笔", r.avg_cost_pct == null ? "-" : r.avg_cost_pct + "%"],
   ];
   // 交易日志表(按日期降序, 最新在前)
   const log = (r.trade_log || []).map(t => `
@@ -499,6 +500,7 @@ function renderBacktest(r) {
       <td>${t.composite == null ? "-" : t.composite}</td>
       <td>${t.entry == null ? "-" : t.entry}</td>
       <td>${t.exit == null ? "-" : t.exit}</td>
+      <td>${t.cost_pct == null ? "-" : t.cost_pct + "%"}</td>
       <td class="bt-ret">${t.return_pct >= 0 ? "+" : ""}${t.return_pct}%</td>
     </tr>`).join("");
   box.innerHTML = `
@@ -512,11 +514,11 @@ function renderBacktest(r) {
       <table id="bt-log-table">
         <thead><tr>
           <th>日期</th><th>代码</th><th>题材</th><th>综合分</th>
-          <th>买入价</th><th>卖出价</th><th>收益率</th>
+          <th>买入价</th><th>卖出价</th><th>成本</th><th>收益率</th>
         </tr></thead>
-        <tbody>${log || `<tr><td colspan="7" class="hint">无明细</td></tr>`}</tbody>
+        <tbody>${log || `<tr><td colspan="8" class="hint">无明细</td></tr>`}</tbody>
       </table>
     </div>
-    <div class="hint" style="margin-top:10px">注: 回测为简化交易模拟(收盘买入+滑点, 手续费万2.5),
-      实际结果以实盘为准; 夏普比按每笔收益率年化(简化), 样本不足2笔时为"-"。</div>`;
+    <div class="hint" style="margin-top:10px">注: 真实交易成本模型(佣金万2.5双向 + 印花税0.05%卖出 + 过户费万0.1 + 滑点0.1%),
+      夏普比按每笔收益率年化(简化); 数据源优先 QMT 本地K线。</div>`;
 }

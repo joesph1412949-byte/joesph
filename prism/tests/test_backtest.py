@@ -199,7 +199,10 @@ def test_backtest_run_adopts_strategy_sell_rules():
     def kf(code):
         return list(zip(dates, closes))
 
-    bt = backtest.Backtester(s, zt_feed=zf, kline_feed=kf)
+    # 零成本模拟: 本测试只验证 sell_rules 是否被采用, 不受真实成本干扰
+    bt = backtest.Backtester(s, zt_feed=zf, kline_feed=kf,
+                             fee_rate=0.0, slippage=0.0,
+                             stamp_duty=0.0, transfer_fee=0.0)
     rep_cfg = bt.run(start, start + timedelta(days=2))          # 用策略配置 5% 止盈
     rep_override = bt.run(start, start + timedelta(days=2),
                           sell_rules={"take_profit_pct": 0.08,  # 显式覆盖 8% 止盈
@@ -207,9 +210,9 @@ def test_backtest_run_adopts_strategy_sell_rules():
                                       "max_hold_days": 5})
     assert rep_cfg["trades"] == 1
     assert rep_override["trades"] == 1
-    # 5% 止盈 → 10.6 出场 ≈ 5.74%; 8% 止盈 → 10.9 出场 ≈ 8.73%
-    assert rep_cfg["avg_return_pct"] == pytest.approx(5.74, abs=0.05)
-    assert rep_override["avg_return_pct"] == pytest.approx(8.73, abs=0.05)
+    # 零成本: 5% 止盈 → 10.6 出场 = +6.0%; 8% 止盈 → 10.9 出场 = +9.0%
+    assert rep_cfg["avg_return_pct"] == pytest.approx(6.0, abs=0.05)
+    assert rep_override["avg_return_pct"] == pytest.approx(9.0, abs=0.05)
     assert rep_cfg["avg_return_pct"] < rep_override["avg_return_pct"]
 
 
@@ -277,7 +280,10 @@ def test_backtest_e2e_real_shaped_factors_with_fake_feeds():
     def kf(code):
         return list(zip(dates, closes))
 
-    bt = backtest.Backtester(s, zt_feed=zf, kline_feed=kf)
+    # 零成本模拟: 本测试验证 gate 数据适配层与因子命中, 不受真实成本干扰
+    bt = backtest.Backtester(s, zt_feed=zf, kline_feed=kf,
+                             fee_rate=0.0, slippage=0.0,
+                             stamp_duty=0.0, transfer_fee=0.0)
 
     # ① 未注入 em/ticks → N3/N5 缺数据得 0 → gate=1 < 2 → 空仓 + gate_notes 归因
     rep = bt.run(start, start + timedelta(days=2))
@@ -292,7 +298,7 @@ def test_backtest_e2e_real_shaped_factors_with_fake_feeds():
                            "amount": 2.5e12}}
     rep2 = bt.run(start, start + timedelta(days=2), em=em, ticks=ticks)
     assert rep2["trades"] == 1
-    assert rep2["avg_return_pct"] == pytest.approx(5.74, abs=0.05)
+    assert rep2["avg_return_pct"] == pytest.approx(6.0, abs=0.05)
     assert rep2["gate_notes"] == []
 
 
@@ -353,3 +359,57 @@ def test_backtest_sharpe_multiple_trades():
     assert rep["trades"] >= 2
     assert rep["sharpe_ratio"] is not None
     assert isinstance(rep["sharpe_ratio"], float)
+
+
+def test_backtest_real_costs_reduce_return():
+    """真实交易成本(佣金+印花税+过户费+滑点) > 仅滑点 → 净收益更低。"""
+    s = load_strategy(_mk_strategy())
+    zf, kf = _feeds()
+    # 无任何费用(滑点0/佣金0/印花税0/过户费0)
+    bt0 = backtest.Backtester(s, zt_feed=zf, kline_feed=kf,
+                              fee_rate=0.0, slippage=0.0,
+                              stamp_duty=0.0, transfer_fee=0.0)
+    # 真实成本(默认: 佣金万2.5 + 滑点0.1% + 印花税0.05% + 过户费万0.1)
+    bt1 = backtest.Backtester(s, zt_feed=zf, kline_feed=kf)
+    rep0 = bt0.run(date(2026, 7, 1), date(2026, 7, 3))
+    rep1 = bt1.run(date(2026, 7, 1), date(2026, 7, 3))
+    assert rep0["trades"] == 1 and rep1["trades"] == 1
+    assert rep1["avg_return_pct"] < rep0["avg_return_pct"]
+    # 交易日志含成本字段
+    assert "cost_pct" in rep1["trade_log"][0]
+    assert rep1["avg_cost_pct"] is not None
+    assert rep1["avg_cost_pct"] > 0
+
+
+def test_backtest_run_oos_splits_and_verdict():
+    """样本外验证: 区间切成两段, 输出样本内/样本外报告 + 判语。"""
+    s = load_strategy(_mk_strategy())
+    start = date(2026, 7, 1)
+
+    def zf(d):
+        by_day = {"20260701": "600001.SH", "20260702": "600002.SH",
+                  "20260703": "600003.SH", "20260706": "600004.SH",
+                  "20260707": "600005.SH", "20260708": "600006.SH"}
+        return [{"code": by_day[d], "boards": 1, "theme": "T"}] if d in by_day else []
+
+    def kf(code):
+        closes = [10.0 * 1.02 ** i for i in range(8)]
+        dates = [(start + timedelta(days=i)).strftime("%Y-%m-%d")
+                 for i in range(8)]
+        return list(zip(dates, closes))
+
+    bt = backtest.Backtester(s, zt_feed=zf, kline_feed=kf)
+    res = bt.run_oos(start, start + timedelta(days=7), split_ratio=0.5)
+    assert "in_sample" in res and "out_sample" in res
+    assert "verdict" in res
+    # 两端合计交易数 = 全区间交易数(6天都有1只)
+    full = bt.run(start, start + timedelta(days=7))
+    assert (res["in_sample"]["trades"] + res["out_sample"]["trades"]
+            == full["trades"])
+
+
+def test_backtest_run_oos_short_range_error():
+    s = load_strategy(_mk_strategy())
+    bt = backtest.Backtester(s, zt_feed=lambda d: [], kline_feed=lambda c: [])
+    res = bt.run_oos(date(2026, 7, 1), date(2026, 7, 3))
+    assert "error" in res

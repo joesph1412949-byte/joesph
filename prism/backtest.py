@@ -71,12 +71,15 @@ class Backtester:
     """真实策略回放 + 交易模拟。"""
 
     def __init__(self, strategy, zt_feed, kline_feed,
-                 fee_rate=0.00025, slippage=0.001, position_ratio=0.3):
+                 fee_rate=0.00025, slippage=0.001, position_ratio=0.3,
+                 stamp_duty=0.0005, transfer_fee=0.00001):
         self.strategy = load_strategy(strategy)
         self.zt_feed = zt_feed
         self.kline_feed = kline_feed
-        self.fee_rate = fee_rate
-        self.slippage = slippage
+        self.fee_rate = fee_rate            # 佣金(双向, 默认万2.5)
+        self.slippage = slippage            # 滑点(买+卖-, 默认0.1%)
+        self.stamp_duty = stamp_duty        # 印花税(仅卖出, A股默认0.05%)
+        self.transfer_fee = transfer_fee    # 过户费(双向, 默认万0.1)
         self.position_ratio = position_ratio   # 单只资金上限(报告暂按等权, 预留)
         # K线缓存: 同一只股票整个回测只拉一次(避免 _pick 与 _simulate_trade 重复请求)
         self._kline_cache = {}
@@ -245,6 +248,7 @@ class Backtester:
                             "boards": boards, "theme": theme,
                             "composite": composite,
                             "entry": tr[0], "exit": tr[1], "return_pct": tr[2],
+                            "cost_pct": tr[3],
                         })
             d += timedelta(days=1)
         return self._report(trades, dates, gate_notes=gate_notes)
@@ -289,11 +293,22 @@ class Backtester:
                 break
         if exit_close is None:
             return None
-        # 卖出: 收盘价 - 滑点; 手续费双向
+        # ---- 真实交易成本(A股标准) ----
+        # 买入成本: 佣金(双向) + 过户费(双向) + 滑点(买+)
+        buy_price = entry_close * (1 + self.slippage)
+        buy_comm = buy_price * self.fee_rate          # 买入佣金
+        buy_transfer = buy_price * self.transfer_fee  # 买入过户费
+        # 卖出成本: 佣金 + 印花税(仅卖出) + 过户费 + 滑点(卖-)
         sell_price = exit_close * (1 - self.slippage)
-        fee = buy_price * self.fee_rate + sell_price * self.fee_rate
-        net = (sell_price - buy_price - fee) / buy_price * 100
-        return (round(buy_price, 4), round(sell_price, 4), round(net, 2))
+        sell_comm = sell_price * self.fee_rate        # 卖出佣金
+        sell_stamp = sell_price * self.stamp_duty     # 卖出印花税
+        sell_transfer = sell_price * self.transfer_fee  # 卖出过户费
+        total_cost = (buy_comm + buy_transfer +
+                      sell_comm + sell_stamp + sell_transfer)
+        # 净收益 = (卖-买-成本)/买(单股口径, 与手数无关)
+        net = (sell_price - buy_price - total_cost) / buy_price * 100
+        return (round(buy_price, 4), round(sell_price, 4), round(net, 2),
+                round(total_cost / buy_price * 100, 3))
 
     # ---------------- 统计 ----------------
     @staticmethod
@@ -341,6 +356,9 @@ class Backtester:
         trade_log = sorted(
             trades,
             key=lambda t: (t["date"], t["code"]), reverse=True)
+        # 平均交易成本(占买入价比例, %)
+        costs = [t.get("cost_pct") for t in trades if t.get("cost_pct") is not None]
+        avg_cost = (sum(costs) / len(costs)) if costs else None
         return {
             "trading_days": len(dates), "trades": n,
             "gate_notes": gate_notes or [],
@@ -349,6 +367,7 @@ class Backtester:
             "profit_loss_ratio": round(pl_ratio, 2) if pl_ratio else None,
             "max_drawdown_pct": round(max_dd, 2),
             "total_return_pct": round(sum(returns), 2),
+            "avg_cost_pct": round(avg_cost, 3) if avg_cost is not None else None,
             "sharpe_ratio": sharpe,
             "trade_log": trade_log,
         }
@@ -372,3 +391,28 @@ class Backtester:
                 "max_drawdown_pct": rep["max_drawdown_pct"],
             })
         return rows
+
+    # ---------------- 防过拟合: 样本外验证 ----------------
+    def run_oos(self, start_date, end_date, split_ratio=0.5,
+                sell_rules=None, progress=None):
+        """样本外验证(Out-of-Sample): 把区间按时间切成两段,
+        前段(样本内)回测 + 后段(样本外)回测, 对比两者绩效。
+
+        防过拟合逻辑: 若策略只在样本内好、样本外崩, 说明过拟合了参数;
+        样本外绩效与样本内接近(或不明显恶化)才算稳健。
+        返回 {in_sample: 报告, out_sample: 报告, verdict: 判语}。
+        """
+        total = (end_date - start_date).days
+        if total < 6:
+            return {"error": "区间太短(<6天), 无法做样本外分割"}
+        split = start_date + timedelta(days=int(total * split_ratio))
+        ins = self.run(start_date, split, sell_rules=sell_rules, progress=progress)
+        oos = self.run(split + timedelta(days=1), end_date,
+                       sell_rules=sell_rules, progress=progress)
+        # 判语: 样本外有交易 且 样本外均值收益不为负 → 稳健; 否则警告
+        verdict = "稳健(样本外仍有正收益)"
+        if not oos.get("trades"):
+            verdict = "警告: 样本外无交易(数据不足或策略失效)"
+        elif (oos.get("avg_return_pct") or 0) < 0:
+            verdict = "警告: 样本外平均收益为负, 疑似过拟合"
+        return {"in_sample": ins, "out_sample": oos, "verdict": verdict}
