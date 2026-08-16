@@ -25,6 +25,7 @@ N1/A1 等假因子); 引擎不依赖 prism.factors 的真实因子(它们需要�
 回测只有 K线, 但适配层保证"真实形态"的 K线类因子可命中)。
 """
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 
 import pandas as pd
@@ -35,6 +36,10 @@ from prism.context import FactorContext
 from prism.engine import compute_model_scores, load_strategy
 
 logger = logging.getLogger(__name__)
+
+# 并发拉K线: 回测需为每只候选拉历史K线(网络请求), 串行几百次太慢。
+# 8 线程并发 + 缓存, 与腾讯/东财接口友好(不过度并发触发限流)。
+_KLINE_WORKERS = 8
 
 # 门槛因子 → 依赖的回测可注入数据源(缺失时该因子无法命中, 记入 gate_notes)。
 # 不在表内的门槛因子(如 N1/N2 兜底靠池子即可算)不归因数据缺失。
@@ -56,6 +61,30 @@ class Backtester:
         self.fee_rate = fee_rate
         self.slippage = slippage
         self.position_ratio = position_ratio   # 单只资金上限(报告暂按等权, 预留)
+        # K线缓存: 同一只股票整个回测只拉一次(避免 _pick 与 _simulate_trade 重复请求)
+        self._kline_cache = {}
+        # 涨停池缓存: run() 预取阶段与回放阶段各查一次, 缓存避免重复请求
+        self._pool_cache = {}
+
+    def _pool_for(self, d):
+        key = d.strftime("%Y%m%d")
+        if key not in self._pool_cache:
+            try:
+                self._pool_cache[key] = self.zt_feed(key) or []
+            except Exception as e:
+                logger.warning("回测 %s 涨停池失败: %r", d, e)
+                self._pool_cache[key] = []
+        return self._pool_cache[key]
+
+    def _kline_for(self, code):
+        """带缓存的 K线获取: 每只股票全回测只调一次 kline_feed。"""
+        if code not in self._kline_cache:
+            try:
+                self._kline_cache[code] = self.kline_feed(code) or []
+            except Exception as e:
+                logger.warning("回测 %s K线失败: %r", code, e)
+                self._kline_cache[code] = []
+        return self._kline_cache[code]
 
     # ---------------- 选股(复用 engine) ----------------
     def _stock_ctx(self, code, kline):
@@ -122,11 +151,7 @@ class Backtester:
         out = []
         for s in pool:
             code = s["code"]
-            try:
-                kline = self.kline_feed(code) or []
-            except Exception as e:
-                logger.warning("回测 %s K线失败: %r", code, e)
-                kline = []
+            kline = self._kline_for(code)
             ctx = self._stock_ctx(code, kline)
             scores = compute_model_scores(ctx, self.strategy)
             best = max([scores[m["id"]]
@@ -175,23 +200,27 @@ class Backtester:
         gate_notes = self._gate_notes(em, ticks)
         trades = []
         dates = []
+        # 第一步: 预取区间内全部涨停股K线(并发 + 缓存), 避免逐日串行请求
+        all_codes = set()
+        d = start_date
+        while d <= end_date:
+            pool = self._pool_for(d)
+            all_codes.update(s["code"] for s in pool)
+            d += timedelta(days=1)
+        if all_codes:
+            with ThreadPoolExecutor(max_workers=_KLINE_WORKERS) as ex:
+                list(ex.map(self._kline_for, sorted(all_codes)))
+        # 第二步: 逐日回放(此时 K线全部命中缓存, 无网络等待)
         d = start_date
         while d <= end_date:
             if progress:
                 progress(d)
-            try:
-                pool = self.zt_feed(d.strftime("%Y%m%d")) or []
-            except Exception as e:
-                logger.warning("回测 %s 涨停池失败: %r", d, e)
-                pool = []
+            pool = self._pool_for(d)
             if pool:
                 dates.append(d)
                 for code, boards, theme, composite in self._pick(
                         pool, em=em, ticks=ticks):
-                    try:
-                        kline = self.kline_feed(code) or []
-                    except Exception:
-                        kline = []
+                    kline = self._kline_for(code)
                     tr = self._simulate_trade(code, kline, d, rules)
                     if tr:
                         trades.append({
