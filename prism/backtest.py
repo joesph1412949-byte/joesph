@@ -136,8 +136,11 @@ class Backtester:
         }, index=[dt for dt, _px in rows])
         return FactorContext(code=code, kline=df)
 
-    def _pick(self, pool, em=None, ticks=None):
+    def _pick(self, pool, asof, em=None, ticks=None):
         """用策略引擎对当日涨停池选股。返回 [(code, boards, theme, composite), ...]。
+
+        asof: 选股日期(date)——关键!因子只能看到 <= asof 的K线,
+        绝不使用未来数据(未来函数会让回测结果虚假虚高)。
 
         市场门槛(节点因子)不达标 → 空仓; 达标后逐股 build FactorContext
         调 compute_model_scores, 按 candidate_min_model 过滤, 综合分降序。
@@ -174,7 +177,11 @@ class Backtester:
         out = []
         for s in pool:
             code = s["code"]
-            kline = self._kline_for(code)
+            kline_full = self._kline_for(code)
+            # 防未来函数: 只保留 <= asof 的K线(选股日当天及之前)
+            kline = [(dt, px) for dt, px in kline_full
+                     if _parse_kline_date(dt) is not None
+                     and _parse_kline_date(dt) <= asof]
             ctx = self._stock_ctx(code, kline)
             scores = compute_model_scores(ctx, self.strategy)
             best = max([scores[m["id"]]
@@ -244,7 +251,7 @@ class Backtester:
             if pool:
                 dates.append(d)
                 for code, boards, theme, composite in self._pick(
-                        pool, em=em, ticks=ticks):
+                        pool, asof=d, em=em, ticks=ticks):
                     kline = self._kline_for(code)
                     tr = self._simulate_trade(code, kline, d, rules)
                     if tr:
