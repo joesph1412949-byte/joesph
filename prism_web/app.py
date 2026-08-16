@@ -12,14 +12,17 @@
 启动：python prism_web/app.py，浏览器访问 http://localhost:5000
 """
 import sys
+import re
 from pathlib import Path
 
-# 路径注入: 本项目目录(本地数据源副本) → 项目根(common/prism/backtest_cli) → 旧站兜底。
-# 顺序: 本地副本优先, prism.data 内部还会自行注入 strategy_web(见 prism/data.py)。
-_WEB = str(Path(__file__).parent)                 # prism_web
+# 路径注入(单源真相, 审查 I2): strategy_web(旧数据源模块唯一出处) → 项目根
+# (common/prism/backtest_cli)。prism_web 不再保留数据模块副本, app 与
+# prism.data.DataProvider 按名 import 时经 sys.modules 缓存解析到同一份
+# strategy_web 模块, 杜绝"双份模块"类定义分叉。
+_WEB = str(Path(__file__).parent)                 # prism_web(仅模板/静态资源)
 _ROOT = str(Path(__file__).parent.parent)         # 项目根
 _OLD_WEB = str(Path(__file__).parent.parent / "strategy_web")
-for _p in (_OLD_WEB, _ROOT, _WEB):
+for _p in (_OLD_WEB, _ROOT):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -33,8 +36,8 @@ from flask import Flask, jsonify, render_template, request
 
 from common import setup_logging
 
-# 旧数据源模块(本地副本; 先于 prism.data import, 确保 sys.modules 缓存本地副本,
-# prism.data.DataProvider 内部按名导入时复用同一份)
+# 旧数据源模块(单源: strategy_web, 经上方路径注入解析; prism.data.DataProvider
+# 内部同名导入复用同一份类定义, 见 prism/data.py)
 from data_source import DataSource, DataSourceError
 from manual_store import ManualStore
 from perf_store import PerfStore
@@ -109,12 +112,84 @@ def _save_limitup_snapshot(limit_ups):
     return snapshot
 
 
+# 策略 id 白名单: 仅 [\w-]+(审查 Minor 3)。防止 sid 含 %2F 解码出的 "/" 等
+# 路径分隔符越出 STRATEGIES_DIR 读取站外 .json 文件。
+_SID_RE = re.compile(r"[\w-]+\Z")
+
+
+def _valid_sid(sid):
+    r"""sid 是否合规(非空且仅 [\w-])。"""
+    return bool(sid) and _SID_RE.match(sid) is not None
+
+
 def _load_strategy_for_screen(sid):
     """按 id 加载策略配置(校验因子存在性)。失败抛 ValueError。"""
+    if not _valid_sid(sid):
+        raise ValueError("策略不存在: %s" % sid)
     p = STRATEGIES_DIR / ("%s.json" % sid)
     if not p.is_file():
         raise ValueError("策略不存在: %s" % sid)
     return load_strategy(p)
+
+
+# 东财个股因子输出集(fundamental_feed.compute_for_stock)与手填因子集(前端 MANUAL_ALL),
+# 用于候选 auto_manual 来源推断(审查 I1/M6)。
+_FUNDAMENTAL_FIDS = {"Y1", "Y5", "F7", "Y7", "Y2", "Y6"}
+_MANUAL_FIDS = {"S1", "S5", "S7"}
+
+
+def _infer_auto_manual(factors):
+    """候选因子来源推断(简化版, 与旧 screen.py auto_manual 语义尽量一致):
+    东财个股因子 → "fundamental"; 手填因子 → "manual"; 其余 → "auto"。
+    前端 renderFactors 按 {fid: 来源} 渲染来源徽标。"""
+    out = {}
+    for fid in factors:
+        if fid in _FUNDAMENTAL_FIDS:
+            out[fid] = "fundamental"
+        elif fid in _MANUAL_FIDS:
+            out[fid] = "manual"
+        else:
+            out[fid] = "auto"
+    return out
+
+
+def _merge_candidate_fields(candidates, limit_ups):
+    """把涨停池字段合并进候选(与旧 screen.py:2168-2173 同构, 审查 I1):
+    name/sealed/float_mv 补齐, last/up_stop_price 缺时兜底, auto_manual 来源推断。"""
+    lu_map = {lu.get("code"): lu for lu in limit_ups}
+    for c in candidates:
+        lu = lu_map.get(c["code"]) or {}
+        c["name"] = lu.get("name") or c["code"]
+        c["sealed"] = lu.get("sealed")
+        c["float_mv"] = (lu.get("float_volume") or 0) * (lu.get("last") or 0)
+        if c.get("last") is None:
+            c["last"] = lu.get("last")
+        if c.get("up_stop_price") is None:
+            c["up_stop_price"] = lu.get("up_stop_price")
+        c["auto_manual"] = _infer_auto_manual(c.get("factors") or {})
+
+
+def _build_market_payload(market_ctx, market_factors, gate_score, limit_ups):
+    """market 载荷(与旧 screen.py market 同构, 前端 app.js renderMarket 依赖, 审查 C1):
+    node_score/stage/factors/total_amount/limit_up_count/top_themes。"""
+    from prism.market import classify_market
+    ticks = market_ctx.get("ticks") or {}
+    total_amount = 0
+    for t in ticks.values():
+        try:
+            total_amount += (t.get("amount") or 0)
+        except AttributeError:
+            pass
+    em = market_ctx.get("em") or {}
+    top_themes = em.get("top_themes") or []
+    return {
+        "node_score": gate_score,
+        "stage": classify_market(gate_score),
+        "factors": market_factors,
+        "total_amount": total_amount,
+        "limit_up_count": len(limit_ups),
+        "top_themes": top_themes[:10],
+    }
 
 
 def _run_prism_screen(strategy, provider):
@@ -122,12 +197,20 @@ def _run_prism_screen(strategy, provider):
     market_ctx = provider.build_market_context()
     gate_fids = (strategy.get("market_gate") or {}).get("factors", [])
     gate_factors = {}
+    market_factors = {}
     for fid in gate_fids:
         try:
             res = reg.get_factor(fid)["func"](market_ctx)
-            gate_factors[fid] = 1 if (isinstance(res, dict) and res.get("score")) else 0
+            if isinstance(res, dict):
+                gate_factors[fid] = 1 if res.get("score") else 0
+                market_factors[fid] = {"score": res.get("score", 0),
+                                       "note": res.get("note", "")}
+            else:
+                gate_factors[fid] = 1 if res else 0
+                market_factors[fid] = {"score": res, "note": ""}
         except Exception:
             gate_factors[fid] = 0
+            market_factors[fid] = {"score": 0, "note": "异常"}
     limit_ups = provider.get_limit_ups()
     stock_contexts = {}
     for lu in limit_ups:
@@ -135,7 +218,9 @@ def _run_prism_screen(strategy, provider):
         stock_contexts[code] = provider.build_stock_context(code)
     result = run_screen(strategy, market_ctx, gate_factors=gate_factors,
                         stock_contexts=stock_contexts)
-    result["market"] = {"limit_up_count": len(limit_ups)}
+    result["market"] = _build_market_payload(
+        market_ctx, market_factors, result.get("gate_score", 0), limit_ups)
+    _merge_candidate_fields(result.get("candidates", []), limit_ups)
     return result
 
 
@@ -379,6 +464,8 @@ def api_strategies():
 
 @app.route("/api/strategy/<sid>")
 def api_strategy(sid):
+    if not _valid_sid(sid):
+        return jsonify({"ok": False, "error": "策略不存在: %s" % sid}), 404
     p = STRATEGIES_DIR / ("%s.json" % sid)
     if not p.is_file():
         return jsonify({"ok": False, "error": "策略不存在: %s" % sid}), 404
@@ -398,6 +485,10 @@ def api_backtest():
         e = _dt.datetime.strptime(end, "%Y%m%d").date()
     except ValueError:
         return jsonify({"ok": False, "error": "日期格式应为 YYYYMMDD"}), 400
+    if s > e:
+        return jsonify({"ok": False, "error": "start 不能晚于 end"}), 400
+    if not _valid_sid(sid):
+        return jsonify({"ok": False, "error": "策略不存在: %s" % sid}), 404
     p = STRATEGIES_DIR / ("%s.json" % sid)
     if not p.is_file():
         return jsonify({"ok": False, "error": "策略不存在: %s" % sid}), 404
@@ -419,7 +510,7 @@ def api_automation():
         return jsonify({"ok": True, "paused": trader.check_paused()})
     payload = request.get_json() or {}
     pf = Path(trader.PAUSE_FILE)  # 兼容 str / Path 两种配置
-    if payload.get("paused"):
+    if payload.get("paused") is True:  # 严格布尔判断: 字符串 "false" 不再误建(审查 Minor 2)
         pf.parent.mkdir(parents=True, exist_ok=True)
         pf.write_text("", encoding="utf-8")
     else:
