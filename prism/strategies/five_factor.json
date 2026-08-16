@@ -1,0 +1,27 @@
+{
+  "id": "five_factor",
+  "name": "五因子动量策略",
+  "description": "回测友好五因子策略: 动量/量能/均线/突破/波动收敛, 全部仅用K线计算, 适合网页回测验证。市场门槛: 当日有涨停股(N1)即允许选股。",
+  "market_gate": {
+    "model": "node",
+    "threshold": 1,
+    "factors": ["N1"]
+  },
+  "scoring_models": [
+    {
+      "id": "momentum",
+      "name": "动量模型",
+      "weight": 1.0,
+      "factors": [
+        {"id": "M1", "weight": 1.0},
+        {"id": "M2", "weight": 1.0},
+        {"id": "M3", "weight": 1.0},
+        {"id": "M4", "weight": 1.0},
+        {"id": "M5", "weight": 1.0}
+      ]
+    }
+  ],
+  "composite": {"mode": "sum", "cap": 5.0},
+  "filters": {"candidate_min_model": 2, "environment_threshold": 1},
+  "sell_rules": {"take_profit_pct": 0.08, "stop_loss_pct": 0.05, "max_hold_days": 5}
+}

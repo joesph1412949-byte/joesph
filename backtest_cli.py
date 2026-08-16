@@ -66,16 +66,29 @@ def _secid(code):
 
 
 def kline_feed(code):
-    """东财日K线 → [(date_str, close), ...] 升序。失败 → []。"""
+    """东财日K线 → [(date_str, close), ...] 升序。失败 → []。
+
+    优先 push2his 历史接口; 若被拒(限流/断连), 回退到 push2 行情接口
+    (与涨停池同域, 通常更稳)。两种都失败 → []。"""
     if requests is None:
         return []
+    out = _kline_from("https://push2his.eastmoney.com/api/qt/stock/kline/get",
+                      code, extra={"beg": "20200101", "end": "20500101", "lmt": 100000})
+    if out:
+        return out
+    # 备用: push2 quote 接口(取最近 250 根日K)
+    return _kline_from("https://push2.eastmoney.com/api/qt/stock/kline/get",
+                       code, extra={"lmt": 250})
+
+
+def _kline_from(url, code, extra=None):
+    """从指定东财K线端点拉数据。成功返回 [(date, close)], 失败 → []。"""
+    params = {"secid": _secid(code), "klt": 101, "fqt": 1,
+              "fields1": "f1,f2,f3", "fields2": "f51,f53"}
+    if extra:
+        params.update(extra)
     try:
-        resp = requests.get(
-            "https://push2his.eastmoney.com/api/qt/stock/kline/get",
-            params={"secid": _secid(code), "klt": 101, "fqt": 1,
-                    "fields1": "f1,f2,f3", "fields2": "f51,f53",
-                    "beg": "20200101", "end": "20500101", "lmt": 100000},
-            headers=HEADERS, timeout=10)
+        resp = requests.get(url, params=params, headers=HEADERS, timeout=10)
         resp.raise_for_status()
         klines = (resp.json().get("data") or {}).get("klines") or []
     except Exception:
