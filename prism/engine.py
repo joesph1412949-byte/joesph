@@ -83,6 +83,10 @@ def _factor_hit(ctx, fid, op, threshold):
                    "==": score == threshold}[op]
         except KeyError:
             hit = score > 0
+        except TypeError:
+            # 审查 Minor: threshold 类型错误(如 "abc")→ 视为未命中, 不逃逸
+            # fail-open(旧实现同类错误会让网页 500)。
+            return score, False
         return score, hit
     return score, score > 0
 

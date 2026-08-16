@@ -28,6 +28,7 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+pytest_tmp/
 
 # Runtime data (auto-generated, never commit)
 fundamental_cache.json

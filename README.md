@@ -130,8 +130,8 @@ print(json.dumps(bt.run(datetime.date(2026,7,27), datetime.date(2026,8,13)), ens
   account_id`, 与 `qmt_signal_bridge_real.py` 完全一致; `price=0` 桥端按对手价
   市价单处理(pr_type=2)。
 - **真实盘授权**: 桥只在 `D:/QMT_SIGNALS/real/armed.txt` 存在且含当天日期时消费
-  real 信号; `run_daily(env="real")` 且候选全缺 `up_stop_price` 时拒绝生成信号
-  (防止误按市价单)。
+  real 信号; `run_daily(env="real")` 逐候选跳过缺 `up_stop_price` 的候选
+  (全部缺价则整体拒单并返回 error, 防止误按市价单)。
 - **模拟盘冒烟**: 用假 provider(不连 QMT)驱动 `run_daily(env="sim")`, 验证
   选股 → 信号落盘 → 桥字段齐全全链路(见 Task 9 报告)。
 
@@ -139,7 +139,12 @@ print(json.dumps(bt.run(datetime.date(2026,7,27), datetime.date(2026,8,13)), ens
 
 - **一键暂停**: 存在 `D:/QMT_SIGNALS/paused` 文件 → `run_daily` 直接返回
   `paused=True`, 不生成新信号(盘后脚本/网页共用)。
-- 网页开关: `GET /api/automation` 读状态, `POST {"paused": true|false}` 写状态。
+- 网页开关(已实现 UI): 页面右上角"自动化"状态徽标 + 一键暂停/恢复按钮
+  (读 `GET /api/automation`, 写 `POST {"paused": true|false}`)。
+
+> **网页 UI 状态**: 自动化开关 UI 已上线; 因子库浏览 / 策略管理 / 回测页面
+> 本次未实现 —— 对应 API(`/api/factors` `/api/strategies` `/api/strategy/<id>`
+> `/api/backtest`)已就绪, UI 待后续迭代补齐。
 
 ## 环境要求
 
@@ -239,17 +244,17 @@ python prism_web/app.py
 
 ## 测试
 
-全部离线(无真实网络、无需 QMT);**318 个测试全绿**。注意 `prism/tests/` 与
+全部离线(无真实网络、无需 QMT);**328 个测试全绿**。注意 `prism/tests/` 与
 根 `tests/` 各有 `test_backtest.py`(同名), 需分开跑:
 
 ```bash
-python -m pytest prism/tests/ prism_web/tests/ -q   # 141: prism 引擎 + prism_web(新/旧路由)
+python -m pytest prism/tests/ prism_web/tests/ -q   # 151: prism 引擎 + prism_web(新/旧路由)
 python -m pytest tests/ -q                           # 17: 根级回测/卖出规则回归
 python -m pytest strategy_web/tests/ -q              # 160: 旧实现兼容期保持绿(测旧模块)
 python -m prism.factor_check                         # 因子体检: 26 因子全 PASS
 ```
 
-合计 141 + 17 + 160 = **318 tests**。
+合计 151 + 17 + 160 = **328 tests**。
 
 ## 说明
 

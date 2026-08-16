@@ -140,3 +140,31 @@ def test_run_screen_gate_blocks():
                             stock_contexts={})
     assert out["environment_ok"] is False
     assert out["candidates"] == []
+
+
+def test_factor_hit_bad_threshold_type_not_fail_open():
+    """审查 Minor: threshold 类型错误(如 "abc")→ 未命中, 不逃逸 TypeError。"""
+    s = _mk_strategy()
+    s["scoring_models"] = [{"id": "m1", "name": "M1", "weight": 1.0,
+                            "factors": [{"id": "A1", "op": ">",
+                                         "threshold": "abc"}]}]
+    s = engine.load_strategy(s)
+    ctx = FactorContext(code="600000.SH")
+    # 不再抛 TypeError(网页 500), 而是未命中
+    r = engine.compute_model_scores(ctx, s)
+    assert r["m1"] == 0
+    # 因子命中位同样为 0(_compute_scores 内部)
+    _, factors = engine._compute_scores(ctx, s)
+    assert factors["A1"] == 0
+
+
+def test_factor_hit_unknown_op_falls_back_score():
+    """审查 Minor: op 不在白名单 → 退回 score>0 判定(与旧行为一致)。"""
+    s = _mk_strategy()
+    s["scoring_models"] = [{"id": "m1", "name": "M1", "weight": 1.0,
+                            "factors": [{"id": "A1", "op": "??",
+                                         "threshold": 1}]}]
+    s = engine.load_strategy(s)
+    ctx = FactorContext(code="600000.SH")
+    r = engine.compute_model_scores(ctx, s)
+    assert r["m1"] == 1   # A1 score=1 > 0 → 命中
