@@ -371,7 +371,7 @@ function renderFactorCards(factors) {
   const grid = document.getElementById("factor-grid");
   if (!factors.length) { grid.innerHTML = `<div class="hint">暂无因子</div>`; return; }
   grid.innerHTML = factors.map(f => `
-    <div class="factor-card">
+    <div class="factor-card cat-${f.category}">
       <div class="factor-card-head">
         <span class="factor-id">${f.id}</span>
         <span class="factor-cat">${f.category}</span>
