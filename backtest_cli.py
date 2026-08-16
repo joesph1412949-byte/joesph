@@ -29,6 +29,66 @@ HEADERS = {"User-Agent": "Mozilla/5.0",
 # keep-alive 后降到 ~0.2 秒, 回测几百次请求提速 5-10 倍。
 _session = requests.Session() if requests is not None else None
 
+
+# ---------------------------------------------------------------- QMT K线源
+
+def qmt_kline_feed(code):
+    """用 QMT 本地 K线(xtdata, 已连接的 miniQMT)拉历史日K → [(date, close), ...]。
+
+    优先于网络源: 本地数据无网络依赖、无限流、秒回。需要 QMT 已登录并开启
+    miniQMT(与 strategy_web 同一数据源)。失败 → []。
+    """
+    try:
+        from xtquant import xtdata
+        s = str(code).strip().upper()
+        if "." not in s:
+            if s.startswith("6"):
+                s += ".SH"
+            else:
+                s += ".SZ"
+        xtdata.download_history_data(s, "1d")
+        df = xtdata.get_market_data_ex([], [s], period="1d",
+                                       start_time="", end_time="", count=400)
+        df = (df or {}).get(s)
+        if df is None or len(df) == 0:
+            return []
+        closes = df["close"].tolist()
+        # 日期: 新版毫秒 epoch / 旧版 YYYYMMDD 索引
+        if "time" in df.columns:
+            from datetime import datetime as _dt
+            dates = [_dt.fromtimestamp(int(t) / 1000.0).strftime("%Y-%m-%d")
+                     for t in df["time"]]
+        else:
+            dates = [str(t) for t in df.index]
+        return list(zip(dates, closes))
+    except Exception:
+        return []
+
+
+def kline_feed(code):
+    """K线数据源(优先 QMT 本地, 网络源回退): [(date_str, close), ...] 升序。
+
+    数据源链(逐级回退, 全部失败 → []):
+      1. QMT xtdata 本地K线(需 miniQMT 已连接, 最快最稳)
+      2. 东财 push2his(历史接口)
+      3. 东财 push2(行情接口)
+      4. 腾讯 ifzq.gtimg.cn(与东财无关)
+    """
+    qmt = qmt_kline_feed(code)
+    if qmt:
+        return qmt
+    if requests is None:
+        return []
+    out = _kline_from("https://push2his.eastmoney.com/api/qt/stock/kline/get",
+                      code, extra={"beg": "20200101", "end": "20500101", "lmt": 100000})
+    if out:
+        return out
+    out = _kline_from("https://push2.eastmoney.com/api/qt/stock/kline/get",
+                      code, extra={"lmt": 250})
+    if out:
+        return out
+    return _kline_tencent(code)
+
 # ---------------------------------------------------------------- feeds
 
 def zt_feed(date_yyyymmdd):
@@ -67,27 +127,6 @@ def _secid(code):
     else:
         mkt = "0"
     return "%s.%s" % (mkt, s[:6])
-
-
-def kline_feed(code):
-    """东财日K线 → [(date_str, close), ...] 升序。失败 → []。
-
-    数据源回退链(东财限流时自动切换):
-      1. push2his(东财历史接口)
-      2. push2(东财行情接口)
-      3. 腾讯 ifzq.gtimg.cn(与东财无关, 通常不受限流影响)
-    三种都失败 → []。"""
-    if requests is None:
-        return []
-    out = _kline_from("https://push2his.eastmoney.com/api/qt/stock/kline/get",
-                      code, extra={"beg": "20200101", "end": "20500101", "lmt": 100000})
-    if out:
-        return out
-    out = _kline_from("https://push2.eastmoney.com/api/qt/stock/kline/get",
-                      code, extra={"lmt": 250})
-    if out:
-        return out
-    return _kline_tencent(code)
 
 
 def _kline_tencent(code):

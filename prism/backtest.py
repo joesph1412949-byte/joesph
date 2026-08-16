@@ -41,6 +41,23 @@ logger = logging.getLogger(__name__)
 # 8 线程并发 + 缓存, 与腾讯/东财接口友好(不过度并发触发限流)。
 _KLINE_WORKERS = 8
 
+
+def _parse_kline_date(raw):
+    """K线日期 → date。兼容 'YYYY-MM-DD' / 'YYYYMMDD' / 整数 20260812。
+    无法解析 → None(调用方跳过该行)。"""
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        s = str(int(raw))
+    else:
+        s = str(raw).strip().replace("-", "")
+    if len(s) != 8 or not s.isdigit():
+        return None
+    try:
+        return date(int(s[:4]), int(s[4:6]), int(s[6:8]))
+    except ValueError:
+        return None
+
 # 门槛因子 → 依赖的回测可注入数据源(缺失时该因子无法命中, 记入 gate_notes)。
 # 不在表内的门槛因子(如 N1/N2 兜底靠池子即可算)不归因数据缺失。
 _GATE_DATA_NEEDS = {
@@ -244,7 +261,8 @@ class Backtester:
             return None
         idx = None
         for i, (dt, _c) in enumerate(kline):
-            if dt >= entry_date.strftime("%Y-%m-%d"):
+            d_parsed = _parse_kline_date(dt)
+            if d_parsed is not None and d_parsed >= entry_date:
                 idx = i
                 break
         if idx is None:
@@ -259,8 +277,10 @@ class Backtester:
                                              "max_hold_days") if k in rules}
         exit_close = None
         for j in range(idx + 1, len(kline)):
-            dt_str, px = kline[j]
-            today = date(*[int(x) for x in dt_str.split("-")])
+            dt_raw, px = kline[j]
+            today = _parse_kline_date(dt_raw)
+            if today is None:
+                continue
             rule = ExitRule(code, code, buy_price, entry_date, today=today,
                             **rule_kwargs)
             action, _reason = rule.evaluate(px)
@@ -284,7 +304,8 @@ class Backtester:
         if n == 0:
             base.update({"win_rate": None, "avg_return_pct": None,
                          "profit_loss_ratio": None, "max_drawdown_pct": None,
-                         "total_return_pct": None})
+                         "total_return_pct": None, "sharpe_ratio": None,
+                         "trade_log": []})
             return base
         returns = [t["return_pct"] for t in trades]
         wins = [r for r in returns if r > 0]
@@ -306,6 +327,20 @@ class Backtester:
             peak = max(peak, equity)
             if peak > 0:
                 max_dd = max(max_dd, (peak - equity) / peak * 100)
+        # 夏普比: 每笔收益率的均值/标准差 × sqrt(年化笔数)。
+        # 简化年化: 以 250 个交易日、平均每笔持有约 5 天估 50 笔/年 → sqrt(50)≈7.07。
+        # 无风险利率按 0(日内短持, 简化)。样本 <2 笔时标准差无意义 → None。
+        sharpe = None
+        if n >= 2:
+            mean_r = sum(returns) / n
+            var = sum((r - mean_r) ** 2 for r in returns) / (n - 1)
+            std = var ** 0.5
+            if std > 0:
+                sharpe = round((mean_r / std) * 7.07, 2)
+        # 交易日志: 按日期降序(最新在前), 每笔含 日期/代码/题材/综合分/买价/卖价/收益率
+        trade_log = sorted(
+            trades,
+            key=lambda t: (t["date"], t["code"]), reverse=True)
         return {
             "trading_days": len(dates), "trades": n,
             "gate_notes": gate_notes or [],
@@ -314,6 +349,8 @@ class Backtester:
             "profit_loss_ratio": round(pl_ratio, 2) if pl_ratio else None,
             "max_drawdown_pct": round(max_dd, 2),
             "total_return_pct": round(sum(returns), 2),
+            "sharpe_ratio": sharpe,
+            "trade_log": trade_log,
         }
 
     # ---------------- 参数对比 ----------------

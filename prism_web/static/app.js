@@ -486,15 +486,37 @@ function renderBacktest(r) {
     ["胜率", pct(r.win_rate)],
     ["平均收益/笔", (r.avg_return_pct == null ? "-" : r.avg_return_pct + "%")],
     ["盈亏比", r.profit_loss_ratio == null ? "-" : r.profit_loss_ratio],
+    ["夏普比", r.sharpe_ratio == null ? "-" : r.sharpe_ratio],
     ["最大回撤", r.max_drawdown_pct == null ? "-" : r.max_drawdown_pct + "%"],
     ["总收益(累加)", r.total_return_pct == null ? "-" : r.total_return_pct + "%"],
   ];
+  // 交易日志表(按日期降序, 最新在前)
+  const log = (r.trade_log || []).map(t => `
+    <tr class="bt-ret-${t.return_pct >= 0 ? "pos" : "neg"}">
+      <td>${t.date}</td>
+      <td>${t.code}</td>
+      <td>${t.theme || "-"}</td>
+      <td>${t.composite == null ? "-" : t.composite}</td>
+      <td>${t.entry == null ? "-" : t.entry}</td>
+      <td>${t.exit == null ? "-" : t.exit}</td>
+      <td class="bt-ret">${t.return_pct >= 0 ? "+" : ""}${t.return_pct}%</td>
+    </tr>`).join("");
   box.innerHTML = `
     <div class="cards">
       ${cards.map(([k, v]) => `
         <div class="stat-card"><div class="stat-value">${v}</div>
         <div class="stat-label">${k}</div></div>`).join("")}
     </div>
+    <h3 style="margin-top:18px">交易日志(${r.trade_log ? r.trade_log.length : 0} 笔)</h3>
+    <div class="bt-log-wrap">
+      <table id="bt-log-table">
+        <thead><tr>
+          <th>日期</th><th>代码</th><th>题材</th><th>综合分</th>
+          <th>买入价</th><th>卖出价</th><th>收益率</th>
+        </tr></thead>
+        <tbody>${log || `<tr><td colspan="7" class="hint">无明细</td></tr>`}</tbody>
+      </table>
+    </div>
     <div class="hint" style="margin-top:10px">注: 回测为简化交易模拟(收盘买入+滑点, 手续费万2.5),
-      实际结果以实盘为准; 卖出规则默认读策略配置的 sell_rules。</div>`;
+      实际结果以实盘为准; 夏普比按每笔收益率年化(简化), 样本不足2笔时为"-"。</div>`;
 }

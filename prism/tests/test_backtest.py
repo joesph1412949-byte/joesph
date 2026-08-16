@@ -304,3 +304,52 @@ def test_backtest_gate_notes_only_attributes_missing_data():
     bt = backtest.Backtester(s, zt_feed=lambda d: [], kline_feed=lambda c: [])
     rep = bt.run(date(2026, 7, 1), date(2026, 7, 3))
     assert rep["gate_notes"] == []   # N1 兜底靠池子, 无注入数据依赖
+
+
+def test_backtest_trade_log_and_sharpe():
+    """交易日志(每笔明细) + 夏普比 输出。"""
+    s = load_strategy(_mk_strategy())
+    zf, kf = _feeds()
+    bt = backtest.Backtester(s, zt_feed=zf, kline_feed=kf)
+    rep = bt.run(date(2026, 7, 1), date(2026, 7, 3))
+    assert rep["trades"] == 1
+    # trade_log: 列表非空, 每笔含 日期/代码/买价/卖价/收益率
+    assert isinstance(rep["trade_log"], list) and len(rep["trade_log"]) == 1
+    t = rep["trade_log"][0]
+    assert t["date"] == "2026-07-01"
+    assert t["code"] == "600000.SH"
+    assert t["entry"] > 0 and t["exit"] > 0
+    assert t["return_pct"] is not None
+    # 夏普比: 样本≥2 才有值; 单笔样本 → None 或数值(当前实现 ≥2 才计算 → None)
+    # 单笔时 std 无意义, 期望 None(不崩)
+    assert "sharpe_ratio" in rep
+
+
+def test_backtest_sharpe_multiple_trades():
+    """多笔交易且收益有差异 → 夏普比有数值。"""
+    s = _mk_strategy()
+    s = load_strategy(s)
+    start = date(2026, 7, 1)
+
+    def zf(d):
+        # 三天各有 1 只涨停 → 3 笔交易(日期不同, 代码不同)
+        by_day = {"20260701": "600001.SH", "20260702": "600002.SH",
+                  "20260703": "600003.SH"}
+        if d in by_day:
+            return [{"code": by_day[d], "boards": 1, "theme": "T"}]
+        return []
+
+    def kf(code):
+        # 不同股票涨幅不同 → 收益有差异(避免 std=0 → sharpe=None)
+        # 600001: +4%/日(5日后约+20%), 600002: +2%/日, 600003: 平
+        rate = {"600001.SH": 1.04, "600002.SH": 1.02, "600003.SH": 1.00}[code]
+        closes = [10.0 * rate ** i for i in range(8)]
+        dates = [(start + timedelta(days=i)).strftime("%Y-%m-%d")
+                 for i in range(8)]
+        return list(zip(dates, closes))
+
+    bt = backtest.Backtester(s, zt_feed=zf, kline_feed=kf)
+    rep = bt.run(start, start + timedelta(days=2))
+    assert rep["trades"] >= 2
+    assert rep["sharpe_ratio"] is not None
+    assert isinstance(rep["sharpe_ratio"], float)

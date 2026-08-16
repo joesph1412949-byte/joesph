@@ -385,6 +385,15 @@ tr.grade-D td { background: rgba(155,107,255,.06); }
   -webkit-background-clip: text; background-clip: text; color: transparent; }
 .stat-card .stat-label { font-size: 12px; color: var(--txt-2); margin-top: 4px; }
 
+/* 回测交易日志 */
+.bt-log-wrap { max-height: 420px; overflow: auto; margin-top: 8px;
+               border: 1px solid var(--stroke); border-radius: 10px; }
+#bt-log-table th { position: sticky; top: 0; z-index: 1; }
+#bt-log-table td, #bt-log-table th { padding: 8px 12px; font-size: 13px; }
+#bt-log-table .bt-ret { font-weight: 700; }
+#bt-log-table tr.bt-ret-pos .bt-ret { color: var(--sp-green); }
+#bt-log-table tr.bt-ret-neg .bt-ret { color: var(--sp-red); }
+
 /* 滚动条(深色) */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: var(--bg-0); }
