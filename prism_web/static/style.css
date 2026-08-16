@@ -8,6 +8,12 @@ header h1 { font-size: 22px; }
 .badge.fail { background: #e74c3c; color: #fff; }
 #btn-screen { padding: 8px 20px; background: #2980b9; color: #fff;
               border: none; border-radius: 6px; cursor: pointer; }
+/* 自动化开关(一键暂停) */
+.auto-box { display: inline-flex; align-items: center; gap: 8px; }
+#btn-auto { padding: 8px 16px; background: #e67e22; color: #fff;
+            border: none; border-radius: 6px; cursor: pointer; font-size: 13px; }
+#btn-auto.paused { background: #27ae60; }
+#btn-auto:disabled { opacity: .6; cursor: wait; }
 #tabs { display: flex; gap: 4px; border-bottom: 2px solid #ddd; margin-bottom: 16px; }
 .tab { padding: 10px 20px; border: none; background: none; cursor: pointer;
        font-size: 15px; border-bottom: 3px solid transparent; }

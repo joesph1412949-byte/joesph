@@ -1,5 +1,5 @@
 // 全局状态
-const state = { screenResult: null, currentCode: null };
+const state = { screenResult: null, currentCode: null, automationPaused: false };
 
 // ---------- Tab 切换 ----------
 function switchTab(name) {
@@ -37,6 +37,48 @@ async function checkHealth() {
   }
 }
 checkHealth();
+
+// ---------- 自动化开关(一键暂停) ----------
+function renderAutomation(paused) {
+  const el = document.getElementById("auto-status");
+  const btn = document.getElementById("btn-auto");
+  el.textContent = paused ? "自动化已暂停" : "自动化运行中";
+  el.classList.toggle("ok", !paused);
+  el.classList.toggle("fail", paused);
+  btn.textContent = paused ? "恢复自动化" : "一键暂停";
+  btn.classList.toggle("paused", paused);
+}
+
+async function refreshAutomation() {
+  try {
+    const data = await api("/api/automation");
+    state.automationPaused = !!data.paused;
+    renderAutomation(state.automationPaused);
+  } catch (e) {
+    const el = document.getElementById("auto-status");
+    el.textContent = "自动化状态未知";
+    el.classList.add("fail");
+  }
+}
+
+async function toggleAutomation() {
+  const btn = document.getElementById("btn-auto");
+  btn.disabled = true;
+  try {
+    const data = await api("/api/automation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paused: !state.automationPaused }),
+    });
+    state.automationPaused = !!data.paused;
+    renderAutomation(state.automationPaused);
+  } catch (e) {
+    alert("切换自动化状态失败: " + e);
+  } finally {
+    btn.disabled = false;
+  }
+}
+refreshAutomation();
 
 // ---------- 选股 ----------
 async function fetchScreen() {

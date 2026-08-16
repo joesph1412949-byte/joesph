@@ -11,6 +11,10 @@
   <header>
     <h1>量化选股策略看板</h1>
     <span id="conn-status" class="badge">未连接</span>
+    <span id="auto-box" class="auto-box" title="自动化开关: 暂停后 run_daily 不再生成新信号(写 D:/QMT_SIGNALS/paused)">
+      <span id="auto-status" class="badge">自动化…</span>
+      <button id="btn-auto" onclick="toggleAutomation()">一键暂停</button>
+    </span>
     <button id="btn-screen" onclick="fetchScreen()">开始选股</button>
   </header>
 
