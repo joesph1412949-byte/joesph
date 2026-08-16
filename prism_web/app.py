@@ -19,9 +19,12 @@ from pathlib import Path
 # (common/prism/backtest_cli)。prism_web 不再保留数据模块副本, app 与
 # prism.data.DataProvider 按名 import 时经 sys.modules 缓存解析到同一份
 # strategy_web 模块, 杜绝"双份模块"类定义分叉。
-_WEB = str(Path(__file__).parent)                 # prism_web(仅模板/静态资源)
-_ROOT = str(Path(__file__).parent.parent)         # 项目根
-_OLD_WEB = str(Path(__file__).parent.parent / "strategy_web")
+# 注意: 必须 resolve() 再取 parent —— 'python app.py' 相对启动时 __file__
+# 是相对路径, Path('app.py').parent 得到 '.', 会导致 sys.path 注入相对路径,
+# Py3.7 下后续 import common 失败(ModuleNotFoundError)。
+_WEB = str(Path(__file__).resolve().parent)       # prism_web(仅模板/静态资源)
+_ROOT = str(Path(__file__).resolve().parent.parent)  # 项目根
+_OLD_WEB = str(Path(__file__).resolve().parent.parent / "strategy_web")
 for _p in (_OLD_WEB, _ROOT):
     if _p not in sys.path:
         sys.path.insert(0, _p)
