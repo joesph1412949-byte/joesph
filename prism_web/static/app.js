@@ -498,4 +498,3 @@ function renderBacktest(r) {
     <div class="hint" style="margin-top:10px">注: 回测为简化交易模拟(收盘买入+滑点, 手续费万2.5),
       实际结果以实盘为准; 卖出规则默认读策略配置的 sell_rules。</div>`;
 }
-}
