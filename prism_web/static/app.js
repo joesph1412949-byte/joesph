@@ -328,3 +328,174 @@ async function saveManual(code) {
   // 重新选股以反映手填（简化：提示用户重新点选股）
   alert("手填已保存: " + JSON.stringify(res.factors) + "\n点击「开始选股」重新计算综合分。");
 }
+
+// ==================== Prism 新功能: 因子库 / 策略 / 回测 ====================
+
+// ---------- Tab 切换时懒加载 ----------
+const origSwitchTab = switchTab;
+switchTab = function(name) {
+  origSwitchTab(name);
+  if (name === "factors") loadFactors();
+  if (name === "strategies") loadStrategies();
+  if (name === "backtest") loadBacktestForm();
+};
+
+// ---------- 因子库 ----------
+const FACTOR_CATEGORIES = [
+  ["first_board", "首板"], ["monster", "妖股"], ["momentum", "势能"],
+  ["node", "节点"], ["通用", "通用"],
+];
+
+async function loadFactors() {
+  const grid = document.getElementById("factor-grid");
+  const filters = document.getElementById("factor-filters");
+  let factors = [];
+  try {
+    const data = await api("/api/factors");
+    factors = data.factors || [];
+  } catch (e) {
+    grid.innerHTML = `<div class="error">因子库加载失败: ${e}</div>`;
+    return;
+  }
+  // 筛选按钮
+  let filterHtml = `<button class="fbtn active" data-cat="" onclick="filterFactors(this)">全部 (${factors.length})</button>`;
+  for (const [cat, label] of FACTOR_CATEGORIES) {
+    const n = factors.filter(f => f.category === cat).length;
+    filterHtml += `<button class="fbtn" data-cat="${cat}" onclick="filterFactors(this)">${label} (${n})</button>`;
+  }
+  filters.innerHTML = filterHtml;
+  renderFactorCards(factors);
+}
+
+function renderFactorCards(factors) {
+  const grid = document.getElementById("factor-grid");
+  if (!factors.length) { grid.innerHTML = `<div class="hint">暂无因子</div>`; return; }
+  grid.innerHTML = factors.map(f => `
+    <div class="factor-card">
+      <div class="factor-card-head">
+        <span class="factor-id">${f.id}</span>
+        <span class="factor-cat">${f.category}</span>
+      </div>
+      <div class="factor-name">${f.name}</div>
+      <div class="factor-desc">${f.description || ""}</div>
+    </div>`).join("");
+}
+
+function filterFactors(btn) {
+  document.querySelectorAll("#factor-filters .fbtn").forEach(b => b.classList.remove("active"));
+  btn.classList.add("active");
+  const cat = btn.dataset.cat;
+  api("/api/factors").then(data => {
+    let list = data.factors || [];
+    if (cat) list = list.filter(f => f.category === cat);
+    renderFactorCards(list);
+  });
+}
+
+// ---------- 策略 ----------
+async function loadStrategies() {
+  const list = document.getElementById("strategy-list");
+  const detail = document.getElementById("strategy-json");
+  try {
+    const data = await api("/api/strategies");
+    const strategies = data.strategies || [];
+    list.innerHTML = strategies.map(s => `
+      <div class="strategy-item" onclick="showStrategy('${s.id}')">
+        <div class="strategy-item-name">${s.name || s.id}</div>
+        <div class="strategy-item-id">${s.id}</div>
+      </div>`).join("") || `<div class="hint">暂无策略</div>`;
+    if (strategies.length) showStrategy(strategies[0].id);
+  } catch (e) {
+    list.innerHTML = `<div class="error">策略加载失败: ${e}</div>`;
+  }
+}
+
+async function showStrategy(id) {
+  document.querySelectorAll("#strategy-list .strategy-item").forEach(el => {
+    el.classList.toggle("active", el.textContent.includes(id));
+  });
+  try {
+    const data = await api("/api/strategy/" + id);
+    if (!data.ok) { alert(data.error); return; }
+    const s = data.strategy;
+    document.getElementById("strategy-name").textContent = s.name || s.id;
+    document.getElementById("strategy-desc").textContent = s.description || "";
+    document.getElementById("strategy-json").textContent = JSON.stringify(s, null, 2);
+  } catch (e) {
+    document.getElementById("strategy-json").textContent = "加载失败: " + e;
+  }
+}
+
+// ---------- 回测 ----------
+function dateToStr(d) {
+  const p = n => String(n).padStart(2, "0");
+  return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate());
+}
+
+async function loadBacktestForm() {
+  const sel = document.getElementById("bt-strategy");
+  if (sel.options.length) return;   // 已加载
+  try {
+    const data = await api("/api/strategies");
+    (data.strategies || []).forEach(s => {
+      const opt = document.createElement("option");
+      opt.value = s.id;
+      opt.textContent = s.name || s.id;
+      sel.appendChild(opt);
+    });
+  } catch (e) { /* 策略列表不可用则留空 */ }
+  const today = new Date();
+  const start = new Date();
+  start.setDate(today.getDate() - 15);
+  document.getElementById("bt-start").value =
+    start.toISOString().slice(0, 10);
+  document.getElementById("bt-end").value =
+    today.toISOString().slice(0, 10);
+}
+
+async function runBacktest() {
+  const btn = document.getElementById("btn-backtest");
+  const box = document.getElementById("backtest-result");
+  const strategy = document.getElementById("bt-strategy").value;
+  const start = document.getElementById("bt-start").value.replace(/-/g, "");
+  const end = document.getElementById("bt-end").value.replace(/-/g, "");
+  if (!start || !end || start > end) { alert("请填写有效的起止日期"); return; }
+  btn.disabled = true;
+  box.innerHTML = `<div class="hint">回测进行中…(东财数据, 每笔需拉K线, 请稍候)</div>`;
+  try {
+    const data = await api(`/api/backtest?strategy=${strategy}&start=${start}&end=${end}`);
+    if (!data.ok) { box.innerHTML = `<div class="error">回测失败: ${data.error || "未知错误"}</div>`; return; }
+    renderBacktest(data.report);
+  } catch (e) {
+    box.innerHTML = `<div class="error">回测请求失败: ${e}</div>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderBacktest(r) {
+  const box = document.getElementById("backtest-result");
+  if (!r || r.trades === 0 || r.trades == null) {
+    box.innerHTML = `<div class="hint">回测完成: 无交易(可能区间内环境不达标或数据不足)。
+      <br>提示: 东财历史涨停池约保留最近 20 个交易日, 可尝试更近的日期。</div>`;
+    return;
+  }
+  const pct = v => v == null ? "-" : (v * 100).toFixed(1) + "%";
+  const cards = [
+    ["交易笔数", r.trades],
+    ["胜率", pct(r.win_rate)],
+    ["平均收益/笔", (r.avg_return_pct == null ? "-" : r.avg_return_pct + "%")],
+    ["盈亏比", r.profit_loss_ratio == null ? "-" : r.profit_loss_ratio],
+    ["最大回撤", r.max_drawdown_pct == null ? "-" : r.max_drawdown_pct + "%"],
+    ["总收益(累加)", r.total_return_pct == null ? "-" : r.total_return_pct + "%"],
+  ];
+  box.innerHTML = `
+    <div class="cards">
+      ${cards.map(([k, v]) => `
+        <div class="stat-card"><div class="stat-value">${v}</div>
+        <div class="stat-label">${k}</div></div>`).join("")}
+    </div>
+    <div class="hint" style="margin-top:10px">注: 回测为简化交易模拟(收盘买入+滑点, 手续费万2.5),
+      实际结果以实盘为准; 卖出规则默认读策略配置的 sell_rules。</div>`;
+}
+}

@@ -109,3 +109,52 @@ tr.grade-D { background: #f1f8e9; }
                  line-height: 1.7; }
 .metric-legend b { color: #333; }
 .metric-legend .legend-key { font-weight: 700; color: #e67e22; }
+
+/* ============ Prism 新功能: 因子库 / 策略 / 回测 ============ */
+.hint { font-size: 13px; color: #777; margin: 8px 0; line-height: 1.6; }
+.error { background: #fdecea; color: #c0392b; border-left: 4px solid #e74c3c;
+         padding: 10px 14px; border-radius: 6px; margin: 12px 0; }
+
+/* 因子库 */
+.filter-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+              margin: 12px 0; }
+.filter-row label { display: flex; align-items: center; gap: 6px;
+                    font-size: 13px; color: #555; }
+.filter-row select, .filter-row input {
+  padding: 6px 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 13px; }
+.fbtn { padding: 6px 14px; border: 1px solid #ccc; background: #fff;
+        border-radius: 16px; cursor: pointer; font-size: 13px; color: #555; }
+.fbtn.active { background: #2980b9; color: #fff; border-color: #2980b9; }
+#factor-grid .factor-card { background: #fff; border-radius: 8px; padding: 12px 14px;
+                            width: 220px; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
+.factor-card-head { display: flex; justify-content: space-between; align-items: center; }
+.factor-id { font-weight: 700; color: #2980b9; font-size: 15px; }
+.factor-cat { font-size: 11px; background: #eef4fb; color: #2980b9;
+              padding: 2px 8px; border-radius: 10px; }
+.factor-name { font-weight: 600; margin-top: 6px; font-size: 14px; }
+.factor-desc { font-size: 12px; color: #888; margin-top: 4px; line-height: 1.5; }
+
+/* 策略 */
+#strategy-layout { display: flex; gap: 16px; align-items: flex-start; }
+#strategy-list { flex: 0 0 260px; background: #fff; border-radius: 8px;
+                 box-shadow: 0 1px 3px rgba(0,0,0,.1); overflow: hidden; }
+.strategy-item { padding: 12px 16px; border-bottom: 1px solid #eee; cursor: pointer; }
+.strategy-item:hover { background: #f0f6fc; }
+.strategy-item.active { background: #e3f2fd; border-left: 3px solid #2980b9; }
+.strategy-item-name { font-weight: 600; font-size: 14px; }
+.strategy-item-id { font-size: 12px; color: #999; margin-top: 2px; }
+#strategy-detail { flex: 1 1 auto; min-width: 0; }
+#strategy-detail pre { background: #282c34; color: #d4d4d4; border-radius: 8px;
+                       padding: 16px; overflow: auto; font-size: 12px;
+                       max-height: 480px; line-height: 1.5; }
+
+/* 回测 */
+#backtest-form .btn-run, #btn-backtest {
+  padding: 8px 20px; background: #27ae60; color: #fff; border: none;
+  border-radius: 6px; cursor: pointer; font-size: 14px; }
+#btn-backtest:disabled { opacity: .6; cursor: wait; }
+.stat-card { background: #fff; border-radius: 8px; padding: 14px 18px;
+             min-width: 120px; box-shadow: 0 1px 3px rgba(0,0,0,.1);
+             border-top: 3px solid #2980b9; }
+.stat-card .stat-value { font-size: 22px; font-weight: 700; color: #2980b9; }
+.stat-card .stat-label { font-size: 12px; color: #888; margin-top: 4px; }

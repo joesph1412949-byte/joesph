@@ -23,6 +23,9 @@
     <button class="tab" data-tab="candidates" onclick="switchTab('candidates')">候选列表</button>
     <button class="tab" data-tab="compare" onclick="switchTab('compare')">模型对比</button>
     <button class="tab" data-tab="detail" onclick="switchTab('detail')">单股详情</button>
+    <button class="tab" data-tab="factors" onclick="switchTab('factors')">因子库</button>
+    <button class="tab" data-tab="strategies" onclick="switchTab('strategies')">策略</button>
+    <button class="tab" data-tab="backtest" onclick="switchTab('backtest')">回测</button>
   </nav>
 
   <main>
@@ -63,6 +66,46 @@
         <div id="kline-chart" class="chart"></div>
         <div id="factor-table"></div>
       </div>
+    </section>
+
+    <section id="tab-factors" class="tab-panel">
+      <h2>因子库</h2>
+      <p class="hint">Prism 的因子库 — 一个因子一个文件, 自动注册。新因子经
+        <code>python -m prism.factor_check</code> 体检后即出现在这里。</p>
+      <div id="factor-filters" class="filter-row"></div>
+      <div id="factor-grid" class="cards"></div>
+    </section>
+
+    <section id="tab-strategies" class="tab-panel">
+      <h2>策略</h2>
+      <p class="hint">策略 = JSON 配置(选哪些因子/权重/组合方式/卖点), 放
+        <code>prism/strategies/</code> 目录, 复制 default.json 改内容即可新建。</p>
+      <div id="strategy-layout">
+        <div id="strategy-list" class="side-list"></div>
+        <div id="strategy-detail">
+          <h3 id="strategy-name"></h3>
+          <p id="strategy-desc" class="hint"></p>
+          <pre id="strategy-json"></pre>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-backtest" class="tab-panel">
+      <h2>回测</h2>
+      <p class="hint">用最近约 20 个交易日的东财历史数据回放你的策略 —
+        与实盘共用同一引擎, 统计胜率/盈亏比/最大回撤。</p>
+      <div id="backtest-form" class="filter-row">
+        <label>策略
+          <select id="bt-strategy"></select>
+        </label>
+        <label>开始 <input id="bt-start" type="date"></label>
+        <label>结束 <input id="bt-end" type="date"></label>
+        <label>止盈% <input id="bt-tp" type="number" value="8" step="0.5"></label>
+        <label>止损% <input id="bt-sl" type="number" value="5" step="0.5"></label>
+        <label>持有天 <input id="bt-hold" type="number" value="5" min="1"></label>
+        <button id="btn-backtest" onclick="runBacktest()">开始回测</button>
+      </div>
+      <div id="backtest-result"></div>
     </section>
   </main>
 </div>
