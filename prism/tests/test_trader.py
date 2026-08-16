@@ -98,7 +98,11 @@ def test_run_daily_paused_returns_paused(tmp_path, monkeypatch):
 
 
 class _FakeProvider:
-    """run_daily 全流程假数据源: 涨停池 + 上下文构建。"""
+    """run_daily 全流程假数据源: 涨停池 + 上下文构建。
+
+    up_price: 标量(所有候选同价)或 {code: up_price} 字典(逐候选定价,
+    供混合候选测试)。None/0 表示该候选缺价。
+    """
 
     def __init__(self, limit_ups, up_price=None):
         self._lus = limit_ups
@@ -114,8 +118,11 @@ class _FakeProvider:
 
     def build_stock_context(self, code):
         from prism.context import FactorContext
+        up = self._up_price
+        if isinstance(up, dict):
+            up = up.get(code)
         return FactorContext(code=code, tick={"lastPrice": 10.5},
-                             up_price=self._up_price, last=10.5)
+                             up_price=up, last=10.5)
 
 
 @pytest.fixture(autouse=True)
@@ -199,7 +206,69 @@ def test_run_daily_real_allows_with_up_stop_price(tmp_path, monkeypatch):
     result = trader.run_daily(_flow_strategy(), provider, env="real")
     assert "error" not in result
     assert result["signals_written"] == 1
+    assert result["skipped_no_price"] == 0
     files = list((tmp_path / "real" / "pending").glob("*.json"))
     assert len(files) == 1
     data = json.loads(files[0].read_text(encoding="utf-8"))
     assert data["price"] == 10.55
+
+
+# ---------------- C1(审查 Critical): real 逐候选无价拒单保护 ----------------
+
+def test_run_daily_real_mixed_candidates_skips_no_price(tmp_path, monkeypatch):
+    """审查 C1: real 混合候选(1 有价 + 1 缺价)→ 只生成带价候选的信号,
+    缺价候选跳过并计入 skipped_no_price, 不再整体拒单。"""
+    monkeypatch.setattr(trader, "SIGNAL_ROOT", tmp_path)
+    provider = _FakeProvider([{"code": "600000.SH"}, {"code": "000001.SZ"}],
+                             up_price={"600000.SH": 10.55, "000001.SZ": None})
+    result = trader.run_daily(_flow_strategy(), provider, env="real")
+    assert "error" not in result
+    assert result["signals_written"] == 1
+    assert result["skipped_no_price"] == 1
+    files = list((tmp_path / "real" / "pending").glob("*.json"))
+    assert len(files) == 1
+    data = json.loads(files[0].read_text(encoding="utf-8"))
+    assert data["stock_code"] == "600000.SH"
+    assert data["price"] == 10.55
+    # 返回候选仍含缺价者(便于盘后追溯)
+    assert len(result["candidates"]) == 2
+
+
+def test_run_daily_real_zero_up_stop_price_treated_missing(tmp_path, monkeypatch):
+    """审查 C1: up_stop_price=0 视为缺价 → 全部候选被跳过 → 拒单 + error。"""
+    monkeypatch.setattr(trader, "SIGNAL_ROOT", tmp_path)
+    provider = _FakeProvider([{"code": "600000.SH"}, {"code": "000001.SZ"}],
+                             up_price=0)
+    result = trader.run_daily(_flow_strategy(), provider, env="real")
+    assert result["signals_written"] == 0
+    assert result["skipped_no_price"] == 2
+    assert "error" in result and "up_stop_price" in result["error"]
+    assert not (tmp_path / "real" / "pending").exists()
+
+
+def test_run_daily_real_mixed_zero_and_priced(tmp_path, monkeypatch):
+    """审查 C1: 混合候选(1 价 0 + 1 带价)→ 只生成带价信号, 0 价者跳过。"""
+    monkeypatch.setattr(trader, "SIGNAL_ROOT", tmp_path)
+    provider = _FakeProvider([{"code": "600000.SH"}, {"code": "000001.SZ"}],
+                             up_price={"600000.SH": 10.55, "000001.SZ": 0})
+    result = trader.run_daily(_flow_strategy(), provider, env="real")
+    assert "error" not in result
+    assert result["signals_written"] == 1
+    assert result["skipped_no_price"] == 1
+    files = list((tmp_path / "real" / "pending").glob("*.json"))
+    assert len(files) == 1
+    data = json.loads(files[0].read_text(encoding="utf-8"))
+    assert data["stock_code"] == "600000.SH"
+
+
+def test_run_daily_sim_keeps_no_price_candidates(tmp_path, monkeypatch):
+    """审查 C1: sim 环境不检查价格 — 缺价候选照常生成 price=0 信号(桥端 sim 无风险)。"""
+    monkeypatch.setattr(trader, "SIGNAL_ROOT", tmp_path)
+    provider = _FakeProvider([{"code": "600000.SH"}, {"code": "000001.SZ"}],
+                             up_price=None)
+    result = trader.run_daily(_flow_strategy(), provider, env="sim")
+    assert "error" not in result
+    assert result["signals_written"] == 2
+    assert result["skipped_no_price"] == 0
+    files = list((tmp_path / "sim" / "pending").glob("*.json"))
+    assert len(files) == 2

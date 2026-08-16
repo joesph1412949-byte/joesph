@@ -8,8 +8,8 @@ PAUSE_FILE 一键暂停(存在该文件即不生成新信号)。
 
 价格语义: 信号 price=0 时桥端按对手价市价单处理(pr_type=2); 若策略
 要求涨停价排队买入, 需确保 engine 候选带 up_stop_price(engine.evaluate_stock
-已透出 ctx.up_price)。真实盘(env=real)下 run_daily 会拒绝全缺
-up_stop_price 的候选, 防止误按市价单。
+已透出 ctx.up_price)。真实盘(env=real)下 run_daily 会逐候选跳过缺
+up_stop_price 的候选(全部缺价则整体拒单), 防止误按市价单。
 """
 import json
 import uuid
@@ -85,8 +85,9 @@ def run_daily(strategy, provider, env="sim", volume=100, archive=None):
     (gate) 预计算 → 涨停池 → 逐股上下文 → run_screen → archive 回调 →
     generate_signals → write_signals。
 
-    返回 {"environment_ok", "candidates", "signals_written", "paused"};
-    env="real" 且候选全缺 up_stop_price 时返回 "error" 字段并拒单。
+    返回 {"environment_ok", "candidates", "signals_written", "paused",
+    "skipped_no_price"}; env="real" 时逐候选跳过缺 up_stop_price 的候选,
+    全部缺价则返回 "error" 字段并拒单。
     """
     if check_paused():
         return {"environment_ok": False, "candidates": [],
@@ -118,18 +119,32 @@ def run_daily(strategy, provider, env="sim", volume=100, archive=None):
         except Exception:
             pass
     candidates = result.get("candidates", [])
-    # 真实盘保护(审查要求): 候选全缺 up_stop_price 时拒绝生成信号。
-    # 桥端对 price=0 按对手价市价单处理(pr_type=2), 与"涨停价排队买入"
-    # 语义不符, 真实盘下宁可拒单也不误按市价单。sim 环境行为不变。
-    if env == "real" and candidates and not any(
-            c.get("up_stop_price") for c in candidates):
-        return {"environment_ok": result["environment_ok"],
-                "candidates": candidates,
-                "signals_written": 0, "paused": False,
-                "error": ("real盘候选缺 up_stop_price, 已拒绝生成信号: "
-                          "桥端 price=0 会按对手价市价单处理, 与涨停价排队买入不符")}
+    # 真实盘保护(审查 C1, 逐候选): env="real" 时逐个检查 up_stop_price,
+    # 缺价(含 None/0/空)候选跳过不生成信号, 累计到 skipped_no_price;
+    # 带价候选正常生成。桥端对 price=0 按对手价市价单处理(pr_type=2),
+    # 与"涨停价排队买入"语义不符, 真实盘下宁可跳过/拒单也不误按市价单。
+    # 全部候选都缺价 → 拒绝生成信号并附 error(保留原"全缺拒单"语义)。
+    # sim 环境行为不变(不检查价格, 与 generate_signals 一致)。
+    skipped_no_price = 0
+    signal_candidates = candidates
+    if env == "real" and candidates:
+        priced = [c for c in candidates if c.get("up_stop_price")]
+        skipped_no_price = len(candidates) - len(priced)
+        if not priced:
+            return {"environment_ok": result["environment_ok"],
+                    "candidates": candidates,
+                    "signals_written": 0, "paused": False,
+                    "skipped_no_price": skipped_no_price,
+                    "error": ("real盘候选缺 up_stop_price, 已拒绝生成信号: "
+                              "桥端 price=0 会按对手价市价单处理, 与涨停价排队买入不符")}
+        signal_candidates = priced
+    if signal_candidates is not candidates:
+        sub = dict(result)
+        sub["candidates"] = signal_candidates
+        result = sub
     signals = generate_signals(result, strat, env=env, volume=volume)
     written = write_signals(signals, env=env)
     return {"environment_ok": result["environment_ok"],
-            "candidates": result.get("candidates", []),
-            "signals_written": written, "paused": False}
+            "candidates": candidates,   # 返回原始候选(含被跳过的缺价者, 便于盘后追溯)
+            "signals_written": written, "paused": False,
+            "skipped_no_price": skipped_no_price}
