@@ -4,6 +4,8 @@
 
 > 仅限本机 localhost 使用,不连接任何外部服务,无实盘下单路径。
 
+> **当前主入口已切换至 Prism**(新引擎, 见下文「Prism 引擎」章节): 网页走 `prism_web`, 选股/回测/信号走 `prism` 引擎; 旧 `strategy_web` 仍保留兼容期(数据层被 Prism 复用), 待真实环境验证后移除。
+
 ## 功能
 
 - **四个页面模块**:市场环境仪表盘 / 候选股评分列表 / 单股 K线+因子详情 / 模型对比
@@ -35,6 +37,115 @@
 
 **情绪阶段**(`classify_market`):≥5 高潮期 / 4 回暖期 / 3 冰点期 / <3 退潮期。
 
+## Prism 引擎(新系统, 主入口)
+
+Prism 是新一代量化引擎, 已接管网页选股、回测与交易信号生成(旧 strategy_web 的
+models/factors/screen 实现被取代, 保留数据层供复用)。**主入口: 网页 `prism_web`,
+引擎 `prism`**。
+
+### 目录结构
+
+```text
+prism/                       # 引擎(纯库, 无网页依赖)
+  registry.py                # 因子注册表: @factor 装饰器 + 扫描注册
+  context.py                 # FactorContext: 因子统一上下文(数据缺失一律 None)
+  engine.py                  # 策略引擎: load_strategy / run_screen / 打分分级
+  data.py                    # 数据适配层: DataProvider(复用 strategy_web 数据层)
+  market.py                  # 市场环境分类(classify_market)
+  factors/                   # 因子库: factor_*.py 每文件一个因子(当前 26 个)
+  strategies/                # 策略配置: default.json
+  backtest.py                # 回测引擎(与实盘同一 engine, 含交易模拟)
+  trader.py                  # 交易闭环: 选股结果 → 信号文件 → QMT 桥(需授权)
+  factor_check.py            # 因子体检: python -m prism.factor_check
+prism_web/                   # 网页(主入口): app.py + templates/ + static/
+  tests/                     # 新 API + 旧路由保留测试
+```
+
+### 因子库用法
+
+- **因子 = 一个文件**: `prism/factors/factor_<id>.py`, 每文件一个
+  `@factor(id=..., name=..., category=...)` 装饰的 `compute(ctx)` 函数,
+  返回 `{"score": 0~1, "note": "..."}`。
+- **加因子 = 放文件 + 体检**: 复制 `prism/factors/_template.py` 写新因子,
+  然后跑 `python -m prism.factor_check` —— 自动注册、校验签名与返回值、
+  假数据跑通, 全部 PASS 才算入库。
+- **现有 26 因子**: F1–F7(首板) / Y1–Y7(妖股) / S1–S7(势能) / N1–N5(市场节点),
+  输出与旧实现逐因子比对一致(见 prism/tests/test_factor_migration.py)。
+- 策略里引用因子用 id(如 `"F1"`), 未注册的 id 在 `load_strategy` 时抛
+  `UnknownFactorError` 提前暴露配置错误。
+
+### 策略配置
+
+策略 = `prism/strategies/<id>.json`(示例: `default.json`), 字段:
+
+- `id` / `name` / `description`: 元信息
+- `market_gate`: 市场门槛 — `factors`(节点因子 id 列表) + `threshold`(达标分数, 默认 3)
+- `scoring_models`: 打分模型列表 — 每个模型 `{id, name, weight, factors[]}`, 因子项
+  支持简写 `"F1"` / 加权 `{"id": "F1", "weight": 1.0}` / 阈值 `{"id": "F1", "op": ">=", "threshold": 1}`
+- `composite`: 综合分组合 — `mode`(`top3_weighted` / `sum` / `max` / `average`) + 权重
+- `filters`: `candidate_min_model` 候选过滤(最强模型分下限)
+- `sell_rules`: 止盈 / 止损 / 最大持有天数(回测与卖出巡检用)
+
+```json
+{
+  "id": "default",
+  "name": "默认四模型策略",
+  "market_gate": {"threshold": 3, "factors": ["N1", "N2", "N3", "N4", "N5"]},
+  "scoring_models": [
+    {"id": "first_board", "weight": 0.60, "factors": ["F1", "F2", "F3", "F4", "F5", "F6", "F7"]},
+    {"id": "monster",     "weight": 0.25, "factors": ["Y1", "Y2", "Y3", "Y4", "Y5", "Y6", "Y7"]},
+    {"id": "momentum",    "weight": 0.15, "factors": ["S1", "S2", "S3", "S4", "S5", "S6", "S7"]}
+  ],
+  "composite": {"mode": "top3_weighted", "weights": [0.60, 0.25, 0.15], "cap": 7.0},
+  "filters": {"candidate_min_model": 3},
+  "sell_rules": {"take_profit_pct": 0.08, "stop_loss_pct": 0.05, "max_hold_days": 5}
+}
+```
+
+### 回测 CLI 用法
+
+与实盘共用同一 engine(load_strategy + compute_model_scores), 只加交易模拟层
+(手续费万 2.5 / 滑点 0.1% / 卖出规则)。回测所需的因子必须先注册
+(`prism.factor_check` 或 `reg.scan_factors`), 数据源用东财历史涨停池
+(约保留最近 20 个交易日), 需联网:
+
+```bash
+python -m prism.factor_check                        # 因子体检(26 因子全 PASS)
+python -c "from backtest_cli import zt_feed, kline_feed; \
+from prism.backtest import Backtester; from prism.engine import load_strategy; \
+from prism.strategies import STRATEGIES_DIR; from prism import registry as reg; \
+import json, datetime; reg.scan_factors('prism.factors', force=True); \
+s = load_strategy(STRATEGIES_DIR / 'default.json'); \
+bt = Backtester(s, zt_feed, kline_feed); \
+print(json.dumps(bt.run(datetime.date(2026,7,27), datetime.date(2026,8,13)), ensure_ascii=False))"
+```
+
+网页方式(推荐): `GET /api/backtest?strategy=default&start=20260727&end=20260813`。
+
+### 交易闭环(信号生成 + 授权)
+
+- **信号生成**: `prism.trader.run_daily(strategy, provider, env="sim")` —
+  盘后选股 → 生成 BUY 信号 → 写入 `D:/QMT_SIGNALS/<env>/pending/BUY_*.json`。
+- **桥协议**: 信号 JSON 消费字段 `order_id / action / stock_code / price / volume /
+  account_id`, 与 `qmt_signal_bridge_real.py` 完全一致; `price=0` 桥端按对手价
+  市价单处理(pr_type=2)。
+- **真实盘授权**: 桥只在 `D:/QMT_SIGNALS/real/armed.txt` 存在且含当天日期时消费
+  real 信号; `run_daily(env="real")` 逐候选跳过缺 `up_stop_price` 的候选
+  (全部缺价则整体拒单并返回 error, 防止误按市价单)。
+- **模拟盘冒烟**: 用假 provider(不连 QMT)驱动 `run_daily(env="sim")`, 验证
+  选股 → 信号落盘 → 桥字段齐全全链路(见 Task 9 报告)。
+
+### 自动化开关
+
+- **一键暂停**: 存在 `D:/QMT_SIGNALS/paused` 文件 → `run_daily` 直接返回
+  `paused=True`, 不生成新信号(盘后脚本/网页共用)。
+- 网页开关(已实现 UI): 页面右上角"自动化"状态徽标 + 一键暂停/恢复按钮
+  (读 `GET /api/automation`, 写 `POST {"paused": true|false}`)。
+
+> **网页 UI 状态**: 自动化开关 UI 已上线; 因子库浏览 / 策略管理 / 回测页面
+> 本次未实现 —— 对应 API(`/api/factors` `/api/strategies` `/api/strategy/<id>`
+> `/api/backtest`)已就绪, UI 待后续迭代补齐。
+
 ## 环境要求
 
 - **Windows** + 已安装 **QMT**(迅投)
@@ -55,14 +166,17 @@ pip install flask requests numpy pandas
 - 打开 QMT 交易终端并登录
 - 启用 **miniQMT**(极简模式,行情端口 58610)
 
-**2. 启动网页服务**
+**2. 启动网页服务(Prism 主入口)**
 
 ```bash
-cd strategy_web
-python app.py
+python prism_web/app.py
 ```
 
-看到 `Running on http://127.0.0.1:5000` 即启动成功。
+看到 `Running on http://127.0.0.1:5000` 即启动成功。一键启动全部组件
+(qmt_sync + prism_web + Vibe-Trading)可用 `python start_all.py` 或双击 `start_all.bat`。
+
+> 旧入口 `cd strategy_web && python app.py` 仍可用(兼容期), 但新功能
+> (因子库/策略/回测 API)只在 prism_web 提供, 建议统一走新入口。
 
 **3. 浏览器访问**
 
@@ -82,11 +196,18 @@ python app.py
 |------|------|------|
 | `/` | GET | 网页主页 |
 | `/api/health` | GET | 健康检查,`qmt_connected` 字段 |
-| `/api/screen` | POST | 跑完整选股流程,返回市场环境 + 候选清单 |
+| `/api/screen` | POST | 跑完整选股流程(prism 引擎),返回市场环境 + 候选清单;支持 `strategy` 参数 |
+| `/api/factors` | GET | 因子库列表(可带 `?category=`) |
+| `/api/strategies` | GET | 策略列表 |
+| `/api/strategy/<id>` | GET | 策略详情 |
+| `/api/backtest` | GET | 回测(`?strategy=&start=&end=YYYYMMDD`) |
+| `/api/automation` | GET/POST | 自动化暂停开关(读/写 paused 文件) |
 | `/api/stock/<code>/kline` | GET | 个股 120 根 K线(OHLC + ma60 + 涨停价),如 `/api/stock/600519.SH/kline` |
 | `/api/stock/<code>/manual` | GET/POST | 读写手动填写的受限因子 |
 | `/api/perf` | GET | 绩效统计:按等级(A-E)的候选数/已结算/胜率/平均收益 |
 | `/api/perf/backfill` | POST | 用最新行情回填未结算存档的 N 日收益(默认5日,需QMT) |
+| `/api/market/limitup` | GET/POST | 涨停股列表快照(刷新 + 秒读) |
+| `/api/market/kline` / `/api/market/tick` | GET | 多股 K线 / 盘口 |
 
 ## 改进模块(2026-08)
 
@@ -123,13 +244,17 @@ python app.py
 
 ## 测试
 
-全部离线(无真实网络、无需 QMT):
+全部离线(无真实网络、无需 QMT);**328 个测试全绿**。注意 `prism/tests/` 与
+根 `tests/` 各有 `test_backtest.py`(同名), 需分开跑:
 
 ```bash
-cd strategy_web
-python -m pytest tests/ -q    # 全部离线; 含 因子/模型/编排/东财/桥安全/绩效/回测 回归测试
-cd .. && python -m pytest tests/ -q   # 回测引擎 + 卖出规则测试(项目根 tests/)
+python -m pytest prism/tests/ prism_web/tests/ -q   # 151: prism 引擎 + prism_web(新/旧路由)
+python -m pytest tests/ -q                           # 17: 根级回测/卖出规则回归
+python -m pytest strategy_web/tests/ -q              # 160: 旧实现兼容期保持绿(测旧模块)
+python -m prism.factor_check                         # 因子体检: 26 因子全 PASS
 ```
+
+合计 151 + 17 + 160 = **328 tests**。
 
 ## 说明
 

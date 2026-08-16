@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""一键启动 qmt_sync + strategy_web + Vibe-Trading(后端+前端)。
+"""一键启动 qmt_sync + prism_web + Vibe-Trading(后端+前端)。
 用法: python start_all.py (start_all.bat 双击入口)
 """
 import os
@@ -20,9 +20,9 @@ PROCS = [
         "env": {"PYTHONPATH": QMT_LIB},
     },
     {
-        "name": "strategy_web",
+        "name": "prism_web",
         "cmd": [PY37, "app.py"],
-        "cwd": r"d:\cc-joesph\strategy_web",
+        "cwd": r"d:\cc-joesph\prism_web",
         # 不带 PYTHONPATH: xtquant 已通过 junction 链接进 Py3.7 site-packages,
         # 挂 QMT_LIB 会污染 numpy/pandas (QMT 自带 cp36 二进制)
         "env": {"APP_DEBUG": "0"},
@@ -62,7 +62,7 @@ def main() -> int:
     # 打开量化选股看板(用户入口); Vibe-Trading 前端在 http://localhost:5899
     webbrowser.open("http://localhost:5000")
     print("[start_all] all processes launched. 看板已打开 http://localhost:5000"
-          " (Vibe前端 http://localhost:5899)")
+          " (Vibe前端 http://localhost:5899, prism_web 日志: prism_web.log)")
     return 0
 
 

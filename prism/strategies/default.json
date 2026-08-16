@@ -1,0 +1,18 @@
+{
+  "id": "default",
+  "name": "默认四模型策略",
+  "description": "兼容现有 4 模型 24 因子的默认策略",
+  "market_gate": {"model": "node", "threshold": 3,
+                  "factors": ["N1", "N2", "N3", "N4", "N5"]},
+  "scoring_models": [
+    {"id": "first_board", "name": "首板", "weight": 0.60,
+     "factors": ["F1", "F2", "F3", "F4", "F5", "F6", "F7"]},
+    {"id": "monster", "name": "妖股", "weight": 0.25,
+     "factors": ["Y1", "Y2", "Y3", "Y4", "Y5", "Y6", "Y7"]},
+    {"id": "momentum", "name": "势能", "weight": 0.15,
+     "factors": ["S1", "S2", "S3", "S4", "S5", "S6", "S7"]}
+  ],
+  "composite": {"mode": "top3_weighted", "weights": [0.60, 0.25, 0.15], "cap": 7.0},
+  "filters": {"candidate_min_model": 3, "environment_threshold": 3},
+  "sell_rules": {"take_profit_pct": 0.08, "stop_loss_pct": 0.05, "max_hold_days": 5}
+}
