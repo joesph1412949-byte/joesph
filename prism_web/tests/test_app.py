@@ -122,7 +122,12 @@ def test_health(client):
 
 
 def test_screen_disconnected_returns_400(client, monkeypatch):
-    monkeypatch.setattr(app_module.ds_obj, "_connected", False)
+    # 自动重连后: 若 QMT 真不可达(connect 失败) → 仍 400 未连接
+    class BrokenDS:
+        _connected = False
+        def connect(self):
+            raise RuntimeError("QMT down")
+    monkeypatch.setattr(app_module, "ds_obj", BrokenDS())
     r = client.post("/api/screen")
     assert r.status_code == 400
     assert "QMT未连接" in r.get_json()["error"]
@@ -330,3 +335,61 @@ def test_strategy_detail_bad_sid_404(client):
     assert r2.status_code == 404
     r3 = client.get("/api/backtest?strategy=foo.bar&start=20260101&end=20260105")
     assert r3.status_code == 404
+
+
+# ---------- QMT 自动重连 ----------
+
+class FakeReconnectDS:
+    """模拟连接状态: 初始 _connected=False, connect() 后恢复 True。
+    用实例属性(测试间不污染)。"""
+    def __init__(self):
+        self._connected = False
+        self.connect_calls = 0
+
+    def connect(self):
+        self.connect_calls += 1
+        self._connected = True
+
+
+def test_health_auto_reconnects_when_disconnected(client, monkeypatch):
+    r"""QMT 连接失效后, /api/health 应自动重连并恢复状态。"""
+    fake = FakeReconnectDS()
+    monkeypatch.setattr(app_module, "ds_obj", fake)
+    # 初始未连接 → health 触发重连 → 返回已连接
+    r = client.get("/api/health")
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["qmt_connected"] is True
+    assert fake.connect_calls >= 1
+
+
+def test_screen_auto_reconnects_before_qmt_call(client, monkeypatch):
+    r"""/api/screen 在 QMT 未连接时自动重连, 而非直接 400。"""
+    fake = FakeReconnectDS()
+    monkeypatch.setattr(app_module, "ds_obj", fake)
+    # 用假 provider 替代真实选股(连接成功后进入选股流程)
+    class FakeProvider:
+        def build_market_context(self):
+            from prism.context import FactorContext
+            return FactorContext(code="__MKT__")
+        def get_limit_ups(self):
+            return []
+    monkeypatch.setattr(app_module, "DataProvider",
+                        lambda ds=None, manual=None: FakeProvider())
+    r = client.post("/api/screen")
+    # 重连成功 → 不再 400"未连接"(进入选股流程, 涨停池空 → 环境不达标也返回 200)
+    assert r.status_code != 400
+    assert fake.connect_calls >= 1
+
+
+def test_screen_still_400_when_reconnect_fails(client, monkeypatch):
+    r"""重连失败(connect 抛异常) → 仍返回 400 未连接。"""
+    class BrokenDS(FakeReconnectDS):
+        def connect(self):
+            raise RuntimeError("QMT down")
+
+    fake = BrokenDS()
+    monkeypatch.setattr(app_module, "ds_obj", fake)
+    r = client.post("/api/screen")
+    assert r.status_code == 400
+    assert "QMT未连接" in r.get_json()["error"]

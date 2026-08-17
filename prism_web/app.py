@@ -247,6 +247,31 @@ def _kline_dates(df):
 
 # ================= 旧路由(保留) =================
 
+# QMT 自动重连: xtdata 连接可能中途失效(QMT 重启/休眠/超时),
+# _connected 标志会残留 False。_ensure_qmt() 在每次需要 QMT 的调用前
+# 尝试重新连接(轻量探针), 成功则恢复 _connected=True。
+_qmt_reconnect_lock = _threading.Lock()
+
+
+def _ensure_qmt():
+    """确保 QMT 连接可用。返回 True/False; False 时日志记录原因。
+    带锁防并发重连(多个请求同时触发只会重连一次)。"""
+    if ds_obj._connected:
+        return True
+    if not _qmt_reconnect_lock.acquire(blocking=False):
+        return False   # 另一个请求正在重连, 稍后再试
+    try:
+        ds_obj.connect()
+        if ds_obj._connected:
+            logger.info("QMT 自动重连成功")
+        return ds_obj._connected
+    except Exception as e:
+        logger.warning("QMT 自动重连失败: %r", e)
+        return False
+    finally:
+        _qmt_reconnect_lock.release()
+
+
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -254,12 +279,14 @@ def index():
 
 @app.route("/api/health")
 def health():
+    # 未连接时先尝试自动重连, 让页面状态自愈
+    _ensure_qmt()
     return jsonify({"ok": True, "qmt_connected": ds_obj._connected})
 
 
 @app.route("/api/screen", methods=["POST"])
 def screen():
-    if not ds_obj._connected:
+    if not _ensure_qmt():
         return jsonify({"error": "QMT未连接, 请先打开QMT并开启miniQMT"}), 400
     # 单飞锁: 选股耗时 1~2 分钟, 浏览器连点会并发跑多个选股同时打爆东财接口。
     # 进行中再请求 → 409 提示稍候(不排队)。
@@ -324,7 +351,7 @@ def perf():
 @app.route("/api/perf/backfill", methods=["POST"])
 def perf_backfill():
     """用最新行情回填未结算存档的 N 日收益(N 默认 5)。需 QMT 已连接。"""
-    if not ds_obj._connected:
+    if not _ensure_qmt():
         return jsonify({"error": "QMT未连接, 请先打开QMT并开启miniQMT"}), 400
     try:
         days = int(request.args.get("days", 5))
@@ -337,7 +364,7 @@ def perf_backfill():
 
 @app.route("/api/market/kline", methods=["GET"])
 def market_kline():
-    if not ds_obj._connected:
+    if not _ensure_qmt():
         return jsonify({"error": "QMT未连接, 请先打开QMT并开启miniQMT"}), 400
     codes = [c.strip() for c in (request.args.get("codes") or "").split(",") if c.strip()]
     if not codes:
@@ -372,7 +399,7 @@ def market_kline():
 @app.route("/api/market/limitup", methods=["GET", "POST"])
 def market_limitup():
     if request.method == "POST":
-        if not ds_obj._connected:
+        if not _ensure_qmt():
             return jsonify({"error": "QMT未连接, 请先打开QMT并开启miniQMT"}), 400
         try:
             ticks = ds_obj.get_full_market_ticks()
@@ -394,7 +421,7 @@ def market_limitup():
 
 @app.route("/api/market/tick", methods=["GET"])
 def market_tick():
-    if not ds_obj._connected:
+    if not _ensure_qmt():
         return jsonify({"error": "QMT未连接, 请先打开QMT并开启miniQMT"}), 400
     codes = [c.strip() for c in (request.args.get("codes") or "").split(",") if c.strip()]
     if not codes:
