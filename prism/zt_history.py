@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 
 # 缓存路径(与 common.LOG_DIR 同级)
 CACHE_PATH = Path(__file__).parent.parent / ".zt_history_cache.pkl"
+# 按日索引路径: date → [{code, boards}], 查询 O(1)
+INDEX_PATH = Path(__file__).parent.parent / ".zt_history_index.pkl"
 
 # 拉多少根日K(约1.5年交易日)
 KLINE_COUNT = 400
@@ -52,36 +54,49 @@ def _with_suffix(code):
 
 
 def build_cache(progress=None):
-    """下载全市场日K线并构建涨停判断缓存。
+    """下载全市场日K线并构建涨停判断缓存(增量保存, 中断不丢进度)。
 
-    返回 {"codes": n, "days": n, "cache_size": bytes}。耗时较长(首次30-60分)。
+    返回 {"codes": n, "cache_size": bytes}。耗时较长(首次30-60分)。
     cache 结构: {code: {"dates": [YYYY-MM-DD...], "close": [...], "pre": [...]}}
     (pre = 前日收盘, 用于涨停判断; 升序, 最后=最新)
+
+    增量策略: 每处理 5 批(1000只)写一次缓存; 若中断, 已处理部分保留。
     """
     from xtquant import xtdata
     t0 = time.time()
     codes = xtdata.get_stock_list_in_sector("沪深A股")
-    logger.info("全市场 %d 只, 开始批量下载日K线...", len(codes))
-    # 分批下载, 每批 200 只(避免单次请求过大)
+    # 已有缓存(增量续建)
+    cache = _load_cache()
+    todo = [c for c in codes if c not in cache]
+    logger.info("全市场 %d 只, 已缓存 %d, 待下载 %d...",
+                len(codes), len(cache), len(todo))
     batch = 200
-    for i in range(0, len(codes), batch):
-        chunk = codes[i:i + batch]
-        xtdata.download_history_data2(chunk, "1d", start_time="", end_time="")
-        if progress:
-            progress(i + len(chunk), len(codes))
-    # 读取全部
-    cache = {}
-    all_days = set()
-    for i in range(0, len(codes), batch):
-        chunk = codes[i:i + batch]
-        data = xtdata.get_market_data_ex([], chunk, period="1d",
-                                         start_time="", end_time="",
-                                         count=KLINE_COUNT)
+    processed = len(cache)
+    for i in range(0, len(todo), batch):
+        chunk = todo[i:i + batch]
+        try:
+            xtdata.download_history_data2(chunk, "1d",
+                                          start_time="", end_time="")
+        except Exception as e:
+            logger.warning("第 %d 批下载失败: %r (跳过该批)", i // batch, e)
+            processed += len(chunk)
+            if progress:
+                progress(processed, len(codes))
+            continue
+        try:
+            data = xtdata.get_market_data_ex([], chunk, period="1d",
+                                             start_time="", end_time="",
+                                             count=KLINE_COUNT)
+        except Exception as e:
+            logger.warning("第 %d 批读取失败: %r (跳过该批)", i // batch, e)
+            processed += len(chunk)
+            if progress:
+                progress(processed, len(codes))
+            continue
         for code, df in (data or {}).items():
             if df is None or len(df) < 2:
                 continue
             closes = df["close"].tolist()
-            # preClose 字段(QMT 提供)最准; 缺失则用前一日收盘
             if "preClose" in df.columns:
                 pre = df["preClose"].tolist()
             else:
@@ -92,15 +107,19 @@ def build_cache(progress=None):
             else:
                 dates = [str(t) for t in df.index]
             cache[code] = {"dates": dates, "close": closes, "pre": pre}
-            all_days.update(dates)
+        processed += len(chunk)
+        # 每 5 批增量保存一次
+        if (i // batch) % 5 == 4:
+            CACHE_PATH.write_bytes(pickle.dumps(cache, protocol=4))
+            logger.info("增量保存: %d 只 (%.0f秒)", len(cache),
+                        time.time() - t0)
         if progress:
-            progress(i + len(chunk), len(codes))
+            progress(processed, len(codes))
     CACHE_PATH.write_bytes(pickle.dumps(cache, protocol=4))
-    logger.info("缓存构建完成: %d 只, %d 天, %.1f MB, 耗时 %.0f 秒",
-                len(cache), len(all_days),
-                CACHE_PATH.stat().st_size / 1e6, time.time() - t0)
-    return {"codes": len(cache), "days": len(all_days),
-            "cache_size": CACHE_PATH.stat().st_size}
+    logger.info("缓存构建完成: %d 只, %.1f MB, 耗时 %.0f 秒",
+                len(cache), CACHE_PATH.stat().st_size / 1e6,
+                time.time() - t0)
+    return {"codes": len(cache), "cache_size": CACHE_PATH.stat().st_size}
 
 
 def _load_cache():
@@ -161,11 +180,114 @@ def qmt_zt_feed(date_yyyymmdd, cache=None):
     return out
 
 
+def build_index(cache=None):
+    """从K线缓存构建按日索引: {date: [{code, boards}]}, 查询 O(1)。
+
+    回测逐日查询涨停池时, 避免每次遍历全市场 5209 只。构建约 10-30 秒。
+    """
+    cache = cache if cache is not None else _load_cache()
+    if not cache:
+        return {}
+    by_day = {}
+    for code, rec in cache.items():
+        dates, closes, pre = rec["dates"], rec["close"], rec["pre"]
+        ratio = _limit_ratio(code)
+        n = len(dates)
+        for i in range(n):
+            if i == 0:
+                continue   # 第一天无前收, 不判
+            c = closes[i]
+            p = pre[i]
+            if not p or c <= 0:
+                continue
+            if c >= _limit_up_price(p, ratio) - 0.001:
+                # 连板数
+                boards = 1
+                j = i - 1
+                while j >= 0:
+                    c2 = closes[j]
+                    p2 = pre[j]
+                    if p2 and c2 >= _limit_up_price(p2, ratio) - 0.001:
+                        boards += 1
+                        j -= 1
+                    else:
+                        break
+                by_day.setdefault(dates[i], []).append(
+                    {"code": code, "boards": boards})
+    INDEX_PATH.write_bytes(pickle.dumps(by_day, protocol=4))
+    return by_day
+
+
+def _load_index():
+    if INDEX_PATH.exists():
+        try:
+            return pickle.loads(INDEX_PATH.read_bytes())
+        except Exception:
+            return {}
+    return {}
+
+
+def qmt_zt_feed(date_yyyymmdd, cache=None, index=None):
+    """按日期返回涨停池 [{code, boards, theme}]。无缓存/非交易日 → []。
+
+    优先用按日索引(INDEX_PATH, O(1)); 索引不存在时退化为全表扫描。
+    """
+    if index is None:
+        index = _load_index()
+    if index:
+        if len(date_yyyymmdd) == 8:
+            day_fmt = "%s-%s-%s" % (date_yyyymmdd[:4],
+                                    date_yyyymmdd[4:6],
+                                    date_yyyymmdd[6:8])
+        else:
+            day_fmt = date_yyyymmdd
+        items = index.get(day_fmt) or []
+        return [{"code": it["code"], "boards": it["boards"], "theme": ""}
+                for it in items]
+    # 退化: 全表扫描
+    cache = cache if cache is not None else _load_cache()
+    if not cache:
+        return []
+    day = date_yyyymmdd  # "YYYYMMDD"
+    if len(day) == 8:
+        day_fmt = "%s-%s-%s" % (day[:4], day[4:6], day[6:8])
+    else:
+        day_fmt = day
+    out = []
+    for code, rec in cache.items():
+        dates = rec["dates"]
+        try:
+            idx = dates.index(day_fmt)
+        except ValueError:
+            continue
+        close = rec["close"][idx]
+        pre = rec["pre"][idx]
+        if not pre or close <= 0:
+            continue
+        ratio = _limit_ratio(code)
+        limit_px = _limit_up_price(pre, ratio)
+        if close >= limit_px - 0.001:
+            boards = 1
+            j = idx - 1
+            while j >= 0:
+                c2 = rec["close"][j]
+                p2 = rec["pre"][j]
+                if p2 and c2 >= _limit_up_price(p2, ratio) - 0.001:
+                    boards += 1
+                    j -= 1
+                else:
+                    break
+            out.append({"code": code, "boards": boards, "theme": ""})
+    return out
+
+
 def build_cli():
     """CLI: python -m prism.zt_history [--limit N] [--date YYYYMMDD]"""
     import argparse
     ap = argparse.ArgumentParser(description="历史涨停池缓存构建")
-    ap.add_argument("--build", action="store_true", help="构建/重建缓存")
+    ap.add_argument("--build", action="store_true", help="构建/重建K线缓存")
+    ap.add_argument("--build-index", action="store_true",
+                    help="从K线缓存构建按日索引(查询加速)")
     ap.add_argument("--date", default="", help="查询某日涨停池 YYYYMMDD")
     ap.add_argument("--stats", action="store_true", help="显示缓存统计")
     args = ap.parse_args()
@@ -175,6 +297,13 @@ def build_cli():
             sys.stdout.flush()
         r = build_cache(progress=prog)
         print("\n构建完成:", r)
+        idx = build_index()
+        print("按日索引: %d 天" % len(idx))
+        return
+    if args.build_index:
+        idx = build_index()
+        print("按日索引: %d 天" % len(idx))
+        return
         return
     cache = _load_cache()
     if args.stats or not args.date:

@@ -20,7 +20,14 @@ try:
 except Exception:
     requests = None
 
-from backtest import BacktestEngine
+from prism.backtest import Backtester
+from prism.engine import load_strategy
+from prism.strategies import STRATEGIES_DIR
+import prism.factors  # noqa: F401  触发因子库扫描注册
+import prism.registry as _reg
+
+_reg.reset()
+_reg.scan_factors("prism.factors", force=True)
 
 HEADERS = {"User-Agent": "Mozilla/5.0",
            "Referer": "http://quote.eastmoney.com/"}
@@ -214,40 +221,48 @@ def _parse_date(s):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="东财数据回测")
+    ap = argparse.ArgumentParser(description="Prism 回测 CLI(QMT本地数据, 可回测约1.5年)")
     ap.add_argument("--start", required=True, help="开始日期 YYYYMMDD")
     ap.add_argument("--end", required=True, help="结束日期 YYYYMMDD")
-    ap.add_argument("--min-limit", type=int, default=20, help="环境门槛: 涨停家数≥N(默认20)")
-    ap.add_argument("--picks", type=int, default=3, help="每天最多选几只(默认3)")
-    ap.add_argument("--hold", type=int, default=5, help="持有交易日数(默认5)")
-    ap.add_argument("--compare", action="store_true",
-                    help="运行多组参数对比(环境门槛/选股数/持有天数)")
+    ap.add_argument("--strategy", default="default",
+                    help="策略 id(prism/strategies/, 默认 default)")
+    ap.add_argument("--sell-tp", type=float, default=None, help="止盈%(覆盖策略配置)")
+    ap.add_argument("--sell-sl", type=float, default=None, help="止损%(覆盖策略配置)")
+    ap.add_argument("--hold", type=int, default=None, help="持有天数(覆盖策略配置)")
+    ap.add_argument("--oos", action="store_true",
+                    help="运行样本外验证(前后半段对比, 防过拟合)")
     args = ap.parse_args()
 
     start = _parse_date(args.start)
     end = _parse_date(args.end)
-    eng = BacktestEngine(zt_feed=zt_feed, kline_feed=kline_feed)
+    sp = STRATEGIES_DIR / ("%s.json" % args.strategy)
+    if not sp.exists():
+        print("策略不存在: %s (可用: %s)" % (
+            args.strategy,
+            ", ".join(p.stem for p in STRATEGIES_DIR.glob("*.json"))))
+        return 1
+    strategy = load_strategy(sp)
+    sell = {}
+    if args.sell_tp is not None:
+        sell["take_profit_pct"] = args.sell_tp
+    if args.sell_sl is not None:
+        sell["stop_loss_pct"] = args.sell_sl
+    if args.hold is not None:
+        sell["max_hold_days"] = args.hold
+    bt = Backtester(strategy, zt_feed=zt_feed, kline_feed=kline_feed)
 
     def progress(d):
         if d.day % 5 == 1:
             print("  回放中... %s" % d, file=sys.stderr)
 
-    if args.compare:
-        grid = []
-        for min_l in (10, 20, 30):
-            for picks in (1, 3, 5):
-                for hold in (1, 3, 5):
-                    grid.append({"min_limit_count": min_l,
-                                 "max_picks": picks, "hold_days": hold})
-        rows = eng.compare_params(start, end, grid, progress=progress)
-        print(json.dumps(rows, ensure_ascii=False, indent=2))
+    if args.oos:
+        res = bt.run_oos(start, end, sell_rules=sell or None, progress=progress)
+        print(json.dumps(res, ensure_ascii=False, indent=2, default=str))
     else:
-        rep = eng.run(start, end,
-                      params={"min_limit_count": args.min_limit,
-                              "max_picks": args.picks, "hold_days": args.hold},
-                      progress=progress)
-        print(json.dumps(rep, ensure_ascii=False, indent=2))
+        rep = bt.run(start, end, sell_rules=sell or None, progress=progress)
+        print(json.dumps(rep, ensure_ascii=False, indent=2, default=str))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
