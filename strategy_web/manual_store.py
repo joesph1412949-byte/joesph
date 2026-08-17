@@ -10,9 +10,9 @@ logger = logging.getLogger(__name__)
 
 
 class ManualStore:
-    # 可手填的因子集合（东财已自动的 Y1/Y5/F7/Y7/S5/Y6/Y2 移出手填;
-    # 实测探针: S5 融资接口无法从东财确认 → 保持手填; S7 探针未确认暂留手填）
-    MANUAL_FACTORS = ["S1", "S5", "S7"]
+    # 手填因子集合: 原 S1/S5/S7 已被 K线自动因子(M1/M2/M5)取代(2026-08),
+    # 不再需要手填。保留空列表兼容旧代码(网页手填功能仍在, 只是无可用因子)。
+    MANUAL_FACTORS = []
 
     def __init__(self, path="manual_factors.json"):
         self.path = Path(path)

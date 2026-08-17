@@ -138,7 +138,8 @@ def _load_strategy_for_screen(sid):
 # 东财个股因子输出集(fundamental_feed.compute_for_stock)与手填因子集(前端 MANUAL_ALL),
 # 用于候选 auto_manual 来源推断(审查 I1/M6)。
 _FUNDAMENTAL_FIDS = {"Y1", "Y5", "F7", "Y7", "Y2", "Y6"}
-_MANUAL_FIDS = {"S1", "S5", "S7"}
+# 手填因子已全部被 K线自动因子取代(2026-08): 原 S1/S5/S7 移除, 集合为空
+_MANUAL_FIDS = set()
 
 
 def _infer_auto_manual(factors):

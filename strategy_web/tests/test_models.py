@@ -8,12 +8,15 @@ from models import ModelScorer
 
 
 def _F(fb, mo, mom):
-    """构造三模型命中数, 其余因子0。F1-F7=fb个, Y1-Y7=mo个, S1-S7=mom个。"""
+    """构造三模型命中数, 其余因子0。F1-F7=fb个, Y1-Y7=mo个,
+    势能模型(2026-08 起: M1/M2/S2/S3/S4/S6/M5)=mom个。"""
     factors = {}
     for i in range(1, 8):
         factors["F%d" % i] = 1 if i <= fb else 0
         factors["Y%d" % i] = 1 if i <= mo else 0
-        factors["S%d" % i] = 1 if i <= mom else 0
+    mom_fids = ["M1", "M2", "S2", "S3", "S4", "S6", "M5"]
+    for i, fid in enumerate(mom_fids):
+        factors[fid] = 1 if i < mom else 0
     return factors
 
 

@@ -53,11 +53,11 @@ def test_manual_set_and_get(client, tmp_path, monkeypatch):
     from manual_store import ManualStore
     s = ManualStore(str(tmp_path / "m.json"))
     monkeypatch.setattr(app_module, "manual_store_obj", s)
+    # 手填因子集合已空(2026-08): S1 不再是手填因子 → 写入被拒 400
     r = client.post("/api/stock/002859.SZ/manual", json={"S1": 1})
-    assert r.status_code == 200
-    assert r.get_json()["factors"]["S1"] == 1
+    assert r.status_code == 400
     r2 = client.get("/api/stock/002859.SZ/manual")
-    assert r2.get_json()["S1"] == 1
+    assert r2.get_json() == {}
 
 
 def test_kline_endpoint(client, monkeypatch):

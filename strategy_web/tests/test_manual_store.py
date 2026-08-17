@@ -18,34 +18,39 @@ def store(tmp_path):
 def test_empty_manual(store):
     assert store.get_manual("000001.SZ") == {}
     assert store.all() == {}
+    # 手填集合已空(2026-08: S1/S5/S7 被 K线因子取代) → 无可用手填因子
+    assert store.MANUAL_FACTORS == []
 
 
-def test_set_and_get(store):
-    store.set_manual("000001.SZ", {"S1": 1, "S7": 0})
-    assert store.get_manual("000001.SZ") == {"S1": 1, "S7": 0}
+def test_set_any_factor_rejected(store):
+    # 手填集合为空: 写入任何因子都被拒(ValueError)
+    with pytest.raises(ValueError):
+        store.set_manual("000001.SZ", {"S1": 1})
+    with pytest.raises(ValueError):
+        store.set_manual("000001.SZ", {"S7": 0})
 
 
 def test_set_persists_to_disk(store, tmp_path):
-    store.set_manual("000001.SZ", {"S1": 1})
+    # 空集合下无有效因子可写; 验证读取历史文件仍兼容
+    store.set_manual("000001.SZ", {})   # 空写入合法(幂等)
     reloaded = ManualStore(str(tmp_path / "manual.json"))
-    assert reloaded.get_manual("000001.SZ") == {"S1": 1}
+    assert reloaded.get_manual("000001.SZ") == {}
 
 
 def test_set_rejects_invalid_values(store):
     with pytest.raises(ValueError):
-        store.set_manual("000001.SZ", {"S1": 2})   # 非 0/1
+        store.set_manual("000001.SZ", {"S1": 2})   # 未知因子(空集合)即拒
     with pytest.raises(ValueError):
         store.set_manual("000001.SZ", {"S1": "x"})
 
 
 def test_merge_combines_auto_and_manual(store):
     auto = {"F1": 1, "F3": 0, "S5": 0}
-    store.set_manual("000001.SZ", {"S1": 1, "S5": 1})  # 手填覆盖 S5
+    # 空手填集合: merge 只保留自动因子
     merged = store.merge(auto, "000001.SZ")
-    assert merged["F1"] == 1       # 自动
-    assert merged["F3"] == 0       # 自动
-    assert merged["S1"] == 1       # 手填
-    assert merged["S5"] == 1       # 手填覆盖自动
+    assert merged["F1"] == 1
+    assert merged["F3"] == 0
+    assert merged["S5"] == 0       # 无手填覆盖, 保持自动值
 
 
 def test_merge_unknown_code(store):
@@ -65,9 +70,9 @@ def test_corrupt_json_is_preserved_and_recoverable(tmp_path, caplog):
     assert len(siblings) == 1               # 损坏文件被重命名为 .corrupt-* 保留
     assert siblings[0].read_bytes() == garbage  # 原始字节保留
     assert not p.exists()                   # 原路径已被移走
-    s.set_manual("000001.SZ", {"S1": 1})    # 后续写入生成全新有效文件
+    s.set_manual("000001.SZ", {})           # 空写入生成全新有效文件
     reloaded = ManualStore(str(p))
-    assert reloaded.get_manual("000001.SZ") == {"S1": 1}
+    assert reloaded.get_manual("000001.SZ") == {}
     assert any("损坏" in rec.message for rec in caplog.records)
 
 

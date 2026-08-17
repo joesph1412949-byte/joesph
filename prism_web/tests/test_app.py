@@ -177,15 +177,17 @@ def test_screen_runs_prism_engine(client, tmp_path, monkeypatch):
 
 
 def test_manual_roundtrip(client, tmp_path, monkeypatch):
-    """旧路由 /api/stock/<code>/manual 保留冒烟(临时文件避免污染)。"""
+    """旧路由 /api/stock/<code>/manual 保留冒烟(临时文件避免污染)。
+
+    手填因子已全部被 K线自动因子取代(2026-08): S1/S5/S7 移出手填集合 →
+    写入任何手填因子都被拒(400), 读取返回空 {}。"""
     from manual_store import ManualStore
     s = ManualStore(str(tmp_path / "m.json"))
     monkeypatch.setattr(app_module, "manual_store_obj", s)
     r = client.post("/api/stock/002859.SZ/manual", json={"S1": 1})
-    assert r.status_code == 200
-    assert r.get_json()["factors"]["S1"] == 1
+    assert r.status_code == 400          # S1 不再是手填因子 → 拒
     r2 = client.get("/api/stock/002859.SZ/manual")
-    assert r2.get_json()["S1"] == 1
+    assert r2.get_json() == {}           # 无手填因子 → 空
 
 
 # ---------------- C1: /api/screen market 载荷前端契约(stage/node_score/factors/...) ----------------
@@ -285,7 +287,7 @@ def test_screen_candidates_merged_fields(client, tmp_path, monkeypatch):
     am = c["auto_manual"]
     assert am["F1"] == "auto"
     assert am["Y1"] == "fundamental"      # 东财个股因子
-    assert am["S1"] == "manual"           # 手填因子
+    assert am["S1"] == "auto"             # S1 已移出手填集合(2026-08) → 归为 auto
     assert am["F2"] == "auto"
 
 
