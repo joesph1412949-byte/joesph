@@ -70,3 +70,13 @@ superpowers-main/
 
 # Optional: TypeScript compiled output
 # *.tsbuildinfo
+
+# Runtime caches (auto-generated, never commit)
+.zt_history_cache.pkl
+.zt_history_index.pkl
+
+# Agent / tooling directories
+.agents/
+.codex/
+deepseek-harness/
+scripts/
