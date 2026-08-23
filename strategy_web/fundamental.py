@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 
 # ---- 可调参数 ----
 Y1_MAX_FLOAT_MV = 80e8      # 小市值: 流通市值 < 80亿
+Y8_MID_MIN = 30e8           # 中市值启动: 30亿 ≤ 流通市值 < 100亿(覆盖艾艾精工类48亿)
+Y8_MID_MAX = 100e8
 Y5_MIN_CONCEPTS = 3         # 多概念: 概念标签 >= 3
 RECENT_DAYS = 5             # "近 N 日" 窗口(题材新颖/事件/龙虎榜)
 
@@ -169,6 +171,20 @@ class FundamentalFeed:
                 "note": "流通市值 %.0f亿 < 80亿" % (float_mv / 1e8) if hit
                 else "流通市值 %.0f亿 >= 80亿" % (float_mv / 1e8)}
 
+    def _mid_cap(self, float_mv):
+        """Y8 中市值启动: 30亿 ≤ 流通市值 < 100亿(纯计算, 无网络)。
+
+        文档艾艾精工案例: 启动时市值约48亿, 妖股模型原小市值条件(≤80亿)
+        其实能覆盖, 但30亿以下更优的票更稀缺; Y8 把中市值启动票单独标记,
+        供策略配置决定是否纳入(默认不干扰 Y1 小市值语义)。"""
+        if not float_mv:
+            return None
+        hit = Y8_MID_MIN <= float_mv < Y8_MID_MAX
+        return {"score": 1 if hit else 0,
+                "note": "流通市值 %.0f亿 %s" % (
+                    float_mv / 1e8,
+                    "∈[30,100)亿 中市值启动" if hit else "非中市值区间")}
+
     def _concepts(self, code):
         """Y5 多概念: 概念标签数 >= Y5_MIN_CONCEPTS。返回 {"score","note"} 或 None。"""
         resp = self.http_get(
@@ -306,6 +322,12 @@ class FundamentalFeed:
                 out["Y1"] = y1
         except Exception as e:
             logger.warning("东财因子 %s(%s) 计算失败, 回落手填: %r", "Y1", code, e)
+        try:
+            y8 = self._mid_cap(float_mv)
+            if y8:
+                out["Y8"] = y8
+        except Exception as e:
+            logger.warning("东财因子 %s(%s) 计算失败, 回落手填: %r", "Y8", code, e)
         for name, fn in [("Y5", self._concepts), ("F7", self._novel_concept),
                          ("Y7", self._dragon_tiger), ("S5", self._financing),
                          ("Y2", self._shareholders), ("Y6", self._event)]:

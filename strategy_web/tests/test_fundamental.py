@@ -121,6 +121,17 @@ def test_y1_small_cap_threshold():
     assert f._small_cap(None) is None
 
 
+# ---------- Y8 中市值(纯计算) ----------
+def test_y8_mid_cap_threshold():
+    f = FundamentalFeed(http_get=FakeHTTP())
+    assert f._mid_cap(29e8)["score"] == 0    # < 30亿 → 非中市值
+    assert f._mid_cap(30e8)["score"] == 1    # 30亿 边界含
+    assert f._mid_cap(48e8)["score"] == 1    # 艾艾精工类 48亿
+    assert f._mid_cap(99e8)["score"] == 1    # < 100亿
+    assert f._mid_cap(100e8)["score"] == 0   # >= 100亿 → 非中市值
+    assert f._mid_cap(None) is None
+
+
 # ---------- secid 辅助 ----------
 def test_secid_market_mapping():
     assert _secid("000001.SZ") == "0.000001"
@@ -295,17 +306,18 @@ def test_compute_for_stock_full_hit_confirmed_factors():
     f = FundamentalFeed(http_get=http, cache_path=None)
     out = f.compute_for_stock("000001.SZ", float_mv=50e8)
     assert {k: v["score"] for k, v in out.items()} == {
-        "Y1": 1, "Y5": 1, "F7": 1, "Y7": 1, "Y2": 1, "Y6": 1,
+        "Y1": 1, "Y8": 1, "Y5": 1, "F7": 1, "Y7": 1, "Y2": 1, "Y6": 1,
     }
 
 
 def test_compute_for_stock_never_raises_on_http_failure():
-    # 所有网络因子都失败 → 只保留 Y1, 不崩
+    # 所有网络因子都失败 → 只保留 Y1/Y8(纯计算), 不崩
     f = FundamentalFeed(http_get=FakeHTTP(default_exc=RuntimeError("down")),
                         cache_path=None)
     out = f.compute_for_stock("000001.SZ", float_mv=50e8)
-    assert set(out.keys()) == {"Y1"}
+    assert set(out.keys()) == {"Y1", "Y8"}
     assert out["Y1"]["score"] == 1
+    assert out["Y8"]["score"] == 1
 
 
 def test_compute_for_stock_non_numeric_float_mv_fails_open_y1():

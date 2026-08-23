@@ -1,0 +1,33 @@
+{
+  "id": "sector_momentum",
+  "name": "板块动量实验策略",
+  "description": "8.23文档落地实验: 板块强度(SEC1连阳/SEC2十日涨幅) + 阻力最小方向(M6横盘突破) + 基础动量(M1)。SEC因子需市场数据层注入(mkt), 回测时 run(mkt=, sector_map=) 提供。",
+  "market_gate": {
+    "model": "node",
+    "threshold": 1,
+    "factors": ["N1"]
+  },
+  "scoring_models": [
+    {
+      "id": "sector_strength",
+      "name": "板块强度",
+      "weight": 0.5,
+      "factors": [
+        {"id": "SEC1", "weight": 1.0},
+        {"id": "SEC2", "weight": 1.0}
+      ]
+    },
+    {
+      "id": "momentum",
+      "name": "形态动量",
+      "weight": 0.5,
+      "factors": [
+        {"id": "M1", "weight": 1.0},
+        {"id": "M6", "weight": 1.0}
+      ]
+    }
+  ],
+  "composite": {"mode": "sum", "cap": 4.0},
+  "filters": {"candidate_min_model": 1, "environment_threshold": 1},
+  "sell_rules": {"take_profit_pct": 0.08, "stop_loss_pct": 0.05, "max_hold_days": 5}
+}
