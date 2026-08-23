@@ -110,7 +110,7 @@ class Backtester:
         return self._kline_cache[code]
 
     # ---------------- 选股(复用 engine) ----------------
-    def _stock_ctx(self, code, kline):
+    def _stock_ctx(self, code, kline, mkt=None, sector_map=None):
         """回测环境的股票上下文(只用回测可得的字段)。
 
         数据适配层(审查 I1): kline_feed 的元组列表 [(date, close), ...] 组装成
@@ -118,6 +118,8 @@ class Backtester:
         kline["close"]/kline["volume"]/len(kline) 访问。回测 feeds 没有
         volume/open/high/low → 占位: volume 恒 1.0(量比类因子不会误命中),
         open/high/low 取 close(形态类因子语义不受影响)。
+        mkt: 市场数据层快照(供 SEC 板块因子), 注入 ctx._extra["mkt"]。
+        sector_map: code → 行业板块代码(供 SEC 因子查个股所属板块)。
         """
         rows = []
         for dt, px in kline or []:
@@ -125,8 +127,13 @@ class Backtester:
                 rows.append((str(dt), float(px)))
             except (TypeError, ValueError):
                 continue
+        extra = {}
+        if mkt is not None:
+            extra["mkt"] = mkt
+        if sector_map is not None:
+            extra["sector_map"] = sector_map
         if not rows:
-            return FactorContext(code=code, kline=None)
+            return FactorContext(code=code, kline=None, **extra)
         df = pd.DataFrame({
             "close": [px for _dt, px in rows],
             "open": [px for _dt, px in rows],
@@ -134,9 +141,9 @@ class Backtester:
             "low": [px for _dt, px in rows],
             "volume": [1.0] * len(rows),
         }, index=[dt for dt, _px in rows])
-        return FactorContext(code=code, kline=df)
+        return FactorContext(code=code, kline=df, **extra)
 
-    def _pick(self, pool, asof, em=None, ticks=None):
+    def _pick(self, pool, asof, em=None, ticks=None, mkt=None, sector_map=None):
         """用策略引擎对当日涨停池选股。返回 [(code, boards, theme, composite), ...]。
 
         asof: 选股日期(date)——关键!因子只能看到 <= asof 的K线,
@@ -147,7 +154,9 @@ class Backtester:
 
         数据适配层(审查 I1): 市场上下文从池子合成 limit_ups(补
         sealed/last/last_close, 没有就 None), em/ticks 可注入(供 N3/N5 等);
-        未注入时依赖这些数据的门槛因子得 0(见 _gate_notes 归因)。
+        mkt(市场数据层快照, 供 SEC 板块因子)可注入, 防未来函数由外部保证
+        (只传入 asof 当日及之前的数据); 未注入时依赖这些数据的门槛因子得 0
+        (见 _gate_notes 归因)。
         """
         gate = self.strategy.get("market_gate") or {}
         gate_fids = gate.get("factors", [])
@@ -160,8 +169,9 @@ class Backtester:
             item.setdefault("last", None)
             item.setdefault("last_close", None)
             pool_ctx.append(item)
+        mkt_extra = {"mkt": mkt or {}}
         market_ctx = FactorContext(code="__MKT__", limit_ups=pool_ctx,
-                                   em=em or {}, ticks=ticks or {})
+                                   em=em or {}, ticks=ticks or {}, **mkt_extra)
         for fid in gate_fids:
             meta = reg.get_factor(fid)
             try:
@@ -182,7 +192,7 @@ class Backtester:
             kline = [(dt, px) for dt, px in kline_full
                      if _parse_kline_date(dt) is not None
                      and _parse_kline_date(dt) <= asof]
-            ctx = self._stock_ctx(code, kline)
+            ctx = self._stock_ctx(code, kline, mkt, sector_map)
             scores = compute_model_scores(ctx, self.strategy)
             best = max([scores[m["id"]]
                         for m in self.strategy["scoring_models"]], default=0)
@@ -214,7 +224,7 @@ class Backtester:
 
     # ---------------- 主流程 ----------------
     def run(self, start_date, end_date, sell_rules=None, progress=None,
-            em=None, ticks=None):
+            em=None, ticks=None, mkt=None, sector_map=None):
         """回放 [start_date, end_date]。返回报告 dict(与旧 backtest 同构)。
 
         sell_rules: {take_profit_pct, stop_loss_pct, max_hold_days},
@@ -223,6 +233,9 @@ class Backtester:
         回退默认(止盈8%/止损5%/持有5天)。
         em/ticks: 可注入的市场数据(供 N3/N5 等节点因子), 缺省 None →
         依赖它们的门槛因子得 0 并记入报告 gate_notes。
+        mkt: 市场数据层快照(供 SEC 板块因子)。防未来函数由调用方保证——
+        只传 asof 当日及之前的数据; 每次 _pick 应传当日的 asof 切片。
+        sector_map: code → 行业板块代码(供 SEC 因子, 需与 mkt 配对)。
         """
         defaults = {"take_profit_pct": 0.08, "stop_loss_pct": 0.05,
                     "max_hold_days": 5}
@@ -251,7 +264,8 @@ class Backtester:
             if pool:
                 dates.append(d)
                 for code, boards, theme, composite in self._pick(
-                        pool, asof=d, em=em, ticks=ticks):
+                        pool, asof=d, em=em, ticks=ticks, mkt=mkt,
+                        sector_map=sector_map):
                     kline = self._kline_for(code)
                     tr = self._simulate_trade(code, kline, d, rules)
                     if tr:
