@@ -74,6 +74,13 @@ superpowers-main/
 # Runtime caches (auto-generated, never commit)
 .zt_history_cache.pkl
 .zt_history_index.pkl
+.market_data_cache.pkl
+.market_data_index.pkl
+
+# 一次性采集/探测脚本(不进 git)
+pt_*.py
+pt_*.log
+pt_bt*/
 
 # Agent / tooling directories
 .agents/
