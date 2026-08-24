@@ -67,6 +67,43 @@ _GATE_DATA_NEEDS = {
 }
 
 
+def _slice_mkt(mkt, asof):
+    """把完整市场数据缓存切成 asof 日快照(防未来函数)。
+
+    mkt: 市场数据层缓存, {"sector": {code: {"dates":[...], "close":[...]},
+    "global": {...}}} 或按日的 day_snapshot 结构。返回 {"sector": {...}} 只含
+    dates <= asof 的K线(与 _pick 的股票K线同语义: 因子只见当日及之前)。
+    """
+    if not mkt:
+        return {}
+    asof_str = asof.strftime("%Y-%m-%d")
+    sectors = (mkt.get("sector") or {} if isinstance(mkt, dict)
+               else {})
+    out = {"sector": {}}
+    for code, rec in sectors.items():
+        dates = rec.get("dates") or []
+        keep = [i for i, d in enumerate(dates) if d <= asof_str]
+        if not keep:
+            continue
+        out["sector"][code] = {
+            "dates": [dates[i] for i in keep],
+            "close": [rec["close"][i] for i in keep],
+        }
+    # 全球指数同样切片(美股映射因子用)
+    glob = mkt.get("global") if isinstance(mkt, dict) else {}
+    if glob:
+        out["global"] = {}
+        for code, rec in glob.items():
+            dates = rec.get("dates") or []
+            keep = [i for i, d in enumerate(dates) if d <= asof_str]
+            if keep:
+                out["global"][code] = {
+                    "dates": [dates[i] for i in keep],
+                    "close": [rec["close"][i] for i in keep],
+                }
+    return out
+
+
 class Backtester:
     """真实策略回放 + 交易模拟。"""
 
@@ -169,7 +206,9 @@ class Backtester:
             item.setdefault("last", None)
             item.setdefault("last_close", None)
             pool_ctx.append(item)
-        mkt_extra = {"mkt": mkt or {}}
+        # 防未来函数: 市场数据也按 asof 切片(因子只见当日及之前)
+        mkt_sliced = _slice_mkt(mkt, asof)
+        mkt_extra = {"mkt": mkt_sliced}
         market_ctx = FactorContext(code="__MKT__", limit_ups=pool_ctx,
                                    em=em or {}, ticks=ticks or {}, **mkt_extra)
         for fid in gate_fids:
@@ -192,7 +231,7 @@ class Backtester:
             kline = [(dt, px) for dt, px in kline_full
                      if _parse_kline_date(dt) is not None
                      and _parse_kline_date(dt) <= asof]
-            ctx = self._stock_ctx(code, kline, mkt, sector_map)
+            ctx = self._stock_ctx(code, kline, mkt_sliced, sector_map)
             scores = compute_model_scores(ctx, self.strategy)
             best = max([scores[m["id"]]
                         for m in self.strategy["scoring_models"]], default=0)
@@ -529,21 +568,26 @@ class Backtester:
 
     # ---------------- 防过拟合: 样本外验证 ----------------
     def run_oos(self, start_date, end_date, split_ratio=0.5,
-                sell_rules=None, progress=None):
+                sell_rules=None, progress=None, em=None, ticks=None,
+                mkt=None, sector_map=None):
         """样本外验证(Out-of-Sample): 把区间按时间切成两段,
         前段(样本内)回测 + 后段(样本外)回测, 对比两者绩效。
 
         防过拟合逻辑: 若策略只在样本内好、样本外崩, 说明过拟合了参数;
         样本外绩效与样本内接近(或不明显恶化)才算稳健。
         返回 {in_sample: 报告, out_sample: 报告, verdict: 判语}。
+        em/ticks/mkt/sector_map: 透传给 run(与 run 语义一致)。
         """
         total = (end_date - start_date).days
         if total < 6:
             return {"error": "区间太短(<6天), 无法做样本外分割"}
         split = start_date + timedelta(days=int(total * split_ratio))
-        ins = self.run(start_date, split, sell_rules=sell_rules, progress=progress)
+        ins = self.run(start_date, split, sell_rules=sell_rules,
+                       progress=progress, em=em, ticks=ticks,
+                       mkt=mkt, sector_map=sector_map)
         oos = self.run(split + timedelta(days=1), end_date,
-                       sell_rules=sell_rules, progress=progress)
+                       sell_rules=sell_rules, progress=progress,
+                       em=em, ticks=ticks, mkt=mkt, sector_map=sector_map)
         # 判语: 样本外有交易 且 样本外均值收益不为负 → 稳健; 否则警告
         verdict = "稳健(样本外仍有正收益)"
         if not oos.get("trades"):

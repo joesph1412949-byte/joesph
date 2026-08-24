@@ -36,6 +36,32 @@ HEADERS = {"User-Agent": "Mozilla/5.0",
 # keep-alive 后降到 ~0.2 秒, 回测几百次请求提速 5-10 倍。
 _session = requests.Session() if requests is not None else None
 
+# zt_history 缓存一次性加载(64MB pickle 每只股票重读太慢, 只读一次)
+_zt_cache = None
+_zt_index = None
+
+
+def _get_zt_cache():
+    global _zt_cache
+    if _zt_cache is None:
+        try:
+            from prism.zt_history import _load_cache
+            _zt_cache = _load_cache()
+        except Exception:
+            _zt_cache = {}
+    return _zt_cache
+
+
+def _get_zt_index():
+    global _zt_index
+    if _zt_index is None:
+        try:
+            from prism.zt_history import _load_index
+            _zt_index = _load_index()
+        except Exception:
+            _zt_index = {}
+    return _zt_index
+
 
 # ---------------------------------------------------------------- QMT K线源
 
@@ -43,18 +69,15 @@ def qmt_kline_feed(code):
     """用 QMT 本地 K线(xtdata, 已连接的 miniQMT)拉历史日K → [(date, close), ...]。
 
     优先从 zt_history 缓存读(构建后秒回, 无网络); 缓存无此股 → 单只拉。
+    缓存一次性加载(模块级 _zt_cache), 避免每只股票重读 64MB pickle。
     失败 → []。
     """
     # 优先: zt_history 缓存(全市场K线已落盘)
-    try:
-        from prism.zt_history import _load_cache
-        _cache = _load_cache()
-        if _cache:
-            rec = _cache.get(str(code).strip().upper())
-            if rec and rec.get("dates"):
-                return list(zip(rec["dates"], rec["close"]))
-    except Exception:
-        pass
+    _cache = _get_zt_cache()
+    if _cache:
+        rec = _cache.get(str(code).strip().upper())
+        if rec and rec.get("dates"):
+            return list(zip(rec["dates"], rec["close"]))
     # 回退: 单只实时拉
     try:
         from xtquant import xtdata
@@ -114,16 +137,13 @@ def zt_feed(date_yyyymmdd):
 
     优先用 QMT 历史K线生成(zt_history 缓存, 可回溯约1.5年, 无网络依赖);
     缓存不存在时回退东财(仅最近约20天)。"""
-    # QMT 本地历史池(优先)
-    try:
-        from prism.zt_history import qmt_zt_feed, _load_cache
-        _cache = _load_cache()
-        if _cache:
-            pool = qmt_zt_feed(date_yyyymmdd, _cache)
-            if pool:
-                return pool
-    except Exception:
-        pass
+    # QMT 本地历史池(优先, 用一次性加载的缓存+索引)
+    _cache = _get_zt_cache()
+    if _cache:
+        from prism.zt_history import qmt_zt_feed
+        pool = qmt_zt_feed(date_yyyymmdd, _cache, index=_get_zt_index())
+        if pool:
+            return pool
     # 回退: 东财(最近约20天)
     if requests is None:
         return []
@@ -231,6 +251,8 @@ def main():
     ap.add_argument("--hold", type=int, default=None, help="持有天数(覆盖策略配置)")
     ap.add_argument("--oos", action="store_true",
                     help="运行样本外验证(前后半段对比, 防过拟合)")
+    ap.add_argument("--use-market-data", action="store_true",
+                    help="注入市场数据层(申万板块K线/全球指数/个股行业映射), 供SEC等板块因子使用")
     args = ap.parse_args()
 
     start = _parse_date(args.start)
@@ -255,11 +277,36 @@ def main():
         if d.day % 5 == 1:
             print("  回放中... %s" % d, file=sys.stderr)
 
+    mkt = None
+    sector_map = None
+    if args.use_market_data:
+        from prism import market_data as _md
+        cache = _md._load_cache()
+        if cache:
+            # 组装 market_data 结构: sector(板块K线) + global(全球指数)
+            mkt = {"sector": cache.get("kline") or {},
+                   "global": cache.get("global") or {}}
+            smap = cache.get("sector_map") or {}
+            # sector_map 期望 {code: 行业代码}, stock_sector 返回行业代码
+            sector_map = {}
+            for c6, rec in smap.items():
+                if rec and rec.get("sector"):
+                    suffix = ".SH" if c6.startswith("6") else ".SZ"
+                    sector_map[c6 + suffix] = rec["sector"]
+            print("市场数据注入: 板块 %d, 全球指数 %d, 个股映射 %d" % (
+                len(mkt["sector"]), len(mkt["global"]), len(sector_map)),
+                file=sys.stderr)
+        else:
+            print("警告: 市场数据缓存为空(--build-sectors/--build-global 先采集)",
+                  file=sys.stderr)
+
     if args.oos:
-        res = bt.run_oos(start, end, sell_rules=sell or None, progress=progress)
+        res = bt.run_oos(start, end, sell_rules=sell or None, progress=progress,
+                         mkt=mkt, sector_map=sector_map)
         print(json.dumps(res, ensure_ascii=False, indent=2, default=str))
     else:
-        rep = bt.run(start, end, sell_rules=sell or None, progress=progress)
+        rep = bt.run(start, end, sell_rules=sell or None, progress=progress,
+                     mkt=mkt, sector_map=sector_map)
         print(json.dumps(rep, ensure_ascii=False, indent=2, default=str))
     return 0
 
