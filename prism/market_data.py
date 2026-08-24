@@ -434,11 +434,13 @@ def _save_index(index):
 # ---------------------------------------------------------------- 采集
 
 def build_sector_cache(probe=None, beg=BACKFILL_BEG, end=None,
-                       progress=None, source="eastmoney"):
+                       progress=None, source="eastmoney", rebuild=False):
     """采集行业板块列表 + 历史K线 + 资金流历史, 增量落盘。
 
     source: "eastmoney"(默认, 东财板块+资金流) / "sw"(申万行业指数,
     东财封禁时的备用; 申万无资金流, flow 段留空)。
+    rebuild: True 时清空已有 kline/flow 段后全量重采(用于切换数据源:
+    申万体系 → 东财体系, 避免两套板块代码混在同一缓存)。
 
     返回 {"sectors": n, "kline_codes": n, "flow_codes": n}。
     缓存结构: {
@@ -456,8 +458,14 @@ def build_sector_cache(probe=None, beg=BACKFILL_BEG, end=None,
     end = end or date.today().strftime("%Y%m%d")
     cache = _load_cache()
     sectors = cache.get("sectors") or {}
-    kline = cache.get("kline") or {}
-    flow = cache.get("flow") or {}
+    if rebuild:
+        # 切换数据源: 清空旧体系 K线/资金流(避免申万801xxx与东财BKxxx混杂)
+        kline = {}
+        flow = {}
+        logger.info("rebuild=True: 清空 kline/flow, 按 %s 全新采集", source)
+    else:
+        kline = cache.get("kline") or {}
+        flow = cache.get("flow") or {}
 
     # 1. 板块列表(增量保留名称, 失败 → 抛错, 不能让任务"看起来成功")
     try:
@@ -736,6 +744,8 @@ def build_cli():
     ap.add_argument("--source", default="eastmoney",
                     choices=["eastmoney", "sw", "sina"],
                     help="板块/指数数据源: eastmoney(默认) / sw(申万) / sina(新浪美股)")
+    ap.add_argument("--rebuild", action="store_true",
+                    help="清空 kline/flow 后全量重采(切换数据源时用, 避免混杂)")
     ap.add_argument("--stats", action="store_true", help="显示缓存统计")
     ap.add_argument("--day", default="", help="查询某日快照 YYYYMMDD")
     args = ap.parse_args()
@@ -746,7 +756,7 @@ def build_cli():
 
     if args.build_sectors:
         r = build_sector_cache(beg=args.beg, progress=prog,
-                               source=args.source)
+                               source=args.source, rebuild=args.rebuild)
         print("\n板块采集完成(source=%s):" % args.source, r)
         if args.build_index or True:
             idx = build_index()
