@@ -237,6 +237,169 @@ def _f(v):
         return None
 
 
+# ---------------------------------------------------------------- 申万指数通道
+
+class SWIndexFeed:
+    """申万行业指数数据源(akshare, 非东财) — 东财封禁时的板块K线备用。
+
+    用官方申万行业指数替代东财板块指数:
+      * sw_index_first_info()    31个一级行业 [{code, name, count}]
+      * sw_index_second_info()   131个二级行业
+      * index_hist_sw(code)      指数日K(1999年至今, 含开高低收/成交额)
+
+    ak = 注入的 akshare 模块(默认真实, 测试注入假实现免网络)。
+    注意: 申万指数无资金流 → flow 段留空(fail-open)。"""
+
+    def __init__(self, ak=None):
+        self.ak = ak
+
+    def _ak(self):
+        if self.ak is None:
+            import akshare  # 延迟导入, 未安装时仅 SW 通道不可用
+            self.ak = akshare
+        return self.ak
+
+    def fetch_sector_list(self):
+        """申万一级行业 → [{code, name}]。code 如 '801010'(去 .SI 后缀)。失败 → 抛。"""
+        try:
+            df = self._ak().sw_index_first_info()
+        except Exception as e:
+            raise MarketDataError("申万行业列表失败: %r" % e)
+        out = []
+        if df is None or len(df) == 0:
+            return out
+        # 列: 行业代码 / 行业名称 / 成分个数
+        code_col = df.columns[0]
+        name_col = df.columns[1]
+        for _, row in df.iterrows():
+            code = str(row[code_col]).split(".")[0]
+            if code.isdigit():
+                out.append({"code": code, "name": str(row[name_col])})
+        return out
+
+    def fetch_sector_kline(self, code, beg=None, end=None):
+        """申万指数日K → [{date, close, amount}]。升序。失败 → 抛。
+
+        beg/end 支持 YYYYMMDD 或 YYYY-MM-DD(内部统一为 YYYY-MM-DD 比较)。"""
+        beg_fmt = _norm_day(beg)
+        end_fmt = _norm_day(end)
+        try:
+            df = self._ak().index_hist_sw(symbol=code, period="day")
+        except Exception as e:
+            raise MarketDataError("申万指数 %s 日K失败: %r" % (code, e))
+        out = []
+        if df is None or len(df) == 0:
+            return out
+        # 列: 指数代码 / 日期(date) / 开盘 / 收盘 / 最高 / 最低 / 成交量 / 成交额
+        import datetime as _dt
+        date_col = df.columns[1]
+        close_col = df.columns[3]
+        amount_col = df.columns[7]
+        for _, row in df.iterrows():
+            d = row[date_col]
+            try:
+                d_str = d.strftime("%Y-%m-%d") if isinstance(
+                    d, (_dt.date, _dt.datetime)) else str(d)[:10]
+            except Exception:
+                continue
+            if len(d_str) != 10:
+                continue
+            if beg_fmt and d_str < beg_fmt:
+                continue
+            if end_fmt and d_str > end_fmt:
+                continue
+            out.append({"date": d_str, "close": _f(row[close_col]),
+                        "amount": _f(row[amount_col])})
+        return out
+
+    def fetch_sector_cons(self, code):
+        """申万指数成分股 → [{code, name, sector}]。code 需带后缀如 '801010.SI'。
+
+        返回该指数的成分股列表(个股→所属申万行业的映射来源)。失败 → 抛。"""
+        try:
+            df = self._ak().sw_index_third_cons(symbol=code)
+        except Exception as e:
+            raise MarketDataError("申万指数 %s 成分股失败: %r" % (code, e))
+        out = []
+        if df is None or len(df) == 0:
+            return out
+        # 列: 序号 / 股票代码 / 股票名称 / 纳入时间 / 所属行业
+        code_col = df.columns[1]
+        name_col = df.columns[2]
+        sector_col = df.columns[4]
+        for _, row in df.iterrows():
+            c = str(row[code_col]).strip()
+            if not c:
+                continue
+            out.append({"code": c, "name": str(row[name_col]),
+                        "sector": str(row[sector_col])})
+        return out
+
+
+# ---------------------------------------------------------------- 新浪美股通道
+
+class SinaUSIndexFeed:
+    """新浪美股指数数据源(akshare, 非东财) — 东财封禁时的全球指数备用。
+
+    用新浪美股官方指数替代东财全球指数:
+      * .IXIC 纳斯达克 / .INX 标普500 / .DJI 道琼斯
+      * index_us_stock_sina(symbol) → 日K(2004年至今, 含开高低收/量/额)
+
+    ak = 注入的 akshare 模块(默认真实, 测试注入假实现免网络)。
+    注意: 美债收益率(TNX)/美元指数(UDI)新浪源不可用, 这两个字段留空。"""
+
+    def __init__(self, ak=None):
+        self.ak = ak
+
+    def _ak(self):
+        if self.ak is None:
+            import akshare  # 延迟导入
+            self.ak = akshare
+        return self.ak
+
+    def fetch_global_kline(self, sina_symbol, beg=None, end=None):
+        """新浪美股指数日K → [{date, close}]。升序。失败 → 抛。
+
+        beg/end 支持 YYYYMMDD 或 YYYY-MM-DD(内部统一为 YYYY-MM-DD 比较)。"""
+        beg_fmt = _norm_day(beg)
+        end_fmt = _norm_day(end)
+        try:
+            df = self._ak().index_us_stock_sina(symbol=sina_symbol)
+        except Exception as e:
+            raise MarketDataError("新浪指数 %s 日K失败: %r" % (sina_symbol, e))
+        out = []
+        if df is None or len(df) == 0:
+            return out
+        import datetime as _dt
+        for _, row in df.iterrows():
+            d = row["date"]
+            try:
+                d_str = d.strftime("%Y-%m-%d") if isinstance(
+                    d, (_dt.date, _dt.datetime)) else str(d)[:10]
+            except Exception:
+                continue
+            if len(d_str) != 10:
+                continue
+            if beg_fmt and d_str < beg_fmt:
+                continue
+            if end_fmt and d_str > end_fmt:
+                continue
+            out.append({"date": d_str, "close": _f(row["close"])})
+        return out
+
+
+def _norm_day(s):
+    """'YYYYMMDD' → 'YYYY-MM-DD'; 已是 YYYY-MM-DD 原样; 其他 → None。"""
+    if not s:
+        return None
+    s = str(s).strip()
+    if len(s) == 8 and s.isdigit():
+        return "%s-%s-%s" % (s[:4], s[4:6], s[6:8])
+    if len(s) == 10 and s[4] == "-" and s[7] == "-":
+        return s
+    return None
+
+
 # ---------------------------------------------------------------- 缓存
 
 def _load_cache():
@@ -271,8 +434,11 @@ def _save_index(index):
 # ---------------------------------------------------------------- 采集
 
 def build_sector_cache(probe=None, beg=BACKFILL_BEG, end=None,
-                       progress=None):
+                       progress=None, source="eastmoney"):
     """采集行业板块列表 + 历史K线 + 资金流历史, 增量落盘。
+
+    source: "eastmoney"(默认, 东财板块+资金流) / "sw"(申万行业指数,
+    东财封禁时的备用; 申万无资金流, flow 段留空)。
 
     返回 {"sectors": n, "kline_codes": n, "flow_codes": n}。
     缓存结构: {
@@ -281,7 +447,12 @@ def build_sector_cache(probe=None, beg=BACKFILL_BEG, end=None,
       "flow":    {code: {"dates": [...], "main_net_in": [...]}},
     }
     """
-    probe = probe or EastMoneyProbe()
+    if source == "sw":
+        feed = probe or SWIndexFeed()
+        flow_enabled = False
+    else:
+        feed = probe or EastMoneyProbe()
+        flow_enabled = True
     end = end or date.today().strftime("%Y%m%d")
     cache = _load_cache()
     sectors = cache.get("sectors") or {}
@@ -290,7 +461,7 @@ def build_sector_cache(probe=None, beg=BACKFILL_BEG, end=None,
 
     # 1. 板块列表(增量保留名称, 失败 → 抛错, 不能让任务"看起来成功")
     try:
-        lst = probe.fetch_sector_list()
+        lst = feed.fetch_sector_list()
     except MarketDataError as e:
         if not sectors:
             raise MarketDataError("板块列表获取失败且无已有缓存: %r" % e)
@@ -304,24 +475,36 @@ def build_sector_cache(probe=None, beg=BACKFILL_BEG, end=None,
     # 2. 板块历史K线 + 资金流(增量: 已有完整数据的跳过)
     total = len(sectors)
     done = 0
+    has_fetch_kline = hasattr(feed, "fetch_kline")
+    has_fetch_sector_kline = hasattr(feed, "fetch_sector_kline")
     for code, info in sectors.items():
-        secid = "90.%s" % code
-        if code not in kline or code not in flow:
+        need_kline = code not in kline
+        need_flow = flow_enabled and code not in flow
+        if need_kline or need_flow:
             try:
-                kl = probe.fetch_kline(secid, beg, end,
-                                       fields2="f51,f53,f57")
-                fl = probe.fetch_sector_flow(secid)
+                if source == "sw" and has_fetch_sector_kline:
+                    kl = feed.fetch_sector_kline(code)
+                elif has_fetch_kline:
+                    secid = "90.%s" % code
+                    kl = feed.fetch_kline(secid, beg, end,
+                                          fields2="f51,f53,f57")
+                else:
+                    kl = None
+                if flow_enabled and hasattr(feed, "fetch_sector_flow"):
+                    fl = feed.fetch_sector_flow("90.%s" % code)
+                else:
+                    fl = None
             except MarketDataError as e:
                 logger.warning("板块 %s 采集失败: %r (跳过)", code, e)
                 done += 1
                 if progress:
                     progress(done, total)
                 continue
-            if kl:
+            if kl and need_kline:
                 kline[code] = {"dates": [r["date"] for r in kl],
                                "close": [r["close"] for r in kl],
                                "amount": [r.get("amount") for r in kl]}
-            if fl:
+            if fl and need_flow:
                 flow[code] = {"dates": [r["date"] for r in fl],
                               "main_net_in": [r["main_net_in"] for r in fl]}
         done += 1
@@ -337,18 +520,30 @@ def build_sector_cache(probe=None, beg=BACKFILL_BEG, end=None,
             "flow_codes": len(flow)}
 
 
-def build_global_cache(probe=None, beg=BACKFILL_BEG, end=None):
+def build_global_cache(probe=None, beg=BACKFILL_BEG, end=None,
+                       source="eastmoney"):
     """采集全球指数历史K线, 落盘到同一缓存文件的 "global" 段。
+
+    source: "eastmoney"(默认, 东财全球指数) / "sina"(新浪美股指数,
+    东财封禁时的备用; 美债/美元指数新浪源不可用, 只采纳指/标普/道指)。
 
     返回 {code: {"dates": [...], "close": [...]}}。
     """
-    probe = probe or EastMoneyProbe()
+    if source == "sina":
+        feed = probe or SinaUSIndexFeed()
+        # 新浪可用的: .IXIC 纳指 / .INX 标普 / .DJI 道指 (无 .UDI 美元指数)
+        index_map = [(".IXIC", "NDX", "纳斯达克"),
+                     (".INX", "SPX", "标普500"),
+                     (".DJI", "DJIA", "道琼斯")]
+    else:
+        feed = probe or EastMoneyProbe()
+        index_map = [(s, c, n) for s, c, n in GLOBAL_INDICES]
     end = end or date.today().strftime("%Y%m%d")
     cache = _load_cache()
     globald = cache.get("global") or {}
-    for secid, code, name in GLOBAL_INDICES:
+    for secid, code, name in index_map:
         try:
-            kl = probe.fetch_global_kline(secid, beg, end)
+            kl = feed.fetch_global_kline(secid, beg, end)
         except MarketDataError as e:
             logger.warning("指数 %s 采集失败: %r (跳过)", code, e)
             continue
@@ -363,6 +558,75 @@ def build_global_cache(probe=None, beg=BACKFILL_BEG, end=None):
 
 
 # ---------------------------------------------------------------- 查询
+
+def build_sector_map(feed=None, progress=None):
+    """采集全部申万一级行业成分股 → 个股→行业代码映射, 落盘缓存 "sector_map" 段。
+
+    返回 {"stocks": n}。映射结构: {"sector_map": {code6: {"sector": "801010",
+    "name": ...}}} (code6 如 '000019' 转 '000019.SZ' 统一后缀)。
+    失败的单行业跳过(增量容错)。
+    """
+    feed = feed or SWIndexFeed()
+    cache = _load_cache()
+    smap = cache.get("sector_map") or {}
+    # 行业列表(优先用已有缓存, 避免重复拉)
+    if not smap:
+        try:
+            lst = feed.fetch_sector_list()
+        except MarketDataError as e:
+            raise MarketDataError("行业列表失败, 无法构建映射: %r" % e)
+    else:
+        lst = [{"code": c, "name": i.get("name") or ""}
+               for c, i in (cache.get("sectors") or {}).items()]
+    total = len(lst)
+    done = 0
+    for s in lst:
+        secid = "%s.SI" % s["code"]
+        try:
+            cons = feed.fetch_sector_cons(secid)
+        except MarketDataError as e:
+            logger.warning("行业 %s 成分股失败: %r (跳过)", s["code"], e)
+            done += 1
+            if progress:
+                progress(done, total)
+            continue
+        for st in cons:
+            c6 = _code6(st["code"])
+            if c6:
+                smap[c6] = {"sector": s["code"], "name": st.get("name") or ""}
+        done += 1
+        if done % 10 == 0:
+            _save_cache({"sector_map": smap})
+        if progress:
+            progress(done, total)
+    if smap:
+        cache = _load_cache()
+        cache["sector_map"] = smap
+        # sectores 段同时刷新名称(与板块K线对齐)
+        _save_cache({"sector_map": smap})
+    return {"stocks": len(smap)}
+
+
+def stock_sector(code):
+    """个股(带后缀/裸代码) → 所属申万一级行业代码。无 → None。"""
+    cache = _load_cache()
+    smap = cache.get("sector_map") or {}
+    c6 = _code6(code)
+    if not c6:
+        return None
+    rec = smap.get(c6)
+    return (rec or {}).get("sector")
+
+
+def _code6(s):
+    """'000019.SZ' / '000019' → '000019'。无法解析 → None。"""
+    s = str(s).strip().upper()
+    if "." in s:
+        s = s.split(".")[0]
+    if len(s) == 6 and s.isdigit():
+        return s
+    return None
+
 
 def _by_date(rec, day):
     """rec(dates/values...) 中取某日索引; 无 → -1。"""
@@ -465,8 +729,13 @@ def build_cli():
                     help="采集全球指数历史K线(增量)")
     ap.add_argument("--build-index", action="store_true",
                     help="从缓存构建按日索引(查询加速)")
+    ap.add_argument("--build-sector-map", action="store_true",
+                    help="构建个股→申万行业映射(成分股采集)")
     ap.add_argument("--beg", default=BACKFILL_BEG,
                     help="回填起点 YYYYMMDD(默认 %s)" % BACKFILL_BEG)
+    ap.add_argument("--source", default="eastmoney",
+                    choices=["eastmoney", "sw", "sina"],
+                    help="板块/指数数据源: eastmoney(默认) / sw(申万) / sina(新浪美股)")
     ap.add_argument("--stats", action="store_true", help="显示缓存统计")
     ap.add_argument("--day", default="", help="查询某日快照 YYYYMMDD")
     args = ap.parse_args()
@@ -476,15 +745,16 @@ def build_cli():
         sys.stdout.flush()
 
     if args.build_sectors:
-        r = build_sector_cache(beg=args.beg, progress=prog)
-        print("\n板块采集完成:", r)
+        r = build_sector_cache(beg=args.beg, progress=prog,
+                               source=args.source)
+        print("\n板块采集完成(source=%s):" % args.source, r)
         if args.build_index or True:
             idx = build_index()
             print("按日索引: %d 天" % len(idx))
         return
     if args.build_global:
-        g = build_global_cache(beg=args.beg)
-        print("全球指数采集完成: %d 个" % len(g))
+        g = build_global_cache(beg=args.beg, source=args.source)
+        print("全球指数采集完成(source=%s): %d 个" % (args.source, len(g)))
         if args.build_index or True:
             idx = build_index()
             print("按日索引: %d 天" % len(idx))
@@ -492,6 +762,11 @@ def build_cli():
     if args.build_index:
         idx = build_index()
         print("按日索引: %d 天" % len(idx))
+        return
+    if args.build_sector_map:
+        r = build_sector_map(progress=prog)
+        print("\n个股→行业映射完成: %d 只" % r["stocks"])
+        print("示例查询: 600519 →", stock_sector("600519"))
         return
     cache = _load_cache()
     if args.stats or not args.day:

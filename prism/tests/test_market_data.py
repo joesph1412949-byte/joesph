@@ -232,3 +232,161 @@ def test_no_cache_returns_empty(tmp_path, monkeypatch):
     assert md.day_snapshot("20260701") == {"sector_close": {},
                                            "sector_flow": {},
                                            "global": {}}
+
+
+# ---------------------------------------------------------------- 申万通道(非东财备用)
+
+class FakeSWAK:
+    """假 akshare: sw_index_first_info / index_hist_sw, 免网络。"""
+
+    def __init__(self, first_df=None, hist_map=None):
+        import pandas as pd
+        import datetime as _dt
+        self._first = first_df if first_df is not None else pd.DataFrame({
+            "行业代码": ["801010.SI", "801030.SI"],
+            "行业名称": ["农林牧渔", "食品饮料"],
+            "成分个数": [104, 411],
+        })
+        d1 = _dt.date(2026, 7, 1)
+        d2 = _dt.date(2026, 7, 2)
+        self._hist = hist_map or {
+            "801010": pd.DataFrame({
+                "指数代码": ["801010", "801010"],
+                "日期": [d1, d2],
+                "开盘": [1000.0, 1010.0],
+                "收盘": [1005.0, 1018.0],
+                "最高": [1010.0, 1020.0],
+                "最低": [998.0, 1005.0],
+                "成交量": [0.1, 0.2],
+                "成交额": [1.2, 2.5],
+            }),
+        }
+
+    def sw_index_first_info(self):
+        return self._first
+
+    def index_hist_sw(self, symbol="", period="day"):
+        # 801030 无历史(模拟部分板块数据缺失); 缺失 → 空表
+        if symbol == "801030":
+            import pandas as pd
+            return pd.DataFrame()
+        return self._hist.get(symbol)
+
+
+def test_sw_feed_sector_list():
+    f = md.SWIndexFeed(ak=FakeSWAK())
+    lst = f.fetch_sector_list()
+    assert lst[0] == {"code": "801010", "name": "农林牧渔"}
+    assert lst[1] == {"code": "801030", "name": "食品饮料"}
+
+
+def test_sw_feed_kline():
+    f = md.SWIndexFeed(ak=FakeSWAK())
+    kl = f.fetch_sector_kline("801010")
+    assert len(kl) == 2
+    assert kl[0]["date"] == "2026-07-01"
+    assert kl[0]["close"] == 1005.0
+    assert kl[0]["amount"] == 1.2
+
+
+def test_build_sector_cache_sw_source(tmp_path, monkeypatch):
+    """source=sw: 用申万通道建缓存, flow 留空(申万无资金流)。"""
+    monkeypatch.setattr(md, "CACHE_PATH", tmp_path / "mkt.pkl")
+    monkeypatch.setattr(md, "INDEX_PATH", tmp_path / "mkt_idx.pkl")
+    f = md.SWIndexFeed(ak=FakeSWAK())
+    r = md.build_sector_cache(probe=f, beg="20260101", end="20260823",
+                              source="sw")
+    assert r["sectors"] == 2
+    assert r["kline_codes"] == 1       # 只有 801010 有K线
+    assert r["flow_codes"] == 0        # 申万无资金流
+    assert md.sector_close_on("801010", "2026-07-01") == 1005.0
+    assert md.sector_flow_on("801010", "2026-07-01") is None
+    # 索引也构建成功
+    idx = md.build_index()
+    assert idx["2026-07-01"]["sector_close"]["801010"] == 1005.0
+
+
+# ---------------------------------------------------------------- 新浪美股通道
+
+class FakeSinaAK:
+    """假 akshare: index_us_stock_sina, 免网络。"""
+
+    def __init__(self):
+        import pandas as pd
+        import datetime as _dt
+        self._df = pd.DataFrame({
+            "date": [_dt.date(2026, 7, 1), _dt.date(2026, 7, 2)],
+            "open": [17000.0, 17100.0],
+            "high": [17100.0, 17200.0],
+            "low": [16900.0, 17000.0],
+            "close": [17050.0, 17180.0],
+            "volume": [1e9, 1.1e9],
+            "amount": [2e11, 2.2e11],
+        })
+
+    def index_us_stock_sina(self, symbol="", **kwargs):
+        return self._df
+
+
+def test_sina_feed_global_kline():
+    f = md.SinaUSIndexFeed(ak=FakeSinaAK())
+    kl = f.fetch_global_kline(".IXIC")
+    assert len(kl) == 2
+    assert kl[0]["date"] == "2026-07-01"
+    assert kl[0]["close"] == 17050.0
+    assert kl[1]["close"] == 17180.0
+
+
+def test_build_global_cache_sina_source(tmp_path, monkeypatch):
+    """source=sina: 用新浪美股建 global 段, 只含纳指/标普/道指。"""
+    monkeypatch.setattr(md, "CACHE_PATH", tmp_path / "mkt.pkl")
+    f = md.SinaUSIndexFeed(ak=FakeSinaAK())
+    g = md.build_global_cache(probe=f, beg="20260701", end="20260823",
+                              source="sina")
+    assert set(g.keys()) == {"NDX", "SPX", "DJIA"}   # 新浪无美元指数
+    assert md.index_close_on("NDX", "2026-07-02") == 17180.0
+    assert md.index_close_on("UDI", "2026-07-02") is None
+
+
+# ---------------------------------------------------------------- 个股→行业映射
+
+class FakeMapAK:
+    """假 akshare: 行业列表 + 成分股。"""
+
+    def __init__(self):
+        import pandas as pd
+        self._first = pd.DataFrame({
+            "行业代码": ["801010.SI"], "行业名称": ["农林牧渔"],
+            "成分个数": [2],
+        })
+        self._cons = pd.DataFrame({
+            "序号": [1, 2],
+            "股票代码": ["000019.SZ", "300999.SZ"],
+            "股票名称": ["深粮控股", "金龙鱼"],
+            "纳入时间": ["2021-07-30", "2020-09-21"],
+            "所属行业": ["农林牧渔", "农林牧渔"],
+        })
+
+    def sw_index_first_info(self):
+        return self._first
+
+    def sw_index_third_cons(self, symbol="", **kwargs):
+        return self._cons
+
+
+def test_build_sector_map_and_query(tmp_path, monkeypatch):
+    monkeypatch.setattr(md, "CACHE_PATH", tmp_path / "mkt.pkl")
+    f = md.SWIndexFeed(ak=FakeMapAK())
+    r = md.build_sector_map(feed=f)
+    assert r["stocks"] == 2
+    # 查询: 带后缀/裸代码都命中
+    assert md.stock_sector("000019.SZ") == "801010"
+    assert md.stock_sector("000019") == "801010"
+    assert md.stock_sector("600519") is None       # 不在映射
+    assert md._code6("bad") is None
+    assert md._code6("000019.SZ") == "000019"
+
+
+def test_stock_sector_no_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr(md, "CACHE_PATH", tmp_path / "none.pkl")
+    assert md.stock_sector("000019") is None
