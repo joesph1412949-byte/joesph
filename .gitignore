@@ -76,11 +76,12 @@ superpowers-main/
 .zt_history_index.pkl
 .market_data_cache.pkl
 .market_data_index.pkl
+.market_data_cache.*.bak*
+.market_data_index.*.bak*
 
-# 一次性采集/探测脚本(不进 git)
-pt_*.py
-pt_*.log
-pt_bt*/
+# 一次性采集/探测脚本/临时文档(不进 git)
+pt_*
+*.sw_backup.pkl
 
 # Agent / tooling directories
 .agents/

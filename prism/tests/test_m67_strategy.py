@@ -103,7 +103,10 @@ def test_sector_momentum_strategy_loads():
     for m in s["scoring_models"]:
         for f in m["factors"]:
             fids.add(f["id"] if isinstance(f, dict) else f)
-    assert fids == {"SEC1", "SEC2", "M1", "M6"}
+    assert fids == {"SEC1", "SEC2", "SEC3", "M1", "M6"}
+    # 门槛含宏观因子
+    gate = s["market_gate"]["factors"]
+    assert set(gate) <= {"N1", "N6", "N7", "N8"} and gate
 
 
 def test_new_factors_registered():
