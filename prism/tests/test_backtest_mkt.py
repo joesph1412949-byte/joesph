@@ -144,3 +144,15 @@ def test_mkt_sector_flow_sliced():
     assert sliced["sector_flow"]["BK0475"]["main_net_in"] == [1e8, 2e8]
     # 未来数据不可见
     assert sliced["sector_flow"]["BK0475"]["main_net_in"][-1] == 2e8
+
+
+def test_mkt_sector_amount_sliced():
+    """sector 段 amount 同样 asof 切片(SEC4 拥挤度用)。"""
+    from prism.backtest import _slice_mkt
+    mkt = {"sector": {"BK0475": {
+        "dates": ["2026-07-01", "2026-07-02", "2026-07-03"],
+        "close": [100.0, 101.0, 102.0],
+        "amount": [1e9, 1.2e9, 1.5e9]}}}
+    sliced = _slice_mkt(mkt, date(2026, 7, 2))
+    assert sliced["sector"]["BK0475"]["amount"] == [1e9, 1.2e9]
+    assert sliced["sector"]["BK0475"]["close"] == [100.0, 101.0]

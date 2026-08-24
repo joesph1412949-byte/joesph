@@ -89,6 +89,9 @@ def _slice_mkt(mkt, asof):
             "dates": [dates[i] for i in keep],
             "close": [rec["close"][i] for i in keep],
         }
+        if rec.get("amount") is not None:
+            out["sector"][code]["amount"] = [
+                rec["amount"][i] for i in keep]
     # 全球指数同样切片(美股映射因子用)
     glob = mkt.get("global") if isinstance(mkt, dict) else {}
     if glob:
