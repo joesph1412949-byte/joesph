@@ -430,3 +430,65 @@ def test_rebuild_clears_old_kline(_ws_tmp, monkeypatch):
     assert r["kline_codes"] <= 1          # 没有申万801010了
     assert "801010" not in (md._load_cache().get("kline") or {})
     assert md.sector_close_on("801010", "2026-07-01") is None
+
+
+# ---------------------------------------------------------------- FRED 通道
+
+class FakeFredResp:
+    def __init__(self, data):
+        self._data = data
+
+    def json(self):
+        return self._data
+
+    def raise_for_status(self):
+        pass
+
+
+class FakeFredGetter:
+    def __init__(self, series_data):
+        self.series_data = series_data    # {series_id: [obs...]}
+        self.calls = []
+
+    def __call__(self, url, params=None, headers=None, timeout=None):
+        self.calls.append((url, params))
+        sid = (params or {}).get("series_id")
+        obs = self.series_data.get(sid, [])
+        return FakeFredResp({"observations": obs})
+
+
+def _fred_obs():
+    return [{"date": "2026-07-01", "value": "4.25"},
+            {"date": "2026-07-02", "value": "4.28"},
+            {"date": "2026-07-03", "value": "."}]   # "." 缺失值应跳过
+
+
+def test_fred_feed_parse():
+    g = FakeFredGetter({"DGS10": _fred_obs()})
+    f = md.FREDFeed(http_get=g, api_key="test-key-123")
+    kl = f.fetch_global_kline("DGS10", beg="20260701", end="20260823")
+    assert len(kl) == 2                      # "." 被跳过
+    assert kl[0] == {"date": "2026-07-01", "close": 4.25}
+    assert kl[1] == {"date": "2026-07-02", "close": 4.28}
+
+
+def test_fred_feed_key_required():
+    """无 api_key → MarketDataError(提示设置 FRED_API_KEY)。"""
+    f = md.FREDFeed(http_get=FakeFredGetter({}), api_key=None)
+    try:
+        f.fetch_global_kline("DGS10")
+        assert False, "应抛 MarketDataError"
+    except md.MarketDataError as e:
+        assert "FRED_API_KEY" in str(e)
+
+
+def test_build_global_cache_fred_source(_ws_tmp, monkeypatch):
+    """source=fred: 美债/VIX 写入 global 段。"""
+    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
+    g = FakeFredGetter({"DGS10": _fred_obs(), "VIXCLS": _fred_obs()})
+    f = md.FREDFeed(http_get=g, api_key="test-key")
+    out = md.build_global_cache(probe=f, beg="20260701", end="20260823",
+                                source="fred")
+    assert set(out.keys()) == {"US10Y", "VIX"}
+    assert md.index_close_on("US10Y", "2026-07-01") == 4.25
+    assert md.index_close_on("VIX", "2026-07-02") == 4.28

@@ -388,6 +388,91 @@ class SinaUSIndexFeed:
         return out
 
 
+# ---------------------------------------------------------------- FRED 通道
+
+def _load_fred_api_key():
+    """FRED API key 读取顺序: 环境变量 FRED_API_KEY > 项目根 .env 文件。
+
+    .env 格式: FRED_API_KEY=xxxx (一行)。.env 已被 .gitignore, 不会泄露。"""
+    import os
+    key = os.environ.get("FRED_API_KEY")
+    if key:
+        return key.strip()
+    env_path = Path(__file__).parent.parent / ".env"
+    if env_path.exists():
+        try:
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line.startswith("FRED_API_KEY="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+        except Exception:
+            pass
+    return None
+
+
+class FREDFeed:
+    """美联储 FRED 官方数据源 — 美债收益率/VIX 等宏观序列。
+
+    免费(需注册 api key, fred.stlouisfed.org/docs/api/api_key.html):
+      * series_id=DGS10  10年期美债收益率(文档"宏观因子"的日频数据)
+      * series_id=VIXCLS  VIX恐慌指数(文档"市场情绪因子")
+
+    调用: FRED API /fred/series/observations?series_id=...&api_key=...
+    注入: http_get 可注入(测试用假实现)。key 缺失 → MarketDataError。"""
+
+    URL = "https://api.stlouisfed.org/fred/series/observations"
+
+    # series_id → 缓存 key(与 global 段一致): DGS10→US10Y, VIXCLS→VIX
+    SERIES_MAP = {"DGS10": "US10Y", "VIXCLS": "VIX"}
+
+    def __init__(self, http_get=None, timeout=10.0, api_key=None):
+        self.http_get = http_get or _default_http_get
+        self.timeout = timeout
+        self.api_key = api_key or _load_fred_api_key()
+
+    def _get_observations(self, series_id, beg=None, end=None):
+        """拉 FRED 序列观察值 → [{date, value}]。key 缺失/失败 → 抛。"""
+        if not self.api_key:
+            raise MarketDataError("FRED API key 缺失: 设置环境变量 "
+                                  "FRED_API_KEY 或项目根 .env 文件")
+        params = {"series_id": series_id, "api_key": self.api_key,
+                  "file_type": "json", "observation_start": beg or "2026-01-01"}
+        try:
+            resp = self.http_get(self.URL, params=params,
+                                 headers={"User-Agent": "Mozilla/5.0"},
+                                 timeout=self.timeout)
+            raise_for_status = getattr(resp, "raise_for_status", None)
+            if callable(raise_for_status):
+                raise_for_status()
+            data = resp.json()
+        except MarketDataError:
+            raise
+        except Exception as e:
+            raise MarketDataError("FRED %s 请求失败: %r" % (series_id, e))
+        obs = (data or {}).get("observations") or []
+        out = []
+        for o in obs:
+            d = (o or {}).get("date") or ""
+            v = (o or {}).get("value")
+            if not d or v in (None, "", "."):
+                continue
+            if end and d > end:
+                continue
+            try:
+                out.append({"date": d, "close": float(v)})
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    def fetch_global_kline(self, series_id, beg=None, end=None):
+        """FRED 序列日频 → [{date, close}]。升序。失败 → 抛。
+
+        供 build_global_cache(source="fred") 使用; beg/end 支持两种格式。"""
+        beg_fmt = _norm_day(beg)
+        end_fmt = _norm_day(end)
+        return self._get_observations(series_id, beg=beg_fmt, end=end_fmt)
+
+
 def _norm_day(s):
     """'YYYYMMDD' → 'YYYY-MM-DD'; 已是 YYYY-MM-DD 原样; 其他 → None。"""
     if not s:
@@ -543,6 +628,11 @@ def build_global_cache(probe=None, beg=BACKFILL_BEG, end=None,
         index_map = [(".IXIC", "NDX", "纳斯达克"),
                      (".INX", "SPX", "标普500"),
                      (".DJI", "DJIA", "道琼斯")]
+    elif source == "fred":
+        feed = probe or FREDFeed()
+        # FRED series_id → (缓存key, 名称): 美债收益率/VIX
+        index_map = [("DGS10", "US10Y", "10年美债收益率"),
+                     ("VIXCLS", "VIX", "VIX恐慌指数")]
     else:
         feed = probe or EastMoneyProbe()
         index_map = [(s, c, n) for s, c, n in GLOBAL_INDICES]
@@ -742,7 +832,7 @@ def build_cli():
     ap.add_argument("--beg", default=BACKFILL_BEG,
                     help="回填起点 YYYYMMDD(默认 %s)" % BACKFILL_BEG)
     ap.add_argument("--source", default="eastmoney",
-                    choices=["eastmoney", "sw", "sina"],
+                    choices=["eastmoney", "sw", "sina", "fred"],
                     help="板块/指数数据源: eastmoney(默认) / sw(申万) / sina(新浪美股)")
     ap.add_argument("--rebuild", action="store_true",
                     help="清空 kline/flow 后全量重采(切换数据源时用, 避免混杂)")
