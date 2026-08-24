@@ -88,6 +88,43 @@ def test_backtest_sell_rules_hit():
     assert rep["trades"] == 1
 
 
+def test_backtest_trailing_stop_locks_profit():
+    """移动止盈: 涨到+8%后回撤5%即卖, 比持有到期更早锁住利润。
+
+    K线: 10 → +10%(11.0) → 回撤到 +4%(10.4) → +6%(10.6)。
+    trailing=[8,5]: 峰值+10%, 回撤6%>5% → 在10.4处卖出(而非等到期)。"""
+    s = load_strategy(_mk_strategy())
+    start = date(2026, 7, 1)
+
+    def zf(d):
+        if d == "20260701":
+            return [{"code": "600000.SH", "boards": 1, "theme": "机器人"}]
+        return []
+
+    def kf(code):
+        closes = [10.0, 11.0, 10.4, 10.6, 10.8, 11.0]
+        dates = [(start + timedelta(days=i)).strftime("%Y-%m-%d")
+                 for i in range(6)]
+        return list(zip(dates, closes))
+
+    bt = backtest.Backtester(s, zt_feed=zf, kline_feed=kf)
+    # 无 trailing: 持有期5天, 最后价11.0(+10%)卖出
+    rep_no = bt.run(date(2026, 7, 1), date(2026, 7, 6),
+                    sell_rules={"take_profit_pct": 0.30, "stop_loss_pct": 0.05,
+                                "max_hold_days": 5})
+    # 有 trailing=[8,5]: 峰值+10%后回撤到+4%(>5%)在前卖
+    rep_tr = bt.run(date(2026, 7, 1), date(2026, 7, 6),
+                    sell_rules={"take_profit_pct": 0.30, "stop_loss_pct": 0.05,
+                                "max_hold_days": 5, "trailing_pct": [8, 5]})
+    assert rep_no["trades"] == 1
+    assert rep_tr["trades"] == 1
+    # trailing 版退出价应更低(回撤处), 但仍在盈利区间
+    tr = rep_tr["trade_log"][0]
+    no = rep_no["trade_log"][0]
+    assert tr["exit"] < no["exit"]          # 提前卖出
+    assert tr["return_pct"] > 0             # 仍盈利(锁利)
+
+
 # ---------------- 补充测试 ----------------
 
 def test_backtest_empty_pool_report():

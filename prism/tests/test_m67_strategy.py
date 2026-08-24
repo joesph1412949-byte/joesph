@@ -103,10 +103,13 @@ def test_sector_momentum_strategy_loads():
     for m in s["scoring_models"]:
         for f in m["factors"]:
             fids.add(f["id"] if isinstance(f, dict) else f)
-    assert fids == {"SEC1", "SEC2", "SEC3", "M1", "M6"}
+    assert fids == {"SEC1", "SEC2", "SEC3", "SEC4", "SEC6", "M1", "M6"}
     # 门槛含宏观因子
     gate = s["market_gate"]["factors"]
     assert set(gate) <= {"N1", "N6", "N7", "N8"} and gate
+    # v4: 门槛需3/4通过(弱市不开仓) + 移动止盈配置
+    assert s["market_gate"]["threshold"] == 3
+    assert s["sell_rules"].get("trailing_pct") == [8, 5]
 
 
 def test_new_factors_registered():

@@ -365,8 +365,11 @@ class Backtester:
         rule_kwargs = {k: rules[k] for k in ("take_profit_pct",
                                              "stop_loss_pct",
                                              "max_hold_days") if k in rules}
+        # 移动止盈(可选): 达到起赚点后回撤 N% 即卖, 锁住浮盈
+        trailing = rules.get("trailing_pct")
         exit_close = None
         exit_date = None
+        peak_pct = 0.0          # 持有期内最高浮盈(相对买入价)
         for j in range(idx + 1, len(kline)):
             dt_raw, px = kline[j]
             today = _parse_kline_date(dt_raw)
@@ -379,6 +382,15 @@ class Backtester:
                 exit_close = px
                 exit_date = today
                 break
+            # 移动止盈: 需退出规则未触发时检查(用 trailing 阈值)
+            if trailing:
+                cur_pct = (px / buy_price - 1) * 100
+                peak_pct = max(peak_pct, cur_pct)
+                if peak_pct >= trailing[0] and \
+                        cur_pct <= peak_pct - trailing[1]:
+                    exit_close = px
+                    exit_date = today
+                    break
         if exit_close is None:
             return None
         # ---- 真实交易成本(A股标准) ----
