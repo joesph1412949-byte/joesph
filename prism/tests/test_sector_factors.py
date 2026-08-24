@@ -60,3 +60,52 @@ def test_sec2_10d_miss():
 def test_sec2_insufficient():
     res = get_factor("SEC2")["func"](_ctx(closes=[100, 101]))
     assert res["score"] == 0
+
+
+# ---------------- SEC3 板块资金流 ----------------
+
+def _ctx_flow(sector="BK0475", net_ins=None):
+    from prism.context import FactorContext
+    mkt = {"sector_flow": {sector: {
+        "dates": ["2026-07-%02d" % i for i in range(1, len(net_ins) + 1)],
+        "main_net_in": net_ins}}}
+    return FactorContext(code="600000.SH", sector_map={"600000.SH": sector},
+                         mkt=mkt)
+
+
+def test_sec3_flow_positive_hit():
+    # 近5日净流入为正 → 命中
+    net = [-1e8, 2e8, 3e8, -0.5e8, 1e8]   # 合计 +4.5亿
+    res = get_factor("SEC3")["func"](_ctx_flow(net_ins=net))
+    assert res["score"] == 1, res["note"]
+
+
+def test_sec3_flow_negative_miss():
+    net = [-2e8, -1e8, 0.5e8, -1e8, -0.5e8]   # 合计 -4亿
+    res = get_factor("SEC3")["func"](_ctx_flow(net_ins=net))
+    assert res["score"] == 0
+
+
+def test_sec3_no_sector():
+    from prism.context import FactorContext
+    res = get_factor("SEC3")["func"](
+        FactorContext(code="600000.SH", sector_map={}))
+    assert res["score"] == 0
+    assert "无板块归属" in res["note"]
+
+
+def test_sec3_no_flow_data():
+    res = get_factor("SEC3")["func"](
+        _ctx_flow(sector="BK0475", net_ins=[]))
+    assert res["score"] == 0
+
+
+def test_sec3_flow_insufficient():
+    res = get_factor("SEC3")["func"](_ctx_flow(net_ins=[1e8, 2e8]))
+    assert res["score"] == 0       # 不足5日
+
+
+def test_sec_factors_registered():
+    import prism.registry as reg
+    for fid in ("SEC1", "SEC2", "SEC3"):
+        assert fid in reg.FACTORS, "%s 未注册" % fid

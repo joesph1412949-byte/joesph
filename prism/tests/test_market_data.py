@@ -472,8 +472,12 @@ def test_fred_feed_parse():
     assert kl[1] == {"date": "2026-07-02", "close": 4.28}
 
 
-def test_fred_feed_key_required():
-    """无 api_key → MarketDataError(提示设置 FRED_API_KEY)。"""
+def test_fred_feed_key_required(monkeypatch):
+    """无 api_key → MarketDataError(提示设置 FRED_API_KEY)。
+
+    monkeypatch 屏蔽 _load_fred_api_key: 本地 .env 有真实key时, 测试也要
+    验证"key缺失"分支(否则被环境副作用干扰)。"""
+    monkeypatch.setattr(md, "_load_fred_api_key", lambda: None)
     f = md.FREDFeed(http_get=FakeFredGetter({}), api_key=None)
     try:
         f.fetch_global_kline("DGS10")

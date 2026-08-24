@@ -130,3 +130,17 @@ def test_mkt_global_sliced():
     sliced = _slice_mkt(mkt, date(2026, 7, 2))
     assert sliced["global"]["NDX"]["dates"] == ["2026-07-01", "2026-07-02"]
     assert sliced["global"]["NDX"]["close"] == [100.0, 101.0]
+
+
+def test_mkt_sector_flow_sliced():
+    """sector_flow 段同样 asof 切片(SEC3 用)。"""
+    from prism.backtest import _slice_mkt
+    mkt = {"sector_flow": {"BK0475": {
+        "dates": ["2026-07-01", "2026-07-02", "2026-07-03"],
+        "main_net_in": [1e8, 2e8, 3e8]}}}
+    sliced = _slice_mkt(mkt, date(2026, 7, 2))
+    assert sliced["sector_flow"]["BK0475"]["dates"] == [
+        "2026-07-01", "2026-07-02"]
+    assert sliced["sector_flow"]["BK0475"]["main_net_in"] == [1e8, 2e8]
+    # 未来数据不可见
+    assert sliced["sector_flow"]["BK0475"]["main_net_in"][-1] == 2e8

@@ -101,6 +101,18 @@ def _slice_mkt(mkt, asof):
                     "dates": [dates[i] for i in keep],
                     "close": [rec["close"][i] for i in keep],
                 }
+    # 板块资金流同样切片(SEC3 板块资金流因子用)
+    flows = mkt.get("sector_flow") if isinstance(mkt, dict) else {}
+    if flows:
+        out["sector_flow"] = {}
+        for code, rec in flows.items():
+            dates = rec.get("dates") or []
+            keep = [i for i, d in enumerate(dates) if d <= asof_str]
+            if keep:
+                out["sector_flow"][code] = {
+                    "dates": [dates[i] for i in keep],
+                    "main_net_in": [rec["main_net_in"][i] for i in keep],
+                }
     return out
 
 
