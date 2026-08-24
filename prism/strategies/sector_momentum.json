@@ -15,7 +15,9 @@
       "factors": [
         {"id": "SEC1", "weight": 1.0},
         {"id": "SEC2", "weight": 1.0},
-        {"id": "SEC3", "weight": 1.0}
+        {"id": "SEC3", "weight": 1.0},
+        {"id": "SEC4", "weight": 1.0},
+        {"id": "SEC6", "weight": 1.0}
       ]
     },
     {
