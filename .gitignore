@@ -86,5 +86,8 @@ pt_*
 # Agent / tooling directories
 .agents/
 .codex/
-deepseek-harness/
+deepseek-harness*/
 scripts/
+
+# 临时工具脚本（session-delete 开发辅助）
+.tmp_tools/

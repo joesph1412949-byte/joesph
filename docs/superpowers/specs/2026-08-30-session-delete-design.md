@@ -77,7 +77,7 @@
 ### 5.1 运行时（`packages/client/runtime`）
 
 - 删除归属**会话面**（与 `session.fork`/`session.rename` 同侧，wire RPC 同为 `session.*` 域）：sessions manager 新增 `delete(sessionId)`，经 `this.api.sessions.delete({ sessionId })` 调用 wire `session.delete`；`ctx.sessions` 会话面契约与方法同步补齐（仿 `fork` 的 list 级一元回声）。
-- 行移除：复用 `host/session-removed` 既有处理（`kind: 'remove'` + `handleRemoved`），无新逻辑。
+- 行移除：复用 `host/session-removed` 既有处理（`kind: 'remove'` + `handleRemoved`），无新逻辑；成功后不清理本地摘要——行移除由 `host/session-removed` 帧驱动（设计裁决：帧与 RPC 同一流即时到达，本地清理与帧移除互斥，弃用清理条款）。
 - 选中态收敛：ui-workspace 投影层复用归档规则——当前选中 id 进入"已删除集合"时投影切回空白「新会话」视图（覆盖本地回声与其他标签页帧）。
 
 ### 5.2 UI（`packages/client/ui-workspace`）
