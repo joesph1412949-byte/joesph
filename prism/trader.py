@@ -56,6 +56,7 @@ def generate_signals(result, strategy, env="sim", volume=100):
             "status": "pending",
             "strategy_id": strategy.get("id", "unknown"),
             "composite": c.get("scores", {}).get("composite"),
+            # 协议兼容: 旧版 QMT 信号消费端忽略未知键, 新增键须可缺省(None)
             "sector_score": c.get("sector_score"),
         })
     return out

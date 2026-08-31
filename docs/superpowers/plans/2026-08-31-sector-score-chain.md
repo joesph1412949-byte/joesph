@@ -27,6 +27,9 @@
 
 ### Task 1: 评分模块 `prism/sector_score.py`
 
+> ⚠️ 本任务代码块与最终实现有 7 处偏离（测试数据/口径修正），逐条验算记录见
+> `.superpowers/sdd/task-1-report.md` §4——以实现 + 测试 + 该报告为准，勿照抄本节代码。
+
 **Files:**
 - Create: `prism/sector_score.py`
 - Test: `prism/tests/test_sector_score.py`（新建）

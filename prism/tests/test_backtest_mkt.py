@@ -237,8 +237,9 @@ def test_equity_scales_position_by_pos_mult():
 
 
 def test_sector_score_filters_score_at_or_below_threshold():
-    """板块有评分但 ≤75 → 剔除(覆盖 _pick 的 sec_score <= threshold 分支,
-    含严格大于边界: 恰 75.0 也应剔除, 只有 >75 放行)。
+    """板块有评分但 ≤75 → 剔除(覆盖 _pick 的 sec_score <= threshold 分支;
+    本例实测分 ≈41.7 远低于阈值, "恰 75.0 严格剔除"边界由
+    test_position_multiplier 边界单测(position_multiplier(75)→0.0)覆盖)。
     6 根缓涨K线(6-30 起): 7-05 asof 切片含全部 6 根 → SEC1 连阳≥3 命中
     进入评分环节; 动量分 = r5(2.5%)/6×100 ≈ 41.7 ≤ 75 → fail-closed 不买。"""
     s = load_strategy(_mk_strategy_v5())
