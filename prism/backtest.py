@@ -264,7 +264,9 @@ class Backtester:
                     sec = (sector_map or {}).get(code)
                     if isinstance(sec, dict):
                         sec = sec.get("sector")
-                    rec = sec_scores.get(sec) if sec else None
+                    # str() 归一(审查 Minor#5): compute_scores 键为 str(code),
+                    # sector_map 值为 int 时直接 get 会静默 miss → 误判无评分
+                    rec = sec_scores.get(str(sec)) if sec else None
                     sec_score = rec["score"] if rec else None
                     # fail-closed: 无评分/低分板块不买(设计 §4.2)
                     if sec_score is None or sec_score <= score_cfg["threshold"]:
@@ -482,9 +484,11 @@ class Backtester:
             # 2) 买入: 按当日净值×仓位比例投入, 现金足且持仓未满
             day_nav = cash + sum(p * (1 + r / 100.0) for _u, p, _c, _bd, r
                                  in holdings)
-            per_trade = day_nav * self.position_ratio * float(
-                t.get("pos_mult") or 1.0)
             for t in ev["buy"]:
+                # per_trade 必须在循环内用本笔的 t(审查 Critical#1: 循环外
+                # 引用泄漏变量, 当日多笔买入共用无关交易的乘数)
+                mult = float(t.get("pos_mult") or 1.0)
+                per_trade = day_nav * self.position_ratio * mult
                 if cash >= per_trade and len(holdings) < self.max_positions:
                     cash -= per_trade
                     holdings.append(("%s|%s" % (t["date"], t["code"]),

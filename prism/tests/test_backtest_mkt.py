@@ -234,3 +234,39 @@ def test_equity_scales_position_by_pos_mult():
     t = rep["trade_log"][0]
     # 满分 100 → 乘数 1.125(无 cap 不封顶)
     assert t["pos_mult"] == 1.125
+
+
+def test_sector_score_filters_score_at_or_below_threshold():
+    """板块有评分但 ≤75 → 剔除(覆盖 _pick 的 sec_score <= threshold 分支,
+    含严格大于边界: 恰 75.0 也应剔除, 只有 >75 放行)。
+    6 根缓涨K线(6-30 起): 7-05 asof 切片含全部 6 根 → SEC1 连阳≥3 命中
+    进入评分环节; 动量分 = r5(2.5%)/6×100 ≈ 41.7 ≤ 75 → fail-closed 不买。"""
+    s = load_strategy(_mk_strategy_v5())
+    zf, kf, sector_map = _feeds()
+    bt = backtest.Backtester(s, zt_feed=zf, kline_feed=kf)
+    closes = [100, 100.5, 101, 101.5, 102, 102.5]
+    rep = bt.run(date(2026, 7, 1), date(2026, 7, 5),
+                 mkt=_mkt_snapshot_dates(closes, start="20260630"),
+                 sector_map=sector_map)
+    assert rep["trades"] == 0
+
+
+def test_equity_applies_pos_mult_per_trade():
+    """同一日两笔不同乘数: 现金约束下高乘数占款多 → 第二笔被 skip。
+    (若 per_trade 误用循环外泄漏变量(=末笔乘数 1.0), 两笔共用 60万
+    → 两笔都成交, skipped=0)"""
+    s = load_strategy(_mk_strategy_v5(enabled=False))
+    bt = backtest.Backtester(s, zt_feed=lambda d: [], kline_feed=lambda c: [],
+                             initial_capital=1_200_000.0, position_ratio=0.5)
+    d = "2026-07-01"
+    trades = [
+        {"date": d, "code": "600000.SH", "pos_mult": 1.5,
+         "return_pct": 0.0, "exit_date": None},
+        {"date": d, "code": "000001.SZ", "pos_mult": 1.0,
+         "return_pct": 0.0, "exit_date": None},
+    ]
+    curve, skipped = bt._simulate_equity(trades)
+    # 正确: 第一笔 120万×0.5×1.5=90万(剩30万), 第二笔 120万×0.5×1.0=60万>30万 → skip
+    assert skipped == 1
+    # 净值 = 现金30万 + 持仓90万 = 120万
+    assert curve[-1][1] == 1_200_000.0
