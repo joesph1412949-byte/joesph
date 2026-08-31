@@ -1,7 +1,7 @@
 {
   "id": "sector_momentum",
   "name": "板块动量实验策略",
-  "description": "8.23文档落地v4: 板块强度(SEC1连阳/SEC2十日涨幅/SEC3资金流/SEC4拥挤度/SEC6联合动量) + 形态动量(M1/M6), 门槛需宏观环境确认(N1+至少2个宏观通过, 弱市不开仓), 卖出加移动止盈(trailing 8%/5%锁利)。SEC因子需市场数据层注入(mkt)。",
+  "description": "8.23文档落地v5: 板块强度(SEC1/SEC2/SEC3/SEC4/SEC6) + 形态动量(M1/M6), 门槛需宏观环境确认(N1+至少2个宏观), 卖出移动止盈(trailing 8%/5%)。新增板块综合评分链: 动量35%+资金流25%+拥挤度30%+宏观10% → 板块分>75才买, 仓位每高10分相对+5%封顶45%(缺数据权重归一化)。SEC因子需市场数据层注入(mkt)。",
   "market_gate": {
     "model": "node",
     "threshold": 3,
@@ -37,5 +37,11 @@
     "stop_loss_pct": 0.05,
     "max_hold_days": 5,
     "trailing_pct": [8, 5]
+  }
+  ,
+  "sector_score": {
+    "enabled": true,
+    "threshold": 75,
+    "position": {"step": 0.05, "cap_ratio": 0.45}
   }
 }

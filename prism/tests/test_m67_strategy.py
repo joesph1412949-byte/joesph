@@ -110,6 +110,12 @@ def test_sector_momentum_strategy_loads():
     # v4: 门槛需3/4通过(弱市不开仓) + 移动止盈配置
     assert s["market_gate"]["threshold"] == 3
     assert s["sell_rules"].get("trailing_pct") == [8, 5]
+    # v5: 板块综合评分链(设计 §4.1)
+    ss = s["sector_score"]
+    assert ss["enabled"] is True
+    assert ss["threshold"] == 75
+    assert ss["position"]["step"] == 0.05
+    assert ss["position"]["cap_ratio"] == 0.45
 
 
 def test_new_factors_registered():
