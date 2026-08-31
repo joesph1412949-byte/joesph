@@ -32,6 +32,7 @@ import pandas as pd
 
 from exit_rules import ExitRule
 from prism import registry as reg
+from prism import sector_score
 from prism.context import FactorContext
 from prism.engine import compute_model_scores, load_strategy
 
@@ -196,13 +197,16 @@ class Backtester:
         return FactorContext(code=code, kline=df, **extra)
 
     def _pick(self, pool, asof, em=None, ticks=None, mkt=None, sector_map=None):
-        """用策略引擎对当日涨停池选股。返回 [(code, boards, theme, composite), ...]。
+        """用策略引擎对当日涨停池选股。返回 [(code, boards, theme, composite,
+        sec_score), ...](sec_score: 板块综合评分, 评分关闭/无数据时 None)。
 
         asof: 选股日期(date)——关键!因子只能看到 <= asof 的K线,
         绝不使用未来数据(未来函数会让回测结果虚假虚高)。
 
         市场门槛(节点因子)不达标 → 空仓; 达标后逐股 build FactorContext
         调 compute_model_scores, 按 candidate_min_model 过滤, 综合分降序。
+        策略开启 sector_score(v5)时: 切片数据现算板块综合评分,
+        无评分或 ≤threshold → 剔除(fail-closed, 设计 §4.2)。
 
         数据适配层(审查 I1): 市场上下文从池子合成 limit_ups(补
         sealed/last/last_close, 没有就 None), em/ticks 可注入(供 N3/N5 等);
@@ -223,6 +227,10 @@ class Backtester:
             pool_ctx.append(item)
         # 防未来函数: 市场数据也按 asof 切片(因子只见当日及之前)
         mkt_sliced = _slice_mkt(mkt, asof)
+        # v5 板块综合评分(可选): 切片数据现算一次, 门槛过滤 + 记分
+        score_cfg = sector_score.load_config(self.strategy)
+        sec_scores = (sector_score.compute_scores(mkt_sliced)
+                      if score_cfg["enabled"] else {})
         mkt_extra = {"mkt": mkt_sliced}
         market_ctx = FactorContext(code="__MKT__", limit_ups=pool_ctx,
                                    em=em or {}, ticks=ticks or {}, **mkt_extra)
@@ -251,8 +259,18 @@ class Backtester:
             best = max([scores[m["id"]]
                         for m in self.strategy["scoring_models"]], default=0)
             if best >= min_model:
+                sec_score = None
+                if score_cfg["enabled"]:
+                    sec = (sector_map or {}).get(code)
+                    if isinstance(sec, dict):
+                        sec = sec.get("sector")
+                    rec = sec_scores.get(sec) if sec else None
+                    sec_score = rec["score"] if rec else None
+                    # fail-closed: 无评分/低分板块不买(设计 §4.2)
+                    if sec_score is None or sec_score <= score_cfg["threshold"]:
+                        continue
                 out.append((code, s.get("boards", 0), s.get("theme", ""),
-                            scores["composite"]))
+                            scores["composite"], sec_score))
         out.sort(key=lambda x: x[3], reverse=True)
         # 每日选股上限: 与净值模拟的 max_positions 一致(每天最多买 N 只,
         # 否则一天 50+ 只候选会把资金抽干, 净值模拟里几乎全部跳过)
@@ -290,12 +308,15 @@ class Backtester:
         mkt: 市场数据层快照(供 SEC 板块因子)。防未来函数由调用方保证——
         只传 asof 当日及之前的数据; 每次 _pick 应传当日的 asof 切片。
         sector_map: code → 行业板块代码(供 SEC 因子, 需与 mkt 配对)。
+        策略开启 sector_score(v5)时: 板块评分 >threshold 才买(fail-closed),
+        trade 记 sector_score/pos_mult, 单笔投入按 pos_mult 放大。
         """
         defaults = {"take_profit_pct": 0.08, "stop_loss_pct": 0.05,
                     "max_hold_days": 5}
         cfg_rules = dict(defaults)
         cfg_rules.update(self.strategy.get("sell_rules") or {})
         rules = dict(cfg_rules, **(sell_rules or {}))
+        score_cfg = sector_score.load_config(self.strategy)
         gate_notes = self._gate_notes(em, ticks)
         trades = []
         dates = []
@@ -317,18 +338,24 @@ class Backtester:
             pool = self._pool_for(d)
             if pool:
                 dates.append(d)
-                for code, boards, theme, composite in self._pick(
+                for code, boards, theme, composite, sec_score in self._pick(
                         pool, asof=d, em=em, ticks=ticks, mkt=mkt,
                         sector_map=sector_map):
                     kline = self._kline_for(code)
                     tr = self._simulate_trade(code, kline, d, rules)
                     if tr:
+                        if score_cfg["enabled"]:
+                            mult = sector_score.position_multiplier(
+                                sec_score, score_cfg, self.position_ratio)
+                        else:
+                            mult = 1.0
                         trades.append({
                             "date": d.strftime("%Y-%m-%d"), "code": code,
                             "boards": boards, "theme": theme,
                             "composite": composite,
-                            "entry": tr[0], "exit": tr[1], "return_pct": tr[2],
-                            "cost_pct": tr[3],
+                            "sector_score": sec_score, "pos_mult": mult,
+                            "entry": tr[0], "exit": tr[1],
+                            "return_pct": tr[2], "cost_pct": tr[3],
                             "exit_date": tr[4].strftime("%Y-%m-%d")
                             if tr[4] else None,
                         })
@@ -416,7 +443,8 @@ class Backtester:
 
         规则:
           - 初始资金 self.initial_capital(默认100万)
-          - 每笔投入 = 当日净值 × position_ratio(动态仓位, 复利增长)
+          - 每笔投入 = 当日净值 × position_ratio × pos_mult
+            (动态仓位, 复利增长; pos_mult 为 v5 板块评分乘数, 缺省 1.0)
           - 最大同时持仓 = self.max_positions(默认5), 持仓满则跳过新买入
           - 同一日: 先处理卖出回款(按当日净值比例的本金+盈亏), 再买入
           - 未成交的买入(现金不足/持仓满)卖出时**不回款**
@@ -454,7 +482,8 @@ class Backtester:
             # 2) 买入: 按当日净值×仓位比例投入, 现金足且持仓未满
             day_nav = cash + sum(p * (1 + r / 100.0) for _u, p, _c, _bd, r
                                  in holdings)
-            per_trade = day_nav * self.position_ratio
+            per_trade = day_nav * self.position_ratio * float(
+                t.get("pos_mult") or 1.0)
             for t in ev["buy"]:
                 if cash >= per_trade and len(holdings) < self.max_positions:
                     cash -= per_trade

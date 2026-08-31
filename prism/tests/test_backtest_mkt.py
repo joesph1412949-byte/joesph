@@ -156,3 +156,81 @@ def test_mkt_sector_amount_sliced():
     sliced = _slice_mkt(mkt, date(2026, 7, 2))
     assert sliced["sector"]["BK0475"]["amount"] == [1e9, 1.2e9]
     assert sliced["sector"]["BK0475"]["close"] == [100.0, 101.0]
+
+
+# ---------------- v5 板块评分链 ----------------
+
+def _mk_strategy_v5(step=0.05, cap=None, enabled=True, for_factor="SEC1"):
+    s = _mk_strategy(for_factor)
+    s["sector_score"] = {"enabled": enabled, "threshold": 75,
+                         "position": {"step": step, "cap_ratio": cap}}
+    return s
+
+
+def _v5_mkt():
+    """板块11根K线(动量满分=100: r5=10%≥6, r10=10%≥10) + 无资金流/宏观
+    (降级为仅动量分项, score=100)。6-25 起 11 根 → 选股日 7-05 切片含 7-05。"""
+    closes = [100.0] * 6 + [106.0, 107.0, 108.0, 109.0, 110.0]
+    return _mkt_snapshot_dates(closes, start="20260625")
+
+
+def test_sector_score_gate_filters_low_sector():
+    """板块分 ≤75 → 剔除(fail-closed: 本例动量满分应通过, 反例看下个测试)。"""
+    s = load_strategy(_mk_strategy_v5())
+    zf, kf, sector_map = _feeds()
+    bt = backtest.Backtester(s, zt_feed=zf, kline_feed=kf)
+    rep = bt.run(date(2026, 7, 1), date(2026, 7, 5),
+                 mkt=_v5_mkt(), sector_map=sector_map)
+    assert rep["trades"] == 1
+    t = rep["trade_log"][0]
+    assert t["sector_score"] is not None and t["sector_score"] > 75
+    assert t["pos_mult"] > 1.0            # 满分 → 乘数>1
+
+
+def test_sector_score_fail_closed_without_data():
+    """mkt 无数据 → 板块无评分 → 不买(即使 SEC1 因子可命中)。"""
+    s = load_strategy(_mk_strategy_v5())
+    zf, kf, sector_map = _feeds()
+    bt = backtest.Backtester(s, zt_feed=zf, kline_feed=kf)
+    rep = bt.run(date(2026, 7, 1), date(2026, 7, 5),
+                 mkt=_mkt_snapshot([100.0, 101.0, 102.0, 103.0]),
+                 sector_map=sector_map)
+    assert rep["trades"] == 0             # 仅4根K线(<6) → 动量None+拥挤None → 无分 → fail-closed
+
+
+def test_sector_score_disabled_keeps_old_behavior():
+    """enabled=false → 不过滤、pos_mult=1.0、sec_score=None。"""
+    s = load_strategy(_mk_strategy_v5(enabled=False))
+    zf, kf, sector_map = _feeds()
+    bt = backtest.Backtester(s, zt_feed=zf, kline_feed=kf)
+    rep = bt.run(date(2026, 7, 1), date(2026, 7, 5),
+                 mkt=_mkt_snapshot([100.0, 101.0, 102.0, 103.0]),
+                 sector_map=sector_map)
+    assert rep["trades"] == 1             # 评分关闭(SEC1三连阳命中) + 无门槛
+    assert rep["trade_log"][0]["sector_score"] is None
+    assert rep["trade_log"][0]["pos_mult"] == 1.0
+
+
+def test_pick_returns_5tuple_with_score():
+    s = load_strategy(_mk_strategy_v5())
+    zf, kf, sector_map = _feeds()
+    bt = backtest.Backtester(s, zt_feed=zf, kline_feed=kf)
+    picked = bt._pick([{"code": "600000.SH", "boards": 1, "theme": "机器人"}],
+                      asof=date(2026, 7, 5), mkt=_v5_mkt(),
+                      sector_map=sector_map)
+    assert len(picked) == 1
+    code, boards, theme, composite, sec_score = picked[0]
+    assert code == "600000.SH" and sec_score > 75
+
+
+def test_equity_scales_position_by_pos_mult():
+    """_simulate_equity 按 pos_mult 放大投入; 封顶 cap_ratio/position_ratio。"""
+    s = load_strategy(_mk_strategy_v5(step=0.05, cap=None))
+    zf, kf, sector_map = _feeds()
+    bt = backtest.Backtester(s, zt_feed=zf, kline_feed=kf,
+                             position_ratio=0.3)
+    rep = bt.run(date(2026, 7, 1), date(2026, 7, 5),
+                 mkt=_v5_mkt(), sector_map=sector_map)
+    t = rep["trade_log"][0]
+    # 满分 100 → 乘数 1.125(无 cap 不封顶)
+    assert t["pos_mult"] == 1.125
