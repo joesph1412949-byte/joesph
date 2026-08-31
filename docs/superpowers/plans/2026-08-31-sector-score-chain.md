@@ -412,10 +412,10 @@ def _mk_strategy_v5(step=0.05, cap=None, enabled=True, for_factor="SEC1"):
 
 
 def _v5_mkt():
-    """板块11根K线(动量满分≈100) + 无资金流/宏观(降级为 动量+拥挤)。"""
-    closes = [100.0 * (1.011 ** i) for i in range(11)]
+    """板块11根K线(动量满分=100: r5=10%≥6, r10=10%≥10) + 无资金流/宏观
+    (降级为仅动量分项, score=100)。6-25 起 11 根 → 选股日 7-05 切片含 7-05。"""
+    closes = [100.0] * 6 + [106.0, 107.0, 108.0, 109.0, 110.0]
     return _mkt_snapshot_dates(closes, start="20260625")
-    # 6-25 起 11 根 → 选股日 7-05 切片后含 7-05
 
 
 def test_sector_score_gate_filters_low_sector():
@@ -447,8 +447,8 @@ def test_sector_score_disabled_keeps_old_behavior():
     zf, kf, sector_map = _feeds()
     bt = backtest.Backtester(s, zt_feed=zf, kline_feed=kf)
     rep = bt.run(date(2026, 7, 1), date(2026, 7, 5),
-                 mkt=_mkt_snapshot([100.0]), sector_map=sector_map)
-    assert rep["trades"] == 1             # 无评分数据也能买(旧行为)
+                 mkt=_mkt_snapshot([100.0, 101.0]), sector_map=sector_map)
+    assert rep["trades"] == 1             # 评分关闭(SEC1两连阳命中) + 无门槛
     assert rep["trade_log"][0]["sector_score"] is None
     assert rep["trade_log"][0]["pos_mult"] == 1.0
 
@@ -676,7 +676,8 @@ python -m pytest prism\tests\test_engine.py prism\tests\test_trader.py -v --impo
                         for m in strategy["scoring_models"]], default=0)
             if best >= min_model:
                 if score_cfg["enabled"] and sec_scores:
-                    sec = (ctx.get("sector_map") or {}).get(code)
+                    # sector_map 是市场级数据 → 从 market_ctx 取(非个股ctx)
+                    sec = (market_ctx.get("sector_map") or {}).get(code)
                     if isinstance(sec, dict):
                         sec = sec.get("sector")
                     rec = sec_scores.get(sec) if sec else None
