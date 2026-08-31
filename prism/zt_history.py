@@ -30,6 +30,35 @@ INDEX_PATH = Path(__file__).parent.parent / ".zt_history_index.pkl"
 
 # 拉多少根日K(约1.5年交易日)
 KLINE_COUNT = 400
+# 单批 xtdata 调用看门狗超时(秒)。QMT 下载/读取偶发永久挂起(实测同批次
+# 重复卡死), 超时抛 TimeoutError 让 build_cache 跳过该批(增量续建不丢进度)。
+DOWNLOAD_TIMEOUT = 90.0
+
+
+def _run_with_timeout(fn, args=(), kwargs=None, timeout=DOWNLOAD_TIMEOUT):
+    """带看门狗执行 fn(*args, **kwargs)。
+
+    超时 → raise TimeoutError(执行线程无法终止, 作为 daemon 泄漏,
+    但主流程可继续处理后续批次); fn 内部异常 → 原样转交; 正常 → 返回值。
+    """
+    import threading
+    kwargs = kwargs or {}
+    box = {}
+
+    def _target():
+        try:
+            box["ret"] = fn(*args, **kwargs)
+        except BaseException as e:   # 原样转交主线程(含 KeyboardInterrupt)
+            box["err"] = e
+
+    th = threading.Thread(target=_target, daemon=True)
+    th.start()
+    th.join(timeout)
+    if th.is_alive():
+        raise TimeoutError("call timed out after %ss" % timeout)
+    if "err" in box:
+        raise box["err"]
+    return box.get("ret")
 
 
 def _limit_ratio(code):
@@ -75,20 +104,23 @@ def build_cache(progress=None):
     for i in range(0, len(todo), batch):
         chunk = todo[i:i + batch]
         try:
-            xtdata.download_history_data2(chunk, "1d",
-                                          start_time="", end_time="")
+            _run_with_timeout(xtdata.download_history_data2,
+                              (chunk, "1d"),
+                              {"start_time": "", "end_time": ""})
         except Exception as e:
-            logger.warning("第 %d 批下载失败: %r (跳过该批)", i // batch, e)
+            logger.warning("第 %d 批下载失败/超时: %r (跳过该批)", i // batch, e)
             processed += len(chunk)
             if progress:
                 progress(processed, len(codes))
             continue
         try:
-            data = xtdata.get_market_data_ex([], chunk, period="1d",
-                                             start_time="", end_time="",
-                                             count=KLINE_COUNT)
+            data = _run_with_timeout(
+                xtdata.get_market_data_ex,
+                ([], chunk),
+                {"period": "1d", "start_time": "", "end_time": "",
+                 "count": KLINE_COUNT})
         except Exception as e:
-            logger.warning("第 %d 批读取失败: %r (跳过该批)", i // batch, e)
+            logger.warning("第 %d 批读取失败/超时: %r (跳过该批)", i // batch, e)
             processed += len(chunk)
             if progress:
                 progress(processed, len(codes))

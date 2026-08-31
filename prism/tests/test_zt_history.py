@@ -4,7 +4,11 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from prism.zt_history import _limit_ratio, _limit_up_price, qmt_zt_feed
+from prism.zt_history import (_limit_ratio, _limit_up_price, qmt_zt_feed,
+                              _run_with_timeout)
+
+import pytest
+import time
 
 
 def _feed(date_str, cache):
@@ -95,3 +99,23 @@ def test_gem_20pct_limit():
     cache3 = {"600000.SH": {"dates": ["2026-07-01", "2026-07-02"],
                             "close": [10.0, 10.99], "pre": [10.0, 10.0]}}
     assert _feed("20260702", cache3) == []
+
+
+# ---------------- 看门狗(QMT下载偶发永久挂起, 超时跳批) ----------------
+
+def test_run_with_timeout_returns_result():
+    assert _run_with_timeout(lambda a, b: a + b, (1, 2)) == 3
+
+
+def test_run_with_timeout_propagates_error():
+    def boom():
+        raise ValueError("boom")
+    with pytest.raises(ValueError):
+        _run_with_timeout(boom, timeout=1.0)
+
+
+def test_run_with_timeout_times_out():
+    def hang():
+        time.sleep(2.0)
+    with pytest.raises(TimeoutError):
+        _run_with_timeout(hang, timeout=0.2)
