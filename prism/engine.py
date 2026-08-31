@@ -8,6 +8,7 @@ from pathlib import Path
 
 from prism import registry as reg
 from prism.context import FactorContext
+from prism import sector_score
 
 # 综合分组合方式
 composite_modes = {
@@ -165,6 +166,10 @@ def run_screen(strategy, market_ctx, gate_factors=None, stock_contexts=None):
     environment_ok = gate_score >= threshold
 
     candidates = []
+    score_cfg = sector_score.load_config(strategy)
+    mkt_extra = market_ctx.get("mkt") if market_ctx is not None else None
+    sec_scores = (sector_score.compute_scores(mkt_extra)
+                  if score_cfg["enabled"] and mkt_extra else {})
     if environment_ok and stock_contexts:
         min_model = (strategy.get("filters") or {}).get("candidate_min_model", 3)
         for code, ctx in stock_contexts.items():
@@ -172,6 +177,16 @@ def run_screen(strategy, market_ctx, gate_factors=None, stock_contexts=None):
             best = max([ev["scores"][m["id"]]
                         for m in strategy["scoring_models"]], default=0)
             if best >= min_model:
+                if score_cfg["enabled"] and sec_scores:
+                    # sector_map 是市场级数据 → 从 market_ctx 取(非个股ctx)
+                    sec = (market_ctx.get("sector_map") or {}).get(code)
+                    if isinstance(sec, dict):
+                        sec = sec.get("sector")
+                    rec = sec_scores.get(sec) if sec else None
+                    sec_score = rec["score"] if rec else None
+                    if sec_score is None or sec_score <= score_cfg["threshold"]:
+                        continue
+                    ev["sector_score"] = sec_score
                 candidates.append(ev)
         candidates.sort(key=lambda c: c["scores"]["composite"], reverse=True)
 

@@ -272,3 +272,18 @@ def test_run_daily_sim_keeps_no_price_candidates(tmp_path, monkeypatch):
     assert result["skipped_no_price"] == 0
     files = list((tmp_path / "sim" / "pending").glob("*.json"))
     assert len(files) == 2
+
+
+# ---------------- v5 信号透传 sector_score ----------------
+
+def test_generate_signals_passes_sector_score():
+    """候选带 sector_score → 透传信号; 不带 → null(协议兼容)。"""
+    result = {"environment_ok": True, "candidates": [
+        {"code": "600000.SH", "up_stop_price": 10.0,
+         "scores": {"composite": 3}, "sector_score": 82.3},
+        {"code": "000001.SZ", "up_stop_price": 9.0,
+         "scores": {"composite": 2}},
+    ]}
+    sigs = trader.generate_signals(result, {"id": "s1"})
+    assert sigs[0]["sector_score"] == 82.3
+    assert sigs[1]["sector_score"] is None

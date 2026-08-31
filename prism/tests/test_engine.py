@@ -168,3 +168,49 @@ def test_factor_hit_unknown_op_falls_back_score():
     ctx = FactorContext(code="600000.SH")
     r = engine.compute_model_scores(ctx, s)
     assert r["m1"] == 1   # A1 score=1 > 0 → 命中
+
+
+# ---------------- v5 实盘板块评分门(run_screen) ----------------
+
+def test_run_screen_sector_score_gate_and_attach():
+    """评分开启+ctx带mkt: 低分板块候选被剔除, 通过者附 sector_score。"""
+    from prism import sector_score as ss
+    s = {
+        "id": "t", "name": "t", "description": "",
+        "market_gate": {"model": "node", "threshold": 0, "factors": []},
+        "scoring_models": [{"id": "m", "name": "m", "weight": 1.0,
+                            "factors": []}],
+        "composite": {"mode": "sum"},
+        "filters": {"candidate_min_model": 0},
+        "sector_score": {"enabled": True, "threshold": 75,
+                         "position": {"step": 0.05, "cap_ratio": 0.45}},
+    }
+    # 因子0分全靠 candidate_min_model=0 放行; 评分数据: 801110 满分, 801999 无
+    closes = [100.0 * (1.011 ** i) for i in range(11)]
+    mkt = {"sector": {"801110": {"dates": ["2026-07-%02d" % (i + 1)
+                                                for i in range(11)],
+                                 "close": closes}}}
+    market_ctx = FactorContext(code="__MKT__", mkt=mkt,
+                               sector_map={"600000.SH": "801110",
+                                           "000001.SZ": "801999"})
+    stock_ctxs = {c: FactorContext(code=c, kline=None)
+                  for c in ("600000.SH", "000001.SZ")}
+    out = engine.run_screen(s, market_ctx, stock_contexts=stock_ctxs)
+    codes = [c["code"] for c in out["candidates"]]
+    assert codes == ["600000.SH"]                 # 801999 无评分 → 剔除
+    assert out["candidates"][0]["sector_score"] > 75
+
+
+def test_run_screen_sector_score_disabled_noop():
+    """评分关闭/ctx无mkt → 行为与 v4 完全一致, 不附键。"""
+    s = {"id": "t", "name": "t", "description": "",
+         "market_gate": {"model": "node", "threshold": 0, "factors": []},
+         "scoring_models": [{"id": "m", "name": "m", "weight": 1.0,
+                             "factors": []}],
+         "composite": {"mode": "sum"},
+         "filters": {"candidate_min_model": 0}}
+    market_ctx = FactorContext(code="__MKT__")
+    stock_ctxs = {"600000.SH": FactorContext(code="600000.SH", kline=None)}
+    out = engine.run_screen(s, market_ctx, stock_contexts=stock_ctxs)
+    assert len(out["candidates"]) == 1
+    assert "sector_score" not in out["candidates"][0]

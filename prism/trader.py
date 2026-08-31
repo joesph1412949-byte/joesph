@@ -56,6 +56,7 @@ def generate_signals(result, strategy, env="sim", volume=100):
             "status": "pending",
             "strategy_id": strategy.get("id", "unknown"),
             "composite": c.get("scores", {}).get("composite"),
+            "sector_score": c.get("sector_score"),
         })
     return out
 
