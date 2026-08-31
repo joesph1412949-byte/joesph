@@ -214,3 +214,21 @@ def test_run_screen_sector_score_disabled_noop():
     out = engine.run_screen(s, market_ctx, stock_contexts=stock_ctxs)
     assert len(out["candidates"]) == 1
     assert "sector_score" not in out["candidates"][0]
+
+
+def test_run_screen_sector_score_empty_scores_fail_closed():
+    """mkt 注入但算不出任何评分(sector 段空) → 全部候选剔除(fail-closed,
+    与回测侧同语义, 设计 §3.5)。"""
+    s = {"id": "t", "name": "t", "description": "",
+         "market_gate": {"model": "node", "threshold": 0, "factors": []},
+         "scoring_models": [{"id": "m", "name": "m", "weight": 1.0,
+                             "factors": []}],
+         "composite": {"mode": "sum"},
+         "filters": {"candidate_min_model": 0},
+         "sector_score": {"enabled": True, "threshold": 75,
+                          "position": {"step": 0.05, "cap_ratio": 0.45}}}
+    market_ctx = FactorContext(code="__MKT__", mkt={"sector": {}},
+                               sector_map={"600000.SH": "801110"})
+    stock_ctxs = {"600000.SH": FactorContext(code="600000.SH", kline=None)}
+    out = engine.run_screen(s, market_ctx, stock_contexts=stock_ctxs)
+    assert out["candidates"] == []

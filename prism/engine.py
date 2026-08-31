@@ -177,12 +177,16 @@ def run_screen(strategy, market_ctx, gate_factors=None, stock_contexts=None):
             best = max([ev["scores"][m["id"]]
                         for m in strategy["scoring_models"]], default=0)
             if best >= min_model:
-                if score_cfg["enabled"] and sec_scores:
+                # fail-closed(设计 §3.5): mkt 注入但评分算不出(sec_scores 空)
+                # 也进入过滤 → 候选查不到评分被全剔除, 与回测侧同语义
+                if score_cfg["enabled"] and mkt_extra:
                     # sector_map 是市场级数据 → 从 market_ctx 取(非个股ctx)
                     sec = (market_ctx.get("sector_map") or {}).get(code)
                     if isinstance(sec, dict):
                         sec = sec.get("sector")
-                    rec = sec_scores.get(sec) if sec else None
+                    # str() 归一(审查 Minor#5): compute_scores 键为 str(code),
+                    # sector_map 值为 int 时直接 get 会静默 miss → 误判无评分
+                    rec = sec_scores.get(str(sec)) if sec else None
                     sec_score = rec["score"] if rec else None
                     if sec_score is None or sec_score <= score_cfg["threshold"]:
                         continue
