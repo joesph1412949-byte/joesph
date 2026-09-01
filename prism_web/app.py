@@ -535,6 +535,28 @@ def api_backtest():
     return jsonify({"ok": True, "report": rep})
 
 
+# ---------------- 模拟盘(只读查询, 设计 §8-7: 无写端点) ----------------
+
+@app.route("/api/paper/summary")
+def api_paper_summary():
+    from prism.paper import PaperAccount
+    try:
+        return jsonify(PaperAccount().summary())
+    except Exception as e:
+        return jsonify({"exists": False,
+                        "error": "读取模拟盘账本失败: %r" % e})
+
+
+@app.route("/api/paper/detail")
+def api_paper_detail():
+    from prism.paper import PaperAccount
+    try:
+        return jsonify(PaperAccount().detail())
+    except Exception as e:
+        return jsonify({"exists": False,
+                        "error": "读取模拟盘账本失败: %r" % e})
+
+
 @app.route("/api/automation", methods=["GET", "POST"])
 def api_automation():
     if request.method == "GET":

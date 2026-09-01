@@ -422,3 +422,50 @@ def test_screen_still_400_when_reconnect_fails(client, monkeypatch):
     r = client.post("/api/screen")
     assert r.status_code == 400
     assert "QMT未连接" in r.get_json()["error"]
+
+
+# ---------------- 模拟盘面板 ----------------
+
+def test_paper_endpoints_not_initialized(client, tmp_path, monkeypatch):
+    """未初始化账本 → exists=false, 200 不报错。"""
+    import prism.paper as paper_mod
+
+    class FakeAcc:
+        def __init__(self, **kw):
+            self.state_path = tmp_path / "p.json"
+            self.state = None
+            self._strategy = None
+            self.initial_capital = 1000000.0
+        def summary(self):
+            return {"exists": False}
+        def detail(self, trade_limit=50):
+            return {"exists": False}
+
+    monkeypatch.setattr(paper_mod, "PaperAccount", FakeAcc)
+    r = client.get("/api/paper/summary")
+    assert r.status_code == 200
+    assert r.get_json()["exists"] is False
+    r2 = client.get("/api/paper/detail")
+    assert r2.status_code == 200 and r2.get_json()["exists"] is False
+
+
+def test_paper_endpoints_with_ledger(client, tmp_path, monkeypatch):
+    """有账本 → summary 字段契约 + detail 持仓/流水透出(子类注入 tmp 账本)。"""
+    import prism.paper as paper_mod
+
+    class RealTmpAcc(paper_mod.PaperAccount):
+        def __init__(self, **kw):
+            super().__init__(state_path=tmp_path / "p.json", **kw)
+    monkeypatch.setattr(paper_mod, "PaperAccount", RealTmpAcc)
+    acc = RealTmpAcc()
+    acc.init_account(created="2026-09-01")
+    acc.state["holdings"].append({
+        "code": "600000.SH", "shares": 29900, "cost": 10.01,
+        "buy_date": "2026-09-01", "buy_price": 10.01, "entry_nav": 1e6})
+    acc.save()
+    r = client.get("/api/paper/summary")
+    s = r.get_json()
+    assert s["exists"] is True and s["holdings_count"] == 1
+    assert "total_return_pct" in s and "nav_points" in s
+    d = client.get("/api/paper/detail").get_json()
+    assert d["holdings"][0]["code"] == "600000.SH"

@@ -31,6 +31,7 @@
     <button class="tab" data-tab="factors" onclick="switchTab('factors')">因子库</button>
     <button class="tab" data-tab="strategies" onclick="switchTab('strategies')">策略</button>
     <button class="tab" data-tab="backtest" onclick="switchTab('backtest')">回测</button>
+    <button class="tab" data-tab="paper" onclick="switchTab('paper')">模拟盘</button>
   </nav>
 
   <main>
@@ -111,6 +112,30 @@
         <button id="btn-backtest" onclick="runBacktest()">开始回测</button>
       </div>
       <div id="backtest-result"></div>
+    </section>
+
+    <section id="tab-paper" class="tab-panel">
+      <h2>模拟盘</h2>
+      <p class="hint">100 万虚拟资金 × 当前实盘策略, 守护进程盘中实时模拟交易
+        (到价即卖/三时点选股买入)。逐笔与净值由本地账本
+        <code>.paper_account.json</code> 记录, 程序重启自动续跑。</p>
+      <div id="paper-summary" class="cards"></div>
+      <div id="paper-layout" style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div>
+          <h3>当前持仓</h3>
+          <table id="paper-holdings"><thead><tr>
+            <th>代码</th><th>股数</th><th>成本</th><th>买入日</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+        <div>
+          <h3>逐笔流水</h3>
+          <table id="paper-trades"><thead><tr>
+            <th>时间</th><th>方向</th><th>代码</th><th>价格</th><th>股数</th><th>原因</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <h3>净值历史</h3>
+      <table id="paper-nav"><thead><tr><th>日期</th><th>净值</th></tr></thead><tbody></tbody></table>
     </section>
   </main>
 </div>

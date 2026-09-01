@@ -522,3 +522,46 @@ function renderBacktest(r) {
     <div class="hint" style="margin-top:10px">注: 真实交易成本模型(佣金万2.5双向 + 印花税0.05%卖出 + 过户费万0.1 + 滑点0.1%),
       夏普比按每笔收益率年化(简化); 数据源优先 QMT 本地K线。</div>`;
 }
+
+// ---------- 模拟盘面板 ----------
+async function refreshPaper() {
+  try {
+    const sum = await api("/api/paper/summary");
+    const det = sum.exists ? await api("/api/paper/detail") : null;
+    renderPaper(sum, det);
+  } catch (e) { /* 后端未启动时静默 */ }
+}
+
+function renderPaper(sum, det) {
+  const box = document.getElementById("paper-summary");
+  if (!box) return;
+  if (!sum.exists) {
+    box.innerHTML = "<div class='hint'>模拟盘未初始化 — 运行 " +
+      "<code>python -m prism.paper --init</code> 后由守护进程接管</div>";
+    return;
+  }
+  const ret = sum.total_return_pct;
+  const cls = ret >= 0 ? "ok" : "fail";
+  box.innerHTML =
+    `<div class="card"><b>总收益</b> <span class="badge ${cls}">${ret}%</span></div>` +
+    `<div class="card"><b>当前净值</b> ${sum.nav.toLocaleString()}</div>` +
+    `<div class="card"><b>现金</b> ${sum.cash.toLocaleString()}</div>` +
+    `<div class="card"><b>持仓</b> ${sum.holdings_count}/5</div>` +
+    `<div class="card"><b>记账天数</b> ${sum.nav_points ?? 0}</div>`;
+  const hb = document.querySelector("#paper-holdings tbody");
+  if (hb) hb.innerHTML = (det && det.holdings || []).map(h =>
+    `<tr><td>${h.code}</td><td>${h.shares}</td><td>${h.cost}</td>` +
+    `<td>${h.buy_date}</td></tr>`).join("") ||
+    "<tr><td colspan=4 class='hint'>空仓等待信号</td></tr>";
+  const tb = document.querySelector("#paper-trades tbody");
+  if (tb) tb.innerHTML = (det && det.trades || []).map(t =>
+    `<tr><td>${t.ts}</td><td>${t.side}</td><td>${t.code}</td>` +
+    `<td>${t.price}</td><td>${t.shares}</td><td>${t.reason}</td></tr>`).join("")
+    || "<tr><td colspan=6 class='hint'>暂无交易</td></tr>";
+  const nb = document.querySelector("#paper-nav tbody");
+  if (nb) nb.innerHTML = (det && det.nav_history || []).map(n =>
+    `<tr><td>${n.date}</td><td>${n.nav.toLocaleString()}</td></tr>`).join("")
+    || "<tr><td colspan=2 class='hint'>暂无净值记录</td></tr>";
+}
+refreshPaper();
+setInterval(refreshPaper, 30000);
