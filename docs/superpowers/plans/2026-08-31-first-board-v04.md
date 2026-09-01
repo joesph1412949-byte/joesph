@@ -129,11 +129,11 @@ def test_futures_snapshot_keys_follow_sector_cache(monkeypatch):
                     "801150": {"name": "医药生物"}}})
     monkeypatch.setattr(md, "fetch_futures", lambda force=False: {
         "MA0": {"name": "甲醇", "dates": ["2026-07-01"], "close": [1.0]},
-        "ZC0": {"name": "动力煤", "dates": ["2026-07-01"], "close": [2.0]}})
+        "JM0": {"name": "焦煤", "dates": ["2026-07-01"], "close": [2.0]}})
     out = md.futures_snapshot()
     assert set(out) == {"801030", "801950"}      # 医药生物无映射 → 不出现
     assert "MA0" in out["801030"]["commodities"]
-    assert "ZC0" in out["801950"]["commodities"]
+    assert "JM0" in out["801950"]["commodities"]
 
 
 def test_fetch_futures_writes_cache(monkeypatch):
@@ -186,15 +186,18 @@ Expected: FAIL（`COMMODITY_MAP` / `fetch_futures` 不存在；_slice_mkt 不切
 # 采集失败的品种静默跳过(fail-open)。
 COMMODITY_BY_NAME = {
     "基础化工": ["MA0", "TA0"],
-    "煤炭": ["ZC0", "JM0"],
+    "煤炭": ["JM0"],
     "钢铁": ["RB0", "HC0"],
-    "有色金属": ["CU0", "AL0", "PS0"],
+    "有色金属": ["CU0", "AL0", "SI0"],
     "石油石化": ["SC0"],
     "农林牧渔": ["LH0", "M0"],
     "食品饮料": ["SR0", "Y0"],
     "建筑材料": ["FG0"],
     "电力设备": ["LC0"],
 }
+# 品种可用性为 Task 1 探针实测(2026-08-31, 16/16 可用): 动力煤 ZC0 停更于
+# 2022-12-30(死数据会让 F8 用旧涨幅误判, 删除); 工业硅符号为 SI0(PS0 实为
+# 多晶硅)。详证 .superpowers/sdd/task-v04-1-report.md。
 
 _FUTURES_NAMES = {
     "MA0": "甲醇", "TA0": "PTA", "ZC0": "动力煤", "JM0": "焦煤",
