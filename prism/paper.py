@@ -289,3 +289,74 @@ class PaperAccount:
             return None
         return {"code": code, "shares": shares, "price": buy_price,
                 "amount": amount, "fee": fee}
+
+    # ---------- 卖出 ----------
+    def sell_check(self, ticks, now=None):
+        """tick 监控: 止盈/止损触发卖出; T+1(当日买入不卖); 同步 live_nav。
+
+        ticks: {code: tick_dict}; 缺该股 tick 或价格<=0 → 跳过。"""
+        now = now or datetime.now()
+        if self.state is None and not self.load():
+            return []
+        d = now.strftime("%Y-%m-%d")
+        rules = self.strategy.get("sell_rules") or {}
+        # 注: 策略/回测中 sell_rules 以小数存储(0.08/0.05, 同 backtest.py),
+        # 直接读小数; 缺省 8%/5% —— 简报蓝图误除以 100, 按测试意图(8%/5%)修正。
+        tp = float(rules.get("take_profit_pct") or 0.08)
+        sl = float(rules.get("stop_loss_pct") or 0.05)
+        out = []
+        for h in list(self.state["holdings"]):
+            if h["buy_date"] >= d:          # T+1: 当日买入不卖
+                continue
+            t = (ticks or {}).get(h["code"]) or {}
+            price = float(t.get("lastPrice") or 0)
+            if price <= 0:
+                continue
+            cost = float(h["cost"])
+            if price >= cost * (1 + tp):
+                reason = "take_profit"
+            elif price <= cost * (1 - sl):
+                reason = "stop_loss"
+            else:
+                continue
+            done = self._execute_sell(h["code"], price, reason, now=now)
+            if done:
+                out.append(done)
+        snap = self._snapshot_state()
+        self.state["live_nav"] = round(self._nav_estimate(ticks), 2)
+        try:
+            self.save()
+        except Exception:
+            self._restore_state(snap)
+        return out
+
+    def _execute_sell(self, code, price, reason, now=None):
+        """卖出执行(临界段): 成交价=price×(1-slippage), 印花税仅卖出侧。"""
+        now = now or datetime.now()
+        snap = self._snapshot_state()
+        idx = next((i for i, h in enumerate(self.state["holdings"])
+                    if h["code"] == code), None)
+        if idx is None:
+            return None
+        h = self.state["holdings"][idx]
+        sell_price = round(price * (1 - self.slippage), 4)
+        amount = round(h["shares"] * sell_price, 2)
+        fee = round(amount * (self.fee_rate + self.stamp_duty
+                              + self.transfer_fee), 2)
+        cash_after = round(self.state["cash"] + amount - fee, 2)
+        d = now.strftime("%Y-%m-%d")
+        ts = now.strftime("%Y-%m-%dT%H:%M:%S")
+        self.state["cash"] = cash_after
+        self.state["holdings"].pop(idx)
+        self.state["trades"].append({
+            "ts": ts, "date": d, "side": "sell", "code": code,
+            "price": sell_price, "shares": h["shares"], "amount": amount,
+            "fee": fee, "reason": reason, "cash_after": cash_after})
+        self.state["live_nav"] = round(self._nav_estimate(), 2)
+        try:
+            self.save()
+        except Exception:
+            self._restore_state(snap)
+            return None
+        return {"code": code, "price": sell_price, "shares": h["shares"],
+                "amount": amount, "fee": fee, "reason": reason}
