@@ -1,0 +1,13 @@
+{
+  "id": "first_board_v04",
+  "name": "首板0.04 三维度评估",
+  "description": "F1-F7 基础上增加 F8 行业边际变化(商品期货20日涨幅>+3%)与 F9 板块延展性(有高度且扩张), 九因子 1.0 平权。",
+  "market_gate": {"model": "node", "threshold": 1, "factors": ["N1"]},
+  "scoring_models": [
+    {"id": "first_board", "name": "首板", "weight": 1.0,
+     "factors": ["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9"]}
+  ],
+  "composite": {"mode": "top3_weighted", "weights": [1.0], "cap": 9.0},
+  "filters": {"candidate_min_model": 3, "environment_threshold": 1},
+  "sell_rules": {"take_profit_pct": 0.08, "stop_loss_pct": 0.05, "max_hold_days": 5}
+}
