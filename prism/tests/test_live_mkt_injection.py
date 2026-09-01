@@ -136,6 +136,42 @@ def _mk_strategy(for_factor):
     }
 
 
+def test_run_screen_f9_hits_with_live_style_pool():
+    """实盘通路(F9): strategy_web/data_source.get_limit_up_stocks 产物条目
+    无 boards 键, F9 连板判定改用 zt_prev(今日∩昨日)后 run_screen 全链路
+    可命中候选(修复前 boards 恒缺失 → 连板恒 0 → F9 实盘完全失效)。"""
+    reg.scan_factors("prism.factors", force=True)   # 注册真实 F9/N1(_fresh_registry 已 reset)
+    # 实盘样式涨停池条目(与 data_source.get_limit_up_stocks 返回同形, 无 boards)
+    ups = [
+        {"code": "600000.SH", "name": "浦发银行", "last": 10.0,
+         "last_close": 9.09, "up_stop_price": 10.0, "sealed": True,
+         "amount": 1e8, "volume": 1e6, "float_volume": 1e9,
+         "open_date": "1999-11-10"},
+        {"code": "000001.SZ", "name": "平安银行", "last": 11.0,
+         "last_close": 10.0, "up_stop_price": 11.0, "sealed": True,
+         "amount": 1e8, "volume": 1e6, "float_volume": 1e9,
+         "open_date": "1991-04-03"},
+        {"code": "000002.SZ", "name": "万科A", "last": 9.9,
+         "last_close": 9.0, "up_stop_price": 9.9, "sealed": True,
+         "amount": 1e8, "volume": 1e6, "float_volume": 1e9,
+         "open_date": "1991-01-29"},
+    ]
+    smap = {"600000.SH": "BK0475", "000001.SZ": "BK0475",
+            "000002.SZ": "BK0475"}
+    market_ctx = FactorContext(
+        code="__MARKET__",
+        mkt={"zt_prev": {"date": "2026-07-02",
+                         "codes": ["600000.SH", "000001.SZ"]}},
+        sector_map=smap)
+    # 个股 ctx: 实盘构建时拿不到 mkt/sector_map, 由 run_screen 下发兜底
+    stock = FactorContext(code="600000.SH", kline=None, limit_ups=ups)
+    s = load_strategy(_mk_strategy("F9"))
+    out = run_screen(s, market_ctx, gate_factors={"N1": 1},
+                     stock_contexts={"600000.SH": stock})
+    assert len(out["candidates"]) == 1, out["summary"]
+    assert out["candidates"][0]["factors"]["F9"] == 1
+
+
 def test_run_screen_downgrades_mkt_and_sector_map():
     @reg.factor(id="N1", name="n", category="node", description="")
     def f_n(ctx):

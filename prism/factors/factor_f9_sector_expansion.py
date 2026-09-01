@@ -10,8 +10,13 @@
 prev_n 恒 0 → "今日≥昨日"恒真(扩张误判)。prev_day_pool 直接透传
 zt_history 缓存条目 code(本就是 QMT 带后缀格式), data.build_market_context
 注入 sector_map 时按首位补 .SH/.SZ 后缀, 两端一致。
-有高度: 板块内当日涨停 ≥3 家 且 连板股(boards≥2) ≥2 只;
+有高度: 板块内当日涨停 ≥3 家 且 连板股 ≥2 只;
 在扩张: 板块今日涨停家数 ≥ 昨日。
+连板股口径(v04 修复, live/回测统一): 昨日也涨停的今日涨停股
+(今日池 code ∈ mkt["zt_prev"]["codes"], 连续两日涨停=连板≥2)。
+boards 字段不再使用——实盘涨停池条目(strategy_web/data_source.
+get_limit_up_stocks 产物)无该键, 按 boards 判定实盘恒 0; 今日∩昨日
+判定零新依赖且两侧口径一致。
 昨日池缺失 → fail-closed 0(无昨日基准无法判定扩张)。"""
 from prism.registry import factor
 from prism._utils import sector_count
@@ -31,9 +36,10 @@ def compute(ctx):
     today_n = sector_count(ctx.code or "", sector_map, ups)
     if today_n < 3:
         return {"score": 0, "note": "板块涨停%d家(<3)" % today_n}
+    prev_set = set(prev)   # O(1) 成员查询, 避免 O(n²)
     lb = sum(1 for c in ups
              if sector_map.get(c.get("code")) == scode
-             and (c.get("boards") or 0) >= 2)
+             and c.get("code") in prev_set)
     if lb < 2:
         return {"score": 0, "note": "板块连板%d只(<2)" % lb}
     prev_n = sum(1 for c in prev if sector_map.get(c) == scode)
@@ -41,4 +47,5 @@ def compute(ctx):
         return {"score": 0,
                 "note": "今日%d家<昨日%d家 不扩张" % (today_n, prev_n)}
     return {"score": 1,
-            "note": "板块涨停%d家 连板%d只 昨日%d家" % (today_n, lb, prev_n)}
+            "note": "板块涨停%d家 连板%d只(昨日亦板) 昨日%d家"
+                    % (today_n, lb, prev_n)}
