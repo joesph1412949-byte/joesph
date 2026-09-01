@@ -368,6 +368,29 @@ class PaperAccount:
         """日期归一化: 去横线("2026-09-01"→"20260901"), 与K线索引同口径比较。"""
         return str(s).replace("-", "")
 
+    def _kline_day_strs(self, df):
+        """K线逐日日期(YYYYMMDD 列表, 与 df 行序一致)。
+
+        优先 df["time"] 列(epoch 毫秒→本地日期, 与 zt_history._kline_dates
+        同款语义); 无 time 列才用 index 兜底且只保留 8 位纯数字项。
+        真实数据源(xtdata.get_market_data_ex)新 schema: df 可能以 time 列
+        承载日期、index 为 RangeIndex/整数 —— 直接 str(index) 产出非日期串,
+        到期判定永假(持仓静默永不出场)。坏值行跳过, 不毒化整段提取。"""
+        out = []
+        if "time" in getattr(df, "columns", []):
+            for t in df["time"]:
+                try:
+                    out.append(datetime.fromtimestamp(
+                        int(t) / 1000.0).strftime("%Y%m%d"))
+                except Exception:
+                    continue
+            return out
+        for ix in df.index:
+            s = self._n8(ix)
+            if len(s) == 8 and s.isdigit():
+                out.append(s)
+        return out
+
     def max_hold_days(self):
         """策略最大持有交易日(sell_rules.max_hold_days, 缺省 5)。"""
         rules = self.strategy.get("sell_rules") or {}
@@ -377,12 +400,13 @@ class PaperAccount:
         """到期判定(缺省): 持仓股K线中 buy_date 之后的交易日数 >= max_hold_days。"""
         try:
             df = provider.ds.get_kline(code, days=15)
+            days = self._kline_day_strs(df)
         except Exception:
             return False
         if df is None or len(df) == 0:
             return False
         b = self._n8(buy_date)
-        after = [ix for ix in df.index if self._n8(ix) > b]
+        after = [s for s in days if s > b]
         return len(after) >= self.max_hold_days()
 
     def _nav_at(self, close_fn, d):
