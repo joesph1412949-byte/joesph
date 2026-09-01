@@ -550,11 +550,30 @@ def test_strategy_activate(client, tmp_path, monkeypatch):
     assert engine.active_strategy_id() == "my"     # 指针已写(tmp 注入)
 
 
-def test_strategies_list_has_active(client, monkeypatch):
+def test_strategies_list_has_active(client):
     import prism.engine as engine
     r = client.get("/api/strategies")
     assert r.status_code == 200
     assert r.get_json()["active"] == engine.active_strategy_id()
+
+
+def test_strategies_list_skips_pointer_file(client, tmp_path, monkeypatch):
+    """I-1(审查): .active.json 指针被 *.json glob 误收 → 列表混入
+    {id:…, name:None} 伪条目。锁定: 列表仅含真策略, active 照常透出。"""
+    import json as _json
+    import prism.engine as engine
+    monkeypatch.setattr(app_module, "STRATEGIES_DIR", tmp_path)
+    monkeypatch.setattr(engine, "STRATEGIES_DIR", tmp_path)
+    (tmp_path / "my.json").write_text(
+        _json.dumps({"id": "my", "name": "我的策略", "description": "d"}),
+        encoding="utf-8")
+    engine.set_active_strategy("my")     # 生成 .active.json(伪条目源头)
+    r = client.get("/api/strategies")
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["ok"] is True
+    assert [s["id"] for s in data["strategies"]] == ["my"]   # 无 .active 伪条目
+    assert data["active"] == "my"
 
 
 def test_strategy_create_trial_load_fail_no_write(client, tmp_path, monkeypatch):

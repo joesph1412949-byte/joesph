@@ -485,6 +485,8 @@ def api_factors():
 def api_strategies():
     out = []
     for p in sorted(STRATEGIES_DIR.glob("*.json")):
+        if p.name.startswith("."):      # .active.json 指针不是策略(审查 I-1)
+            continue
         try:
             data = _json.loads(p.read_text(encoding="utf-8"))
             out.append({"id": data.get("id"), "name": data.get("name"),
