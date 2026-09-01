@@ -244,3 +244,108 @@ def set_active_strategy(sid, pointer_path=None):
         {"id": sid, "updated": datetime.now().isoformat(timespec="seconds")},
         ensure_ascii=False, indent=1), encoding="utf-8")
     os.replace(tmp, p)
+
+
+# ---------------- 策略校验器(策略编辑器 spec §3/§4) ----------------
+
+
+def _num(v, default):
+    """宽松取数: None → default; 非数值 → nan(调用方按非法处理)。"""
+    try:
+        return float(v) if v is not None else float(default)
+    except Exception:
+        return float("nan")
+
+
+def validate_strategy_payload(payload, reg=None):
+    """策略编辑器 payload 全规则校验(spec §4)。返回 (ok, errors, strategy)。
+
+    errors 非空 → strategy=None(零写入契约)。全过才组装 dict:
+    id=None 由端点生成; cap 自动 = Σ(模型权重×对齐后因子权重和) round 2;
+    因子权重对齐 = 截断到因子数、不足补 1.0。
+    """
+    from prism import registry as _reg
+    reg = reg or _reg
+    if not isinstance(payload, dict):
+        payload = {}    # ponytail: 脏 body 不崩, 落入"名称非空"等既有错误路径
+    errors = []
+    name = str(payload.get("name") or "").strip()
+    if not name or len(name) > 40:
+        errors.append("策略名称: 需非空且不超过40字")
+    models = payload.get("models") or []
+    if not 1 <= len(models) <= 3:
+        errors.append("评分模型: 需1-3个")
+    seen = set()
+    model_rows, model_weights = [], []
+    for i, m in enumerate(models, 1):
+        if not isinstance(m, dict):
+            errors.append("模型%d: 结构非法" % i)
+            continue
+        fs = list(m.get("factors") or [])
+        if not fs:
+            errors.append("模型%d: 至少勾选1个因子" % i)
+        for fid in fs:
+            if fid not in reg.FACTORS:
+                errors.append("模型%d: 因子 %s 不存在" % (i, fid))
+            if fid in seen:
+                errors.append("因子 %s 在多个模型重复" % fid)
+            seen.add(fid)
+        try:
+            raw_w = [float(x) for x in (m.get("weights") or [])][:len(fs)]
+        except (TypeError, ValueError):
+            raw_w = []
+            errors.append("模型%d: 因子权重需为正数" % i)
+        fws = raw_w + [1.0] * (len(fs) - len(raw_w))
+        # 0<w<inf 一次性挡掉 ≤0 / nan / inf(JSON 可传 NaN 字面量)
+        if any(not (0 < w < float("inf")) for w in fws):
+            errors.append("模型%d: 因子权重需为正数" % i)
+        mw = _num(m.get("weight"), 1.0)
+        if not (0 < mw < float("inf")):
+            errors.append("模型%d: 模型权重需为正数" % i)
+        model_rows.append({"id": m.get("id") or "model_%d" % i,
+                           "name": m.get("name") or m.get("id") or "自定义",
+                           "weight": mw, "factors": fs, "weights": fws})
+        model_weights.append(mw)
+    gate = list(payload.get("gate_factors") or [])
+    for fid in gate:
+        meta = reg.FACTORS.get(fid)
+        if meta is None or meta.get("category") != "node":
+            errors.append("门槛因子 %s 不是环境门槛类(node)" % fid)
+    gt = payload.get("gate_threshold")
+    try:
+        gt = int(gt) if gt is not None else 0
+    except Exception:
+        gt = -1
+    if gt < 0:
+        errors.append("门槛线: 需≥0整数")
+    try:
+        cmm = int(payload.get("candidate_min_model"))
+    except Exception:
+        cmm = -1
+    if cmm < 1:
+        errors.append("候选资质线: 需≥1整数")
+    s = payload.get("sell")
+    if not isinstance(s, dict):
+        s = {}
+    tp = _num(s.get("take_profit_pct"), 0.08)
+    sl = _num(s.get("stop_loss_pct"), 0.05)
+    hold = _num(s.get("max_hold_days"), 5)
+    if not 0 < tp <= 0.5:
+        errors.append("止盈比例需在 0~50%")
+    if not 0 < sl <= 0.5:
+        errors.append("止损比例需在 0~50%")
+    if not 1 <= hold <= 30:
+        errors.append("持有天数需 1~30")
+    if errors:
+        return False, errors, None
+    cap = round(sum(m["weight"] * sum(m["weights"]) for m in model_rows), 2)
+    strategy = {
+        "id": None, "name": name, "description": "网页编辑器生成",
+        "market_gate": {"model": "node", "threshold": gt, "factors": gate},
+        "scoring_models": model_rows,
+        "composite": {"mode": "top3_weighted", "weights": model_weights,
+                      "cap": cap},
+        "filters": {"candidate_min_model": cmm, "environment_threshold": gt},
+        "sell_rules": {"take_profit_pct": tp, "stop_loss_pct": sl,
+                       "max_hold_days": int(hold)}}
+    return True, [], strategy
