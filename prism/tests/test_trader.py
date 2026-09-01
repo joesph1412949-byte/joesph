@@ -126,8 +126,13 @@ class _FakeProvider:
 
 
 @pytest.fixture(autouse=True)
-def _factors():
-    """注册 run_daily 全流程所需的门槛/个股因子(NG1-3 市场门槛, AS1 个股)。"""
+def _factors(tmp_path, monkeypatch):
+    """注册 run_daily 全流程所需的门槛/个股因子(NG1-3 市场门槛, AS1 个股)。
+
+    同时隔离真实暂停开关: PAUSE_FILE 统一指向 tmp_path,
+    测试不得读取实盘暂停文件 D:/QMT_SIGNALS/paused。
+    """
+    monkeypatch.setattr(trader, "PAUSE_FILE", str(tmp_path / "paused"))
     reg.reset()
     for fid in ("NG1", "NG2", "NG3"):
         reg.factor(id=fid, name=fid, category="node", description="")(
