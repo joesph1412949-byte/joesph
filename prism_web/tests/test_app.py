@@ -498,3 +498,94 @@ def test_paper_endpoints_with_ledger(client, tmp_path, monkeypatch):
     assert "total_return_pct" in s and "nav_points" in s
     d = client.get("/api/paper/detail").get_json()
     assert d["holdings"][0]["code"] == "600000.SH"
+
+
+# ---------------- 策略编辑器端点(Task 4: create/activate/active 字段) ----------------
+
+_EDITOR_PAYLOAD = {
+    "name": "测试组合",
+    "models": [{"id": "first_board", "name": "首板", "weight": 1.0,
+                "factors": ["F1", "F8"], "weights": [1, 1]}],
+    "gate_factors": ["N1"], "gate_threshold": 1,
+    "candidate_min_model": 3,
+    "sell": {"take_profit_pct": 0.08, "stop_loss_pct": 0.05,
+             "max_hold_days": 5}}
+
+
+def test_strategy_create_ok(client, tmp_path, monkeypatch):
+    import prism.engine as engine
+    monkeypatch.setattr(app_module, "STRATEGIES_DIR", tmp_path)
+    r = client.post("/api/strategies/create", json=_EDITOR_PAYLOAD)
+    assert r.status_code == 200
+    sid = r.get_json()["id"]
+    assert sid.startswith("custom_")
+    p = tmp_path / ("%s.json" % sid)
+    assert p.is_file()
+    s = engine.load_strategy(p)          # 试载即可用
+    assert s["id"] == sid and s["composite"]["cap"] == 2.0
+
+
+def test_strategy_create_reject_and_no_write(client, tmp_path, monkeypatch):
+    bad = dict(_EDITOR_PAYLOAD, models=[{"id": "m", "name": "m",
+                                        "weight": 1.0,
+                                        "factors": ["F1", "ZZ9"],
+                                        "weights": []}])
+    r = client.post("/api/strategies/create", json=bad)
+    assert r.status_code == 400
+    assert r.get_json()["ok"] is False and r.get_json()["errors"]
+    assert not any(tmp_path.glob("custom_*.json"))
+
+
+def test_strategy_activate(client, tmp_path, monkeypatch):
+    import prism.engine as engine
+    monkeypatch.setattr(app_module, "STRATEGIES_DIR", tmp_path)
+    monkeypatch.setattr(engine, "STRATEGIES_DIR", tmp_path)
+    (tmp_path / "my.json").write_text(
+        engine.json.dumps({"id": "my", "name": "x",       # engine 用 import json(蓝图 _json 笔误修正)
+                           "scoring_models": []}), encoding="utf-8")
+    r404 = client.post("/api/strategies/no_such/activate")
+    assert r404.status_code == 404
+    r = client.post("/api/strategies/my/activate")
+    assert r.status_code == 200 and r.get_json()["active"] == "my"
+    assert engine.active_strategy_id() == "my"     # 指针已写(tmp 注入)
+
+
+def test_strategies_list_has_active(client, monkeypatch):
+    import prism.engine as engine
+    r = client.get("/api/strategies")
+    assert r.status_code == 200
+    assert r.get_json()["active"] == engine.active_strategy_id()
+
+
+def test_strategy_create_trial_load_fail_no_write(client, tmp_path, monkeypatch):
+    """试载硬条件(Task 3 复审): 校验已过但 load_strategy 抛错 → 400 + 零写盘。"""
+    def _boom(*a, **k):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(app_module, "STRATEGIES_DIR", tmp_path)
+    monkeypatch.setattr(app_module, "load_strategy", _boom)
+    r = client.post("/api/strategies/create", json=_EDITOR_PAYLOAD)
+    assert r.status_code == 400
+    assert "试载失败" in r.get_json()["errors"][0]
+    assert not any(tmp_path.iterdir())   # 零写盘: 正式文件与 .tmp 都不留
+
+
+def test_strategy_create_never_overwrites_same_second(client, tmp_path, monkeypatch):
+    """spec §7-1: 同秒 id 冲突 → 加 _2 序号, 绝不覆盖已存在文件。"""
+    import datetime
+    monkeypatch.setattr(app_module, "STRATEGIES_DIR", tmp_path)
+
+    class _FixedDT:                      # 固定时钟 → 冲突路径可复现
+        class datetime:                  # 与 app 的 _dt(datetime 模块) 同形
+            @staticmethod
+            def now():
+                return datetime.datetime(2026, 9, 1, 12, 0, 0)
+
+    monkeypatch.setattr(app_module, "_dt", _FixedDT)
+    clash = tmp_path / "custom_20260901_120000.json"
+    clash.write_text('{"id": "sentinel"}', encoding="utf-8")
+    r = client.post("/api/strategies/create", json=_EDITOR_PAYLOAD)
+    assert r.status_code == 200
+    sid = r.get_json()["id"]
+    assert sid == "custom_20260901_120000_2"
+    assert clash.read_text(encoding="utf-8") == '{"id": "sentinel"}'  # 未被覆盖
+    assert (tmp_path / (sid + ".json")).is_file()

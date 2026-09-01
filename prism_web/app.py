@@ -491,7 +491,9 @@ def api_strategies():
                         "description": data.get("description", "")})
         except Exception:
             continue
-    return jsonify({"ok": True, "strategies": out})
+    from prism.engine import active_strategy_id
+    return jsonify({"ok": True, "strategies": out,
+                    "active": active_strategy_id()})
 
 
 @app.route("/api/strategy/<sid>")
@@ -502,6 +504,50 @@ def api_strategy(sid):
     if not p.is_file():
         return jsonify({"ok": False, "error": "策略不存在: %s" % sid}), 404
     return jsonify({"ok": True, "strategy": _json.loads(p.read_text(encoding="utf-8"))})
+
+
+@app.route("/api/strategies/create", methods=["POST"])
+def api_strategy_create():
+    """网页编辑器新建策略(spec §3): 校验→生成 id→试载→失败零写盘→原子写。
+    # ponytail: MVP 只增不改不删(spec §7-4), 编辑/删除端点有需求再加。"""
+    from prism.engine import validate_strategy_payload
+    payload = request.get_json(silent=True) or {}
+    ok, errors, strat = validate_strategy_payload(payload)
+    if not ok:
+        return jsonify({"ok": False, "errors": errors}), 400
+    base = "custom_" + _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    sid = base
+    n = 2
+    while (STRATEGIES_DIR / ("%s.json" % sid)).exists():
+        sid = "%s_%d" % (base, n)
+        n += 1
+    strat["id"] = sid
+    strat["description"] = ("网页编辑器生成 %s"
+                            % _dt.datetime.now().isoformat(timespec="seconds"))
+    try:
+        load_strategy(strat)            # 终极校验: 试载(spec §4-7, Task3 复审硬条件)
+    except Exception as e:
+        return jsonify({"ok": False,
+                        "errors": ["引擎试载失败: %r" % e]}), 400
+    p = STRATEGIES_DIR / ("%s.json" % sid)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(_json.dumps(strat, ensure_ascii=False, indent=1),
+                   encoding="utf-8")
+    os.replace(tmp, p)
+    return jsonify({"ok": True, "id": sid})
+
+
+@app.route("/api/strategies/<sid>/activate", methods=["POST"])
+def api_strategy_activate(sid):
+    """设为默认策略(spec §5): sid 白名单 ∧ 文件存在 → 写指针。"""
+    from prism.engine import set_active_strategy
+    if not _valid_sid(sid):
+        return jsonify({"ok": False, "error": "策略不存在: %s" % sid}), 404
+    p = STRATEGIES_DIR / ("%s.json" % sid)
+    if not p.is_file():
+        return jsonify({"ok": False, "error": "策略不存在: %s" % sid}), 404
+    set_active_strategy(sid)
+    return jsonify({"ok": True, "active": sid})
 
 
 @app.route("/api/backtest")
