@@ -297,7 +297,7 @@ def screen():
     try:
         payload = request.get_json(silent=True) or {}
         sid = (payload.get("strategy") or request.form.get("strategy")
-               or request.args.get("strategy") or "default")
+               or request.args.get("strategy") or "first_board_v04")
         try:
             strategy = _load_strategy_for_screen(sid)
         except Exception as e:

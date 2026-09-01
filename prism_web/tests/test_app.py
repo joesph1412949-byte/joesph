@@ -60,6 +60,33 @@ def test_strategy_detail(client):
     assert data["strategy"]["scoring_models"]
 
 
+def test_screen_default_strategy_is_v04(client, tmp_path, monkeypatch):
+    """/api/screen 无 strategy 参数 → 默认 first_board_v04(实盘切换,
+    2026-09-01 用户决策; v03 起默认为 default.json, 本测试锁定新默认)。"""
+    monkeypatch.setattr(app_module.ds_obj, "_connected", True)
+    monkeypatch.setattr(app_module, "SNAPSHOT_PATH",
+                        tmp_path / "screen_result.json")
+    monkeypatch.setattr(app_module, "perf_store_obj",
+                        type("FakePerf", (), {
+                            "archive_daily": lambda self, c, d=None: None})())
+
+    seen = {}
+
+    def fake_run_screen(strategy, market_ctx, gate_factors=None,
+                        stock_contexts=None):
+        seen["id"] = strategy["id"]
+        return {"environment_ok": True, "gate_score": 4, "candidates": [],
+                "summary": {"candidate_count": 0, "a_count": 0, "b_count": 0,
+                            "c_count": 0, "d_count": 0}}
+    monkeypatch.setattr(app_module, "run_screen", fake_run_screen)
+    monkeypatch.setattr(app_module, "DataProvider",
+                        lambda ds=None, manual=None: _stub_provider())
+
+    r = client.post("/api/screen")          # 不传任何策略参数
+    assert r.status_code == 200
+    assert seen["id"] == "first_board_v04"
+
+
 def test_strategy_detail_unknown_404(client):
     r = client.get("/api/strategy/no_such")
     assert r.status_code == 404
