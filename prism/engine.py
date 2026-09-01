@@ -4,6 +4,8 @@
 与旧 screen.py 的输出结构保持同构, 网页/绩效/桥无缝对接。
 """
 import json
+import os
+from datetime import datetime
 from pathlib import Path
 
 from prism import registry as reg
@@ -212,3 +214,33 @@ def run_screen(strategy, market_ctx, gate_factors=None, stock_contexts=None):
             1 for c in candidates if c["scores"]["grade"] == g)
     return {"environment_ok": environment_ok, "gate_score": gate_score,
             "candidates": candidates, "summary": summary}
+
+
+# ---------------- 默认策略指针(策略编辑器 spec §5) ----------------
+STRATEGIES_DIR = Path(__file__).parent / "strategies"
+ACTIVE_FILENAME = ".active.json"
+_ACTIVE_FALLBACK = "first_board_v04"
+
+
+def active_strategy_id(pointer_path=None):
+    """读默认策略指针; 缺文件/损坏/所指策略不存在 → 回落 first_board_v04。"""
+    p = Path(pointer_path) if pointer_path \
+        else STRATEGIES_DIR / ACTIVE_FILENAME
+    try:
+        sid = json.loads(p.read_text(encoding="utf-8")).get("id")
+    except Exception:
+        return _ACTIVE_FALLBACK
+    if not sid or not (STRATEGIES_DIR / ("%s.json" % sid)).is_file():
+        return _ACTIVE_FALLBACK
+    return sid
+
+
+def set_active_strategy(sid, pointer_path=None):
+    """写默认策略指针(原子写; sid 存在性由调用方校验)。"""
+    p = Path(pointer_path) if pointer_path \
+        else STRATEGIES_DIR / ACTIVE_FILENAME
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(
+        {"id": sid, "updated": datetime.now().isoformat(timespec="seconds")},
+        ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, p)

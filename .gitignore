@@ -95,3 +95,6 @@ scripts/
 
 # 临时工具脚本（session-delete 开发辅助）
 .tmp_tools/
+
+# 默认策略指针(本地运行时状态, 绝不提交)
+prism/strategies/.active.json
