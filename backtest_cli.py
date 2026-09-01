@@ -284,10 +284,11 @@ def main():
         cache = _md._load_cache()
         if cache:
             # 组装 market_data 结构: sector(板块K线) + global(全球指数)
-            # + sector_flow(板块资金流, SEC3 用)
+            # + sector_flow(板块资金流, SEC3 用) + futures(商品期货, F8 用)
             mkt = {"sector": cache.get("kline") or {},
                    "global": cache.get("global") or {},
-                   "sector_flow": cache.get("flow") or {}}
+                   "sector_flow": cache.get("flow") or {},
+                   "futures": _md.futures_snapshot()}
             smap = cache.get("sector_map") or {}
             # sector_map 期望 {code: 行业代码}, stock_sector 返回行业代码
             sector_map = {}

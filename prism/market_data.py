@@ -655,6 +655,82 @@ def build_global_cache(probe=None, beg=BACKFILL_BEG, end=None,
     return globald
 
 
+# ------------------------------------------------- 商品期货(首板v04 F8 用)
+
+# 行业名 → 商品期货品种(名称驱动, 规避申万代码在 SW2014/SW2021 间的版本差异;
+# 板块代码在 futures_snapshot 组装时从缓存 sectors 段按名称反查)。
+# 品种代码 = akshare sina 主力连续符号, 可用性以 pt_futures_probe 实测为准,
+# 采集失败的品种静默跳过(fail-open)。
+COMMODITY_BY_NAME = {
+    "基础化工": ["MA0", "TA0"],
+    "煤炭": ["JM0"],
+    "钢铁": ["RB0", "HC0"],
+    "有色金属": ["CU0", "AL0", "SI0"],
+    "石油石化": ["SC0"],
+    "农林牧渔": ["LH0", "M0"],
+    "食品饮料": ["SR0", "Y0"],
+    "建筑材料": ["FG0"],
+    "电力设备": ["LC0"],
+}
+# 品种可用性为 Task 1 探针实测(2026-08-31, 16/16 可用): 动力煤 ZC0 停更于
+# 2022-12-30(死数据会让 F8 用旧涨幅误判, 删除); 工业硅符号为 SI0(PS0 实为
+# 多晶硅)。详证 .superpowers/sdd/task-v04-1-report.md。
+
+_FUTURES_NAMES = {
+    "MA0": "甲醇", "TA0": "PTA", "ZC0": "动力煤", "JM0": "焦煤",
+    "RB0": "螺纹钢", "HC0": "热卷", "CU0": "铜", "AL0": "铝",
+    "SC0": "原油", "LH0": "生猪", "M0": "豆粕", "Y0": "豆油",
+    "SR0": "白糖", "FG0": "玻璃", "LC0": "碳酸锂", "SI0": "工业硅",
+}
+
+
+def _fetch_futures_daily(sym):
+    """单品种商品期货日线(akshare sina 主力连续)。返回 DataFrame(date, close)。"""
+    import akshare as ak
+    return ak.futures_zh_daily_sina(symbol=sym)
+
+
+def fetch_futures(force=False):
+    """采集全部映射品种日线 → 缓存 futures 键。
+    返回 {品种代码: {"name", "dates", "close"}}; 单品种失败跳过(fail-open)。
+    force=True 强制重采(默认走缓存)。"""
+    cache = _load_cache()
+    fut = {} if force else dict(cache.get("futures") or {})
+    todo = [sym for sym in _FUTURES_NAMES if sym not in fut]
+    for sym in todo:
+        try:
+            df = _fetch_futures_daily(sym)
+            if df is None or len(df) < 60:
+                continue
+            dates = [str(d) for d in df["date"].tolist()]
+            closes = [float(x) for x in df["close"].tolist()]
+            fut[sym] = {"name": _FUTURES_NAMES[sym],
+                        "dates": dates, "close": closes}
+        except Exception as e:
+            logger.warning("期货 %s 采集失败: %r", sym, e)
+        time.sleep(0.5)
+    cache["futures"] = fut
+    _save_cache(cache)
+    return fut
+
+
+def futures_snapshot():
+    """组装 mkt["futures"] 快照: {板块代码: {"name", "commodities": {品种: K线}}}。
+    板块代码/名称来自缓存 sectors 段(与 sector_map / mkt["sector"] 同源);
+    行业 → 品种按名称映射(COMMODITY_BY_NAME), 无映射行业不出现。"""
+    cache = _load_cache()
+    fut = fetch_futures()
+    out = {}
+    for scode, rec in (cache.get("sectors") or {}).items():
+        name = (rec or {}).get("name") or ""
+        syms = COMMODITY_BY_NAME.get(name)
+        if not syms:
+            continue
+        comms = {sym: fut[sym] for sym in syms if sym in fut}
+        out[scode] = {"name": name, "commodities": comms}
+    return out
+
+
 # ---------------------------------------------------------------- 查询
 
 def build_sector_map(feed=None, progress=None):

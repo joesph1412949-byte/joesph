@@ -117,6 +117,23 @@ def _slice_mkt(mkt, asof):
                     "dates": [dates[i] for i in keep],
                     "main_net_in": [rec["main_net_in"][i] for i in keep],
                 }
+    # 商品期货同样切片(F8 行业边际变化因子用)
+    futs = mkt.get("futures") if isinstance(mkt, dict) else {}
+    if futs:
+        out["futures"] = {}
+        for scode, rec in futs.items():
+            comms = {}
+            for sym, k in (rec.get("commodities") or {}).items():
+                dates = k.get("dates") or []
+                keep = [i for i, d in enumerate(dates) if d <= asof_str]
+                if keep:
+                    comms[sym] = {
+                        "name": k.get("name"),
+                        "dates": [dates[i] for i in keep],
+                        "close": [k["close"][i] for i in keep],
+                    }
+            out["futures"][scode] = {"name": rec.get("name"),
+                                     "commodities": comms}
     return out
 
 
