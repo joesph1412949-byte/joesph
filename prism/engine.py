@@ -11,6 +11,7 @@ from pathlib import Path
 from prism import registry as reg
 from prism.context import FactorContext
 from prism import sector_score
+_registry = reg  # validate 的 reg=None 形参遮蔽模块级名 → 别名兜底(审查: 删函数内本地 import)
 
 # 综合分组合方式
 composite_modes = {
@@ -100,8 +101,15 @@ def _compute_scores(ctx, strategy):
     factors_out = {}
     for m in strategy["scoring_models"]:
         total = 0.0
-        for item in m.get("factors", []):
+        fs = m.get("factors") or []
+        try:
+            ws = [float(w) for w in (m.get("weights") or [])]
+        except (TypeError, ValueError):
+            ws = []     # 脏权重 → 整体回退 1.0(与校验器兜底一致)
+        for idx, item in enumerate(fs):
             fid, weight, op, threshold = _factor_entry(item)
+            if isinstance(item, str) and idx < len(ws):
+                weight = ws[idx]    # I-2: 字符串形态按位读模型权重(缺位/无键→1.0)
             raw, hit = _factor_hit(ctx, fid, op, threshold)
             factors_out[fid] = 1 if hit else 0
             if hit:
@@ -264,8 +272,7 @@ def validate_strategy_payload(payload, reg=None):
     id=None 由端点生成; cap 自动 = Σ(模型权重×对齐后因子权重和) round 2;
     因子权重对齐 = 截断到因子数、不足补 1.0。
     """
-    from prism import registry as _reg
-    reg = reg or _reg
+    reg = reg or _registry
     if not isinstance(payload, dict):
         payload = {}    # ponytail: 脏 body 不崩, 落入"名称非空"等既有错误路径
     errors = []
@@ -276,6 +283,7 @@ def validate_strategy_payload(payload, reg=None):
     if not 1 <= len(models) <= 3:
         errors.append("评分模型: 需1-3个")
     seen = set()
+    seen_ids = set()
     model_rows, model_weights = [], []
     for i, m in enumerate(models, 1):
         if not isinstance(m, dict):
@@ -285,6 +293,9 @@ def validate_strategy_payload(payload, reg=None):
         if not fs:
             errors.append("模型%d: 至少勾选1个因子" % i)
         for fid in fs:
+            if not isinstance(fid, str):    # I-1: 嵌套条目不可哈希 → 明确报错不崩
+                errors.append("模型%d: 因子 %r 需为字符串编号" % (i, fid))
+                continue
             if fid not in reg.FACTORS:
                 errors.append("模型%d: 因子 %s 不存在" % (i, fid))
             if fid in seen:
@@ -302,12 +313,19 @@ def validate_strategy_payload(payload, reg=None):
         mw = _num(m.get("weight"), 1.0)
         if not (0 < mw < float("inf")):
             errors.append("模型%d: 模型权重需为正数" % i)
-        model_rows.append({"id": m.get("id") or "model_%d" % i,
+        mid = m.get("id") or "model_%d" % i
+        if str(mid) in seen_ids:        # M-2: 模型 id 查重(str 键, 脏 id 不崩)
+            errors.append("模型 id %s 重复" % mid)
+        seen_ids.add(str(mid))
+        model_rows.append({"id": mid,
                            "name": m.get("name") or m.get("id") or "自定义",
                            "weight": mw, "factors": fs, "weights": fws})
         model_weights.append(mw)
     gate = list(payload.get("gate_factors") or [])
     for fid in gate:
+        if not isinstance(fid, str):    # I-1 同类: 门槛因子嵌套条目防崩
+            errors.append("门槛因子 %r 需为字符串编号" % fid)
+            continue
         meta = reg.FACTORS.get(fid)
         if meta is None or meta.get("category") != "node":
             errors.append("门槛因子 %s 不是环境门槛类(node)" % fid)
@@ -326,6 +344,7 @@ def validate_strategy_payload(payload, reg=None):
         errors.append("候选资质线: 需≥1整数")
     s = payload.get("sell")
     if not isinstance(s, dict):
+        errors.append("卖出规则: 需为对象")   # ponytail: 不再静默落 {}
         s = {}
     tp = _num(s.get("take_profit_pct"), 0.08)
     sl = _num(s.get("stop_loss_pct"), 0.05)

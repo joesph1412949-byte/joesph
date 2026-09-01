@@ -87,3 +87,36 @@ def test_weights_alignment():
     assert ok2 is True
     assert s2["scoring_models"][0]["weights"] == [2.0, 1.0, 1.0]
     assert s2["composite"]["cap"] == round(0.5 * 4.0, 2)
+
+
+# ---------------- 审查修复回归(I-1 防崩 / M-2 id查重 / sell 显式报错) ----------------
+
+def test_factor_non_string_no_crash():
+    """I-1: factors 携带嵌套 list/dict 条目 → ok=False 明确报错, 不再 TypeError 500。"""
+    ok, errs, _ = validate_strategy_payload(_good(
+        models=[{"id": "m", "name": "m", "weight": 1.0,
+                 "factors": [["F2"], {"id": "F8"}], "weights": []}]))
+    assert ok is False
+    assert any("需为字符串编号" in e for e in errs)
+
+
+def test_gate_non_string_no_crash():
+    """I-1 同类: 门槛因子携带嵌套条目 → 明确报错, 不崩。"""
+    ok, errs, _ = validate_strategy_payload(_good(gate_factors=[["N1"]]))
+    assert ok is False and any("需为字符串编号" in e for e in errs)
+
+
+def test_model_id_dup():
+    """M-2: 模型 id 重复 → 显式报错。"""
+    ok, errs, _ = validate_strategy_payload(_good(
+        models=[{"id": "m", "name": "a", "weight": 0.5,
+                 "factors": ["F1"], "weights": []},
+                {"id": "m", "name": "b", "weight": 0.5,
+                 "factors": ["F8"], "weights": []}]))
+    assert ok is False and any("模型 id m 重复" in e for e in errs)
+
+
+def test_sell_non_dict_rejected():
+    """sell 非 dict 不再静默落 {} → 显式报错(与其他字段一致性)。"""
+    ok, errs, _ = validate_strategy_payload(_good(sell="x"))
+    assert ok is False and any("卖出规则" in e for e in errs)
