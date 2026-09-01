@@ -59,6 +59,10 @@ def test_summary_and_detail(tmp_path):
     acc = _acc(tmp_path)
     assert acc.summary() == {"exists": False}      # 未初始化
     acc.init_account(created="2026-09-01")
+    acc.state["live_nav"] = 0.0            # 清零账户: 总收益应为 -100%
+    s0 = acc.summary()
+    assert s0["nav"] == 0.0 and s0["total_return_pct"] == -100.0
+    acc.state["live_nav"] = 1000000.0      # 恢复正常后再断言原有行为
     s = acc.summary()
     assert s["exists"] is True
     assert s["cash"] == 1000000.0 and s["nav"] == 1000000.0

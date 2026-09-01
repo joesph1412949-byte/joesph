@@ -108,7 +108,7 @@ class PaperAccount:
         if self.state is None and not self.load():
             return {"exists": False}
         st = self.state
-        nav = float(st.get("live_nav") or st.get("initial_capital"))
+        nav = float(st["live_nav"])
         return {
             "exists": True,
             "created": st["created"],
