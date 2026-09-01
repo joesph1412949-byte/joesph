@@ -90,7 +90,6 @@ def test_screen_default_strategy_is_v04(client, tmp_path, monkeypatch):
 def test_screen_default_follows_pointer(client, tmp_path, monkeypatch):
     """指针指向 v03 → 无参数选股用 v03。"""
     import prism.engine as engine
-    from prism.paper import PaperAccount
     monkeypatch.setattr(app_module.ds_obj, "_connected", True)
     monkeypatch.setattr(app_module, "SNAPSHOT_PATH", tmp_path / "s.json")
     monkeypatch.setattr(app_module, "perf_store_obj",

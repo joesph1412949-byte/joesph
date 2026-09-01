@@ -63,3 +63,21 @@ def test_paper_hot_reload(tmp_path, monkeypatch):
     monkeypatch.setattr(engine, "STRATEGIES_DIR", tmp_path)
     assert acc.strategy["id"] == "first_board_v03"
     assert acc.state["cash"] == 1000000.0               # 账本不动
+
+
+def test_paper_hot_reload_bad_file_keeps_old_and_logs(tmp_path, caplog,
+                                                      monkeypatch):
+    """坏策略文件热重载失败 → 保留旧策略并记 warning(spec §10)。"""
+    import logging
+    from prism.paper import PaperAccount
+    acc = PaperAccount(state_path=tmp_path / "paper.json")
+    acc.init_account()
+    assert acc.strategy["id"] == "first_board_v04"      # 首载 v04
+    # 指针指向 v03, 但 tmp 下 v03.json 是坏 JSON → 热重载失败
+    (tmp_path / "first_board_v03.json").write_text("{broken", encoding="utf-8")
+    engine.set_active_strategy("first_board_v03", pointer_path=
+                               tmp_path / engine.ACTIVE_FILENAME)
+    monkeypatch.setattr(engine, "STRATEGIES_DIR", tmp_path)
+    with caplog.at_level(logging.WARNING, logger="prism.paper"):
+        assert acc.strategy["id"] == "first_board_v04"   # 旧策略保留
+    assert any("热重载失败" in r.getMessage() for r in caplog.records)

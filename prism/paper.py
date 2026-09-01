@@ -6,6 +6,7 @@
 数据(行情/K线)只读。"""
 import copy
 import json
+import logging
 import os
 from datetime import datetime
 from pathlib import Path
@@ -57,10 +58,12 @@ class PaperAccount:
                 reg.scan_factors(force=True)   # 幂等重扫注册因子库(load_strategy 校验依赖)
                 self._strategy = load_strategy(
                     engine.STRATEGIES_DIR / ("%s.json" % sid))
-            except Exception:
+            except Exception as e:
                 if self._strategy is None:
                     raise            # 首载且失败 → 无退路, 照抛
-                # 已有旧策略 → 保留, 不中断交易循环(spec §10)
+                # 已有旧策略 → 保留, 不中断交易循环(spec §10); 记日志留痕
+                logging.getLogger("prism.paper").warning(
+                    "默认策略热重载失败, 保留旧策略 %s: %r", sid, e)
         return self._strategy
 
     # ---------- 账本 ----------
