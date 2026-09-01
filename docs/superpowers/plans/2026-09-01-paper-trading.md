@@ -1,4 +1,4 @@
-# 模拟实盘账户（100 万 / first_board_v04）Implementation Plan
+﻿# 模拟实盘账户（100 万 / first_board_v04）Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -50,7 +50,7 @@
   - `summary() -> dict`、`detail(trade_limit=50) -> dict`：未初始化 → `{"exists": False}`；正常 → 见下方结构
   - 常量 `STATE_FILENAME = ".paper_account.json"`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 # -*- coding: utf-8 -*-
@@ -123,12 +123,12 @@ def test_summary_and_detail(tmp_path):
     assert d["holdings"] == [] and d["trades"] == [] and d["nav_history"] == []
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_paper_account.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt84`
 Expected: FAIL（`prism.paper` 不存在 → ImportError/ModuleNotFoundError）
 
-- [ ] **Step 3: 实现 paper.py 账本部分**
+- [x] **Step 3: 实现 paper.py 账本部分**
 
 ```python
 # -*- coding: utf-8 -*-
@@ -265,12 +265,12 @@ class PaperAccount:
         }
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_paper_account.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt84`
 Expected: 5 passed
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add prism/paper.py prism/tests/test_paper_account.py
@@ -294,7 +294,7 @@ git commit -m "feat(prism): 模拟盘账本核心 — 原子保存/加载校验/
   - `_one_word_board(code, up_price, provider) -> bool`：当日 K 线 `low >= up_price - 0.01` → True（买不到）
   - `_execute_buy(code, up_price, now=None) -> dict|None`：手数取整、费用记账、临界段（save 失败回滚返回 None）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 # -*- coding: utf-8 -*-
@@ -443,12 +443,12 @@ def test_buy_rollback_on_save_failure(acc, monkeypatch):
     assert acc.state["holdings"] == []
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_paper_buy.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt85`
 Expected: FAIL（`buy_from_screen` 属性不存在 → AttributeError）
 
-- [ ] **Step 3: 实现买入方法组（追加到 prism/paper.py 类内）**
+- [x] **Step 3: 实现买入方法组（追加到 prism/paper.py 类内）**
 
 ```python
     # ---------- 净值估算 ----------
@@ -609,12 +609,12 @@ Expected: FAIL（`buy_from_screen` 属性不存在 → AttributeError）
 
 （配套：模块级小函数 `_today_str()` = `datetime.now().strftime("%Y-%m-%d")`；上面的 `_buyable` 先导占位写法在落盘时合并为一个函数——实现以一个 `_buyable(self, code, nav)` 为准，逻辑 = `__buyable_impl` 的内容，删除占位行。）
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_paper_buy.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt85`
 Expected: 8 passed
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add prism/paper.py prism/tests/test_paper_buy.py
@@ -635,7 +635,7 @@ git commit -m "feat(prism): 模拟盘买入执行 — 时点选股/一字板剔�
   - `sell_check(ticks, now=None) -> list`：逐持仓用实时 `lastPrice` 判定（**成本=含滑点 `cost`**；`price ≥ cost×1.08` → `take_profit`；`price ≤ cost×0.95` → `stop_loss`；**T+1：`buy_date >= 今日` 的持仓跳过**）；每轮结束同步 `live_nav`（按 ticks 盯市）并保存；返回成交列表
   - `_execute_sell(code, price, reason, now=None) -> dict|None`：`sell_price = price×(1-slippage)`；卖出费用 `amount×(fee_rate+stamp_duty+transfer_fee)`；临界段（save 失败回滚返回 None）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 # -*- coding: utf-8 -*-
@@ -727,12 +727,12 @@ def test_live_nav_updated(acc):
     assert acc.state["live_nav"] == round(600000.0 + 9800.0, 2)
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_paper_sell.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt86`
 Expected: FAIL（`sell_check` 属性不存在）
 
-- [ ] **Step 3: 实现卖出方法组（追加到类内）**
+- [x] **Step 3: 实现卖出方法组（追加到类内）**
 
 ```python
     # ---------- 卖出 ----------
@@ -805,12 +805,12 @@ Expected: FAIL（`sell_check` 属性不存在）
                 "amount": amount, "fee": fee, "reason": reason}
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_paper_sell.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt86`
 Expected: 7 passed
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add prism/paper.py prism/tests/test_paper_sell.py
@@ -833,7 +833,7 @@ git commit -m "feat(prism): 模拟盘卖出执行 — tick止盈止损/T+1/临�
   - `backfill_nav(close_fn, trade_days) -> int`：`nav_history` 末日后、≤今日的交易日逐日按收盘价补算净值（当日同时补 settled_dates）；返回补算天数
   - `summary()` 增强：追加 `nav_points = len(nav_history)`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 # -*- coding: utf-8 -*-
@@ -930,12 +930,12 @@ def test_backfill_nav(acc):
     assert [h["nav"] for h in hist][1:] == [609600.0, 609400.0, 610000.0]
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_paper_settle.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt87`
 Expected: FAIL（`settle_day` 属性不存在）
 
-- [ ] **Step 3: 实现结算方法组（追加到类内）**
+- [x] **Step 3: 实现结算方法组（追加到类内）**
 
 ```python
     # ---------- 盘后结算 ----------
@@ -1032,12 +1032,12 @@ Expected: FAIL（`settle_day` 属性不存在）
 
 （`summary()` 追加一行字段：`"nav_points": len(st["nav_history"])`。）
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_paper_settle.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt87`
 Expected: 6 passed
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add prism/paper.py prism/tests/test_paper_settle.py
@@ -1066,7 +1066,7 @@ git commit -m "feat(prism): 模拟盘结算 — 到期卖出/净值盯市定格/
   - `run_forever()`：load/缺失→init → backfill → connect → 循环 tick_once + sleep + 异常兜底记日志
   - `main()`：`python -m prism.paper_daemon` 入口
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 # -*- coding: utf-8 -*-
@@ -1196,12 +1196,12 @@ def test_tick_settle_after_close(tmp_path, monkeypatch):
 
 （说明：`test_tick_sells_in_session` 的第三行断言写成宽松形式——本测试核心是"时段内 action=tick、卖出未触发"，live_nav 语义由 Task 3 测试锁定；实现时若该行断言冗余可删，但 `action=="tick"` 与 `sells==[]` 必须保留。）
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_paper_daemon.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt88`
 Expected: FAIL（`prism.paper_daemon` 不存在）
 
-- [ ] **Step 3: 实现 paper_daemon.py（完整文件）**
+- [x] **Step 3: 实现 paper_daemon.py（完整文件）**
 
 ```python
 # -*- coding: utf-8 -*-
@@ -1377,12 +1377,12 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_paper_daemon.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt88`
 Expected: 5 passed
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add prism/paper_daemon.py prism/tests/test_paper_daemon.py
@@ -1405,7 +1405,7 @@ git commit -m "feat(prism): 模拟盘守护调度 — 时段判定/时点选股/
   - `python -m prism.paper --init|--summary|--once` 可用
   - `.gitignore` 含 `.paper_account.json` 与 `.paper_account.json.tmp`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 # -*- coding: utf-8 -*-
@@ -1450,12 +1450,12 @@ def test_gitignore_covers_paper_state():
     assert ".paper_account.json.tmp" in txt
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_paper_cli.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt89`
 Expected: FAIL（`main` 不存在 / gitignore 未含条目）
 
-- [ ] **Step 3: 实现（paper.py 文件尾追加 + .gitignore 追加）**
+- [x] **Step 3: 实现（paper.py 文件尾追加 + .gitignore 追加）**
 
 paper.py 文件尾：
 
@@ -1504,12 +1504,12 @@ if __name__ == "__main__":
 .paper_account.json.tmp
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_paper_cli.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt89`
 Expected: 4 passed
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add prism/paper.py .gitignore prism/tests/test_paper_cli.py
@@ -1532,7 +1532,7 @@ git commit -m "feat(prism): 模拟盘 CLI(--init/--summary/--once) + 账本gitig
   - `GET /api/paper/summary`、`GET /api/paper/detail`（只读；账本损坏/异常 → 200 + `{"exists": false, "error": ...}`，不 500）
   - 前端 tab "模拟盘"：总收益/净值/现金/持仓/逐笔/净值历史；30 秒自动刷新；未初始化显示提示
 
-- [ ] **Step 1: 写失败测试（追加到 test_app.py 末尾）**
+- [x] **Step 1: 写失败测试（追加到 test_app.py 末尾）**
 
 ```python
 # ---------------- 模拟盘面板 ----------------
@@ -1582,12 +1582,12 @@ def test_paper_endpoints_with_ledger(client, tmp_path, monkeypatch):
     assert d["holdings"][0]["code"] == "600000.SH"
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism_web/tests/test_app.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt90`
 Expected: FAIL（404 — 端点不存在）
 
-- [ ] **Step 3: 实现端点（app.py 在 `/api/backtest` 函数后追加）**
+- [x] **Step 3: 实现端点（app.py 在 `/api/backtest` 函数后追加）**
 
 ```python
 # ---------------- 模拟盘(只读查询, 设计 §8-7: 无写端点) ----------------
@@ -1612,7 +1612,7 @@ def api_paper_detail():
                         "error": "读取模拟盘账本失败: %r" % e})
 ```
 
-- [ ] **Step 4: 实现前端（index.html nav 区末尾 + main 区末尾；app.js 文件尾）**
+- [x] **Step 4: 实现前端（index.html nav 区末尾 + main 区末尾；app.js 文件尾）**
 
 index.html nav（`</nav>` 前）追加：
 
@@ -1695,12 +1695,12 @@ refreshPaper();
 setInterval(refreshPaper, 30000);
 ```
 
-- [ ] **Step 5: 跑测试确认通过 + 全 app 回归**
+- [x] **Step 5: 跑测试确认通过 + 全 app 回归**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism_web/tests/test_app.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt90`
 Expected: 全 passed（27 = 25 存量 + 2 新）
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add prism_web/app.py prism_web/templates/index.html prism_web/static/app.js prism_web/tests/test_app.py
@@ -1719,36 +1719,36 @@ git commit -m "feat(prism_web): 模拟盘只读面板 — 净值/持仓/逐笔/�
 - Consumes: Task 1-7 全部完成态
 - Produces: 全量回归绿 + 真实账本初始化 + 真实数据 `--once` 冒烟结果 + 守护进程启动方式说明（交付用户）
 
-- [ ] **Step 1: 全量回归（离线部分必须全绿）**
+- [x] **Step 1: 全量回归（离线部分必须全绿）**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests prism_web/tests -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt91`
 Expected: 全 passed 0 failed（存量 314 + 新增 ~24 = 约 338）
 
-- [ ] **Step 2: 因子体检回归（确认模拟盘未碰任何既有因子）**
+- [x] **Step 2: 因子体检回归（确认模拟盘未碰任何既有因子）**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m prism.factor_check`
 Expected: 44/44 通过（与基线一致——模拟盘不注册因子、不改因子）
 
-- [ ] **Step 3: 真实冒烟 — 初始化真实账本（用户在场）**
+- [x] **Step 3: 真实冒烟 — 初始化真实账本（用户在场）**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m prism.paper --init`
 Expected: 输出 `账户已初始化/存在: D:\cc-joesph\.paper_account.json (初始资金 1000000)`；确认 `git status` 中 `.paper_account.json` 被 ignore（不出现在未跟踪列表）
 
-- [ ] **Step 4: 真实冒烟 — 单轮真实数据（用户在场）**
+- [x] **Step 4: 真实冒烟 — 单轮真实数据（用户在场）**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m prism.paper --once`
 Expected: QMT 连接成功；输出 JSON（盘中 → action=tick + 时点选股结果；收盘后 → action=settle + 净值定格）；**确认输出中不出现任何"信号文件/下单"字样，`D:\QMT_SIGNALS` 目录无新文件（安全边界验证）**
 
-- [ ] **Step 5: 守护进程启动验证（用户在场, Ctrl-C 可停）**
+- [x] **Step 5: 守护进程启动验证（用户在场, Ctrl-C 可停）**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m prism.paper_daemon`
 Expected: 日志"模拟盘守护启动(策略=first_board_v04, 100万, 每5秒一轮)"；若盘中 → 每 5 秒 tick 日志；Ctrl-C 停止后再次启动 → 日志无"初始化"（续跑既有账本）+ 缺口补算日志（若有缺口）
 
-- [ ] **Step 6: GUI 面板验证（用户在场）**
+- [x] **Step 6: GUI 面板验证（用户在场）**
 
 打开 Web GUI → "模拟盘" tab：显示总收益/净值/现金/持仓/逐笔/净值历史；未初始化路径显示提示（若 Step 3 已 init 则显示真实数据）
 
-- [ ] **Step 7: 台账与计划勾选 + Commit**
+- [x] **Step 7: 台账与计划勾选 + Commit**
 
 - `.superpowers/sdd/progress.md` 追加：模拟盘 8 任务完成记录 + 冒烟结果
 - 勾选本计划所有 `- [ ]` → `- [x]`
@@ -1759,6 +1759,6 @@ git add docs/superpowers/plans/2026-09-01-paper-trading.md .superpowers/sdd/prog
 git commit -m "docs(plan): 模拟实盘账户实施完成(8任务/全量回归/真实冒烟)"
 ```
 
-- [ ] **Step 8: 向用户交付**
+- [x] **Step 8: 向用户交付**
 
 报告要点（通俗中文）：功能是什么、怎么每天用（开机自启可选/手动启动命令）、网页哪里看、已披露的简化假设（一字板外排队仍按能买到/跌停按触发价成交）、今日首跑结果
