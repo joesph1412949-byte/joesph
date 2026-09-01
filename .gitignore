@@ -79,6 +79,10 @@ superpowers-main/
 .market_data_cache.*.bak*
 .market_data_index.*.bak*
 
+# 模拟盘账本(本地运行数据, 绝不提交)
+.paper_account.json
+.paper_account.json.tmp
+
 # 一次性采集/探测脚本/临时文档(不进 git)
 pt_*
 *.sw_backup.pkl

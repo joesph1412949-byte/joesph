@@ -481,3 +481,38 @@ class PaperAccount:
             self._restore_state(snap)
             return 0
         return filled
+
+
+# ---------- CLI ----------
+def main(argv=None, account=None):
+    """CLI: --init 初始化(幂等) / --summary 摘要JSON / --once 单轮(需QMT在线)。"""
+    import argparse
+    ap = argparse.ArgumentParser(description="模拟实盘账户(100万/first_board_v04)")
+    ap.add_argument("--once", action="store_true",
+                    help="连 QMT 跑一轮当前时点逻辑(选股/监控/结算)")
+    ap.add_argument("--init", action="store_true", help="初始化账户(幂等)")
+    ap.add_argument("--summary", action="store_true", help="打印账户摘要")
+    a = ap.parse_args(argv)
+    acc = account or PaperAccount()
+    if a.init:
+        acc.init_account()
+        print("账户已初始化/存在: %s (初始资金 %.0f)" %
+              (acc.state_path, acc.initial_capital))
+        return
+    if a.summary:
+        print(json.dumps(acc.summary(), ensure_ascii=False, indent=1))
+        return
+    if a.once:
+        from prism.paper_daemon import PaperDaemon
+        d = PaperDaemon(acc)
+        if not d.connect_provider(max_retry=10, retry_wait=5):
+            print("QMT 连接失败(需盘中在线)")
+            return
+        print(json.dumps(d.tick_once(), ensure_ascii=False, indent=1,
+                         default=str))
+        return
+    ap.print_help()
+
+
+if __name__ == "__main__":
+    main()
