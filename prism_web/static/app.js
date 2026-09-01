@@ -395,14 +395,23 @@ function filterFactors(btn) {
 // ---------- 策略 ----------
 async function loadStrategies() {
   const list = document.getElementById("strategy-list");
-  const detail = document.getElementById("strategy-json");
   try {
     const data = await api("/api/strategies");
     const strategies = data.strategies || [];
+    const activeId = data.active;
+    const badge = document.getElementById("active-badge");
+    if (badge) {
+      const a = strategies.find(s => s.id === activeId);
+      badge.textContent = a ? `当前默认: ${a.name || activeId}` : "";
+    }
     list.innerHTML = strategies.map(s => `
       <div class="strategy-item" onclick="showStrategy('${s.id}')">
-        <div class="strategy-item-name">${s.name || s.id}</div>
+        <div class="strategy-item-name">${s.id === activeId ? "★ " : ""}${s.name || s.id}</div>
         <div class="strategy-item-id">${s.id}</div>
+        <div style="margin-top:6px;">
+          <button onclick="event.stopPropagation(); activateStrategy('${s.id}')"${s.id === activeId ? " disabled" : ""}>设为默认</button>
+          <button onclick="event.stopPropagation(); copyToEditor('${s.id}')">复制为底稿</button>
+        </div>
       </div>`).join("") || `<div class="hint">暂无策略</div>`;
     if (strategies.length) showStrategy(strategies[0].id);
   } catch (e) {
@@ -565,3 +574,116 @@ function renderPaper(sum, det) {
 }
 refreshPaper();
 setInterval(refreshPaper, 30000);
+
+// ---------- 策略编辑器 ----------
+let _factorCache = null;
+
+async function editorFactors() {
+  if (_factorCache) return _factorCache;
+  const data = await api("/api/factors");
+  _factorCache = data.factors || [];
+  return _factorCache;
+}
+
+async function openEditor(template) {
+  document.getElementById("strategy-editor").style.display = "block";
+  document.getElementById("ed-errors").textContent = "";
+  const factors = await editorFactors();
+  const gateBox = document.getElementById("ed-gate");
+  gateBox.innerHTML = factors.filter(f => f.category === "node").map(f =>
+    `<label style="margin-right:10px;"><input type="checkbox" data-gate="${f.id}"` +
+    `${template && (template.gate_factors || []).includes(f.id) ? " checked" : ""}> ${f.id} ${f.name || ""}</label>`).join("");
+  const box = document.getElementById("ed-models");
+  box.innerHTML = "";
+  const models = (template && template.models) || [null];
+  for (const m of models) addEditorModel(m, factors);
+  document.getElementById("ed-name").value = "";
+  if (template) {
+    document.getElementById("ed-gate-threshold").value = template.gate_threshold ?? 1;
+    document.getElementById("ed-min-model").value = template.candidate_min_model ?? 3;
+    document.getElementById("ed-tp").value = ((template.sell || {}).take_profit_pct ?? 0.08) * 100;
+    document.getElementById("ed-sl").value = ((template.sell || {}).stop_loss_pct ?? 0.05) * 100;
+    document.getElementById("ed-hold").value = (template.sell || {}).max_hold_days ?? 5;
+  }
+}
+
+function addEditorModel(m, factors) {
+  factors = factors || [];
+  const box = document.getElementById("ed-models");
+  const div = document.createElement("div");
+  div.className = "ed-model";
+  const cats = {};
+  factors.forEach(f => (cats[f.category] = cats[f.category] || []).push(f));
+  div.innerHTML =
+    `<h4>评分模型 <input class="ed-mname" placeholder="模型名" value="${m ? (m.name || "") : ""}">` +
+    ` 权重 <input class="ed-mweight" type="number" step="0.05" value="${m ? m.weight : 1.0}" style="width:60px"></h4>` +
+    Object.keys(cats).sort().map(cat =>
+      `<div><b>${cat}</b> ` + cats[cat].map(f =>
+        `<label style="margin-right:8px;" title="${(f.description || "").replace(/"/g, "&quot;")}">` +
+        `<input type="checkbox" data-fid="${f.id}"${m && (m.factors || []).includes(f.id) ? " checked" : ""}> ${f.id}</label>`).join("") + `</div>`).join("<br>");
+  box.appendChild(div);
+}
+
+async function copyToEditor(sid) {
+  const data = await api("/api/strategy/" + sid);
+  if (!data.ok) { alert(data.error); return; }
+  const s = data.strategy;
+  await openEditor({
+    models: (s.scoring_models || []).map(m => ({
+      name: m.name, weight: m.weight, factors: m.factors, weights: m.weights})),
+    gate_factors: (s.market_gate || {}).factors || [],
+    gate_threshold: (s.market_gate || {}).threshold,
+    candidate_min_model: (s.filters || {}).candidate_min_model,
+    sell: s.sell_rules || {},
+  });
+  alert("已载入「" + (s.name || sid) + "」为底稿, 改名后保存为新策略");
+}
+
+function collectEditorPayload() {
+  const models = [];
+  document.querySelectorAll("#ed-models .ed-model").forEach(div => {
+    const fs = [...div.querySelectorAll("input[data-fid]:checked")].map(i => i.dataset.fid);
+    if (!fs.length) return;
+    models.push({id: "", name: div.querySelector(".ed-mname").value || ("模型" + (models.length + 1)),
+                 weight: parseFloat(div.querySelector(".ed-mweight").value) || 1.0,
+                 factors: fs, weights: fs.map(() => 1.0)});
+  });
+  const gate = [...document.querySelectorAll("input[data-gate]:checked")].map(i => i.dataset.gate);
+  return {name: document.getElementById("ed-name").value.trim(),
+          models, gate_factors: gate,
+          gate_threshold: parseInt(document.getElementById("ed-gate-threshold").value) || 0,
+          candidate_min_model: parseInt(document.getElementById("ed-min-model").value) || 3,
+          sell: {take_profit_pct: (parseFloat(document.getElementById("ed-tp").value) || 8) / 100,
+                 stop_loss_pct: (parseFloat(document.getElementById("ed-sl").value) || 5) / 100,
+                 max_hold_days: parseInt(document.getElementById("ed-hold").value) || 5}};
+}
+
+async function saveStrategy() {
+  const btn = document.getElementById("btn-save-strategy");
+  const errBox = document.getElementById("ed-errors");
+  btn.disabled = true;
+  errBox.textContent = "";
+  try {
+    const res = await api("/api/strategies/create", {method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(collectEditorPayload())});
+    if (!res.ok) {
+      errBox.innerHTML = (res.errors || [res.error || "未知错误"]).map(e => `<div>${e}</div>`).join("");
+      return;
+    }
+    closeEditor();
+    await loadStrategies();
+  } catch (e) { errBox.textContent = "保存失败: " + e; }
+  finally { btn.disabled = false; }
+}
+
+function closeEditor() {
+  document.getElementById("strategy-editor").style.display = "none";
+}
+
+async function activateStrategy(sid, silent) {
+  const res = await api(`/api/strategies/${sid}/activate`, {method: "POST"});
+  if (!res.ok && !silent) alert(res.error || "切换失败");
+  if (res.ok) await loadStrategies();
+}
+// # ponytail: 不做拖拽排序/因子搜索框/模板预置库(YAGNI, 复制底稿够用); 编辑已有策略 = 新建+复制底稿(spec §8)

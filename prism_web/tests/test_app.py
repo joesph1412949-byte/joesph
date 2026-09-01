@@ -608,3 +608,14 @@ def test_strategy_create_never_overwrites_same_second(client, tmp_path, monkeypa
     assert sid == "custom_20260901_120000_2"
     assert clash.read_text(encoding="utf-8") == '{"id": "sentinel"}'  # 未被覆盖
     assert (tmp_path / (sid + ".json")).is_file()
+
+
+# ---------------- Task 5: 策略编辑面板 DOM 冒烟 ----------------
+
+def test_strategy_editor_dom(client):
+    """编辑面板骨架全部渲染(模板完整性)。"""
+    r = client.get("/")
+    html = r.get_data(as_text=True)
+    for mark in ("btn-new-strategy", "strategy-editor", "ed-name",
+                 "ed-models", "ed-gate", "ed-tp", "ed-sl", "ed-hold"):
+        assert mark in html, "模板缺 %s" % mark
