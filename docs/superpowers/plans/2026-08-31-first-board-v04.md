@@ -987,6 +987,7 @@ git commit -m "feat(prism): first_board_v04 策略 + v03 基线 + default 快照
 - Modify: `prism/market_data.py`（新增 `mkt_snapshot`）
 - Modify: `prism/data.py`（`build_market_context` 注入 mkt/sector_map）
 - Modify: `prism/engine.py`（`run_screen` 下发到个股 ctx）
+- Modify: `prism/factors/factor_f9_sector_expansion.py`（docstring 补一条契约：`zt_prev["codes"]` 必须与 sector_map 键同格式（带 .SH/.SZ 后缀），否则 prev_n 恒 0 → 扩张恒真——Task 5 审查 Minor#1）
 - Test: `prism/tests/test_live_mkt_injection.py`（新建）
 
 **Interfaces:**
