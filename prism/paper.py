@@ -10,6 +10,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+from prism import engine
 from prism.engine import load_strategy
 
 STATE_FILENAME = ".paper_account.json"
@@ -45,13 +46,21 @@ class PaperAccount:
         self.state = None
         self._strategy = None
 
-    # ---------- 策略(惰性加载, 与实盘同一份 JSON) ----------
+    # ---------- 策略(动态读默认指针, 与实盘同一份 JSON) ----------
     @property
     def strategy(self):
-        if self._strategy is None:
-            from prism import registry as reg
-            reg.scan_factors(force=True)   # 幂等重扫注册因子库(load_strategy 校验依赖)
-            self._strategy = load_strategy(self.strategy_path)
+        """策略(动态读默认指针; 指针变化→热重载; 坏文件保留旧策略, spec §10)。"""
+        sid = engine.active_strategy_id()
+        if self._strategy is None or self._strategy.get("id") != sid:
+            try:
+                from prism import registry as reg
+                reg.scan_factors(force=True)   # 幂等重扫注册因子库(load_strategy 校验依赖)
+                self._strategy = load_strategy(
+                    engine.STRATEGIES_DIR / ("%s.json" % sid))
+            except Exception:
+                if self._strategy is None:
+                    raise            # 首载且失败 → 无退路, 照抛
+                # 已有旧策略 → 保留, 不中断交易循环(spec §10)
         return self._strategy
 
     # ---------- 账本 ----------

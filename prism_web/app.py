@@ -296,8 +296,9 @@ def screen():
     logger.info("选股开始")
     try:
         payload = request.get_json(silent=True) or {}
+        from prism.engine import active_strategy_id
         sid = (payload.get("strategy") or request.form.get("strategy")
-               or request.args.get("strategy") or "first_board_v04")
+               or request.args.get("strategy") or active_strategy_id())
         try:
             strategy = _load_strategy_for_screen(sid)
         except Exception as e:

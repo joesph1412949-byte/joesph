@@ -87,6 +87,36 @@ def test_screen_default_strategy_is_v04(client, tmp_path, monkeypatch):
     assert seen["id"] == "first_board_v04"
 
 
+def test_screen_default_follows_pointer(client, tmp_path, monkeypatch):
+    """指针指向 v03 → 无参数选股用 v03。"""
+    import prism.engine as engine
+    from prism.paper import PaperAccount
+    monkeypatch.setattr(app_module.ds_obj, "_connected", True)
+    monkeypatch.setattr(app_module, "SNAPSHOT_PATH", tmp_path / "s.json")
+    monkeypatch.setattr(app_module, "perf_store_obj",
+                        type("FakePerf", (), {"archive_daily": lambda s, c, d=None: None})())
+    seen = {}
+    def fake_screen(strategy, market_ctx, gate_factors=None, stock_contexts=None):
+        seen["id"] = strategy["id"]
+        return {"environment_ok": True, "gate_score": 1, "candidates": [],
+                "summary": {"candidate_count": 0}}
+    monkeypatch.setattr(app_module, "run_screen", fake_screen)
+    monkeypatch.setattr(app_module, "DataProvider",
+                        lambda ds=None, manual=None: _stub_provider())
+    # 把真实指针临时指向 v03(测试后恢复)
+    real_ptr = engine.STRATEGIES_DIR / engine.ACTIVE_FILENAME
+    old = real_ptr.read_text(encoding="utf-8") if real_ptr.exists() else None
+    try:
+        engine.set_active_strategy("first_board_v03")
+        r = client.post("/api/screen")
+        assert r.status_code == 200 and seen["id"] == "first_board_v03"
+    finally:
+        if old is not None:
+            real_ptr.write_text(old, encoding="utf-8")
+        else:
+            real_ptr.unlink(missing_ok=True)
+
+
 def test_strategy_detail_unknown_404(client):
     r = client.get("/api/strategy/no_such")
     assert r.status_code == 404
