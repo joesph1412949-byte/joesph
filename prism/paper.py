@@ -49,6 +49,8 @@ class PaperAccount:
     @property
     def strategy(self):
         if self._strategy is None:
+            from prism import registry as reg
+            reg.scan_factors(force=True)   # 幂等重扫注册因子库(load_strategy 校验依赖)
             self._strategy = load_strategy(self.strategy_path)
         return self._strategy
 
@@ -130,3 +132,160 @@ class PaperAccount:
             "trades": st["trades"][-trade_limit:][::-1],
             "nav_history": st["nav_history"],
         }
+
+    # ---------- 净值估算 ----------
+    def _nav_estimate(self, ticks=None):
+        """现金 + Σ持仓市值(ticks 有则按实时价, 无则按成本)。"""
+        st = self.state
+        if ticks:
+            nav = st["cash"] + sum(
+                h["shares"] * float((ticks.get(h["code"]) or {}).get(
+                    "lastPrice") or h["cost"])
+                for h in st["holdings"])
+        else:
+            nav = st["cash"] + sum(h["shares"] * h["cost"]
+                                   for h in st["holdings"])
+        return max(float(nav), 0.0)
+
+    # ---------- 买入 ----------
+    def buy_from_screen(self, provider, now=None):
+        """时点选股(first_board_v04, 同一引擎) + 买入执行。
+
+        幂等: 时点键 YYYY-MM-DDTHH:MM 已在 screens_done → already_done。
+        选股失败/保存失败 fail-closed(不记账), 报告 error。"""
+        now = now or datetime.now()
+        if self.state is None and not self.load():
+            return {"error": "未初始化"}
+        d = now.strftime("%Y-%m-%d")
+        ts_key = "%sT%s" % (d, now.strftime("%H:%M"))
+        if ts_key in self.state["screens_done"]:
+            return {"candidates": 0, "bought": [], "skipped": [],
+                    "env_ok": False, "already_done": True}
+        from prism.engine import run_screen
+        from prism import registry as reg
+        market_ctx = provider.build_market_context()
+        gate_fids = (self.strategy.get("market_gate") or {}).get("factors", [])
+        gate_factors = {}
+        for fid in gate_fids:
+            try:
+                res = reg.get_factor(fid)["func"](market_ctx)
+                if isinstance(res, dict):
+                    gate_factors[fid] = 1 if res.get("score") else 0
+                else:
+                    gate_factors[fid] = 1 if res else 0
+            except Exception:
+                gate_factors[fid] = 0
+        limit_ups = provider.get_limit_ups()
+        stock_contexts = {}
+        for lu in limit_ups:
+            try:
+                stock_contexts[lu["code"]] = provider.build_stock_context(
+                    lu["code"])
+            except Exception:
+                pass
+        try:
+            result = run_screen(self.strategy, market_ctx,
+                                gate_factors=gate_factors,
+                                stock_contexts=stock_contexts)
+        except Exception as e:
+            snap = self._snapshot_state()
+            self.state["screens_done"].append(ts_key)
+            try:
+                self.save()
+            except Exception:
+                self._restore_state(snap)
+            return {"error": "选股失败: %r" % e}
+        env_ok = bool(result.get("environment_ok"))
+        bought, skipped = [], []
+        if env_ok:
+            nav = self._nav_estimate()
+            for c in result.get("candidates", []):
+                code = c.get("code")
+                up = float(c.get("up_stop_price") or 0)
+                if not code or up <= 0:
+                    skipped.append({"code": code, "reason": "缺涨停价"})
+                    continue
+                reason = self._buyable(code, nav)
+                if reason:
+                    skipped.append({"code": code, "reason": reason})
+                    continue
+                if self._one_word_board(code, up, provider):
+                    skipped.append({"code": code, "reason": "一字板买不到"})
+                    continue
+                done = self._execute_buy(code, up, now=now)
+                if done:
+                    bought.append(done)
+                    nav = self._nav_estimate()   # 买入后更新可用净值
+                else:
+                    skipped.append({"code": code, "reason": "执行失败"})
+        snap = self._snapshot_state()
+        self.state["screens_done"].append(ts_key)
+        try:
+            self.save()
+        except Exception:
+            self._restore_state(snap)
+            return {"candidates": len(result.get("candidates", [])),
+                    "bought": bought, "skipped": skipped, "env_ok": env_ok,
+                    "error": "状态保存失败"}
+        return {"candidates": len(result.get("candidates", [])),
+                "bought": bought, "skipped": skipped, "env_ok": env_ok}
+
+    def _buyable(self, code, nav):
+        """买入前置判定; None=可买。"""
+        st = self.state
+        today = datetime.now().strftime("%Y-%m-%d")
+        if any(h["code"] == code for h in st["holdings"]):
+            return "已持仓"
+        if any(t.get("side") == "buy" and t.get("code") == code
+               and t.get("date") == today for t in st["trades"]):
+            return "今日已交易"
+        if len(st["holdings"]) >= self.max_positions:
+            return "仓位已满"
+        if st["cash"] < nav * self.position_ratio:
+            return "现金不足"
+        return None
+
+    def _one_word_board(self, code, up_price, provider):
+        """一字板判定: 当日K线 low >= up_price-0.01(全天未开板) → True。"""
+        try:
+            df = provider.ds.get_kline(code, days=1)
+        except Exception:
+            return True              # 拿不到K线 → 保守视为买不到
+        if df is None or len(df) == 0 or "low" not in getattr(df, "columns", []):
+            return True
+        low = float(df["low"].iloc[-1])
+        return low >= up_price - 0.01
+
+    def _execute_buy(self, code, up_price, now=None):
+        """买入执行(临界段: 内存改→不变量校验→save, 失败回滚)。"""
+        now = now or datetime.now()
+        snap = self._snapshot_state()
+        nav = self._nav_estimate()
+        target = nav * self.position_ratio
+        buy_price = round(up_price * (1 + self.slippage), 4)
+        shares = int(target / buy_price / 100) * 100
+        if shares <= 0:
+            return None
+        amount = round(shares * buy_price, 2)
+        fee = round(amount * (self.fee_rate + self.transfer_fee), 2)
+        cash_after = round(self.state["cash"] - amount - fee, 2)
+        if cash_after < 0:
+            return None
+        d = now.strftime("%Y-%m-%d")
+        ts = now.strftime("%Y-%m-%dT%H:%M:%S")
+        self.state["cash"] = cash_after
+        self.state["holdings"].append({
+            "code": code, "shares": shares, "cost": buy_price,
+            "buy_date": d, "buy_price": buy_price, "entry_nav": nav})
+        self.state["trades"].append({
+            "ts": ts, "date": d, "side": "buy", "code": code,
+            "price": buy_price, "shares": shares, "amount": amount,
+            "fee": fee, "reason": "screen", "cash_after": cash_after})
+        self.state["live_nav"] = round(self._nav_estimate(), 2)
+        try:
+            self.save()
+        except Exception:
+            self._restore_state(snap)
+            return None
+        return {"code": code, "shares": shares, "price": buy_price,
+                "amount": amount, "fee": fee}
