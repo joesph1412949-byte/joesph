@@ -79,17 +79,19 @@ def test_due_by_kline(acc, monkeypatch):
 
 
 def test_backfill_nav(acc):
-    """缺口日补算: nav_history 末日后交易日逐日盯市。"""
-    acc.state["nav_history"] = [{"date": "2026-09-01", "nav": 1000000.0}]
-    days = ["2026-09-02", "2026-09-03", "2026-09-08", "2026-09-09"]
+    """缺口日补算: nav_history 末日后交易日逐日盯市; created 之前不补(M-b)。"""
+    acc.state["nav_history"] = []               # 全空 → last=None, 从头补
+    days = ["2026-08-28", "2026-09-02", "2026-09-03", "2026-09-08",
+            "2026-09-09"]
     # 修正并注明: 简报蓝图内部直读真实时钟判"今日", 而系统时钟(2026-09-01)
     # ≠ 测试帧(NOW=9-8) → 简报测试原样必失败(n=0)。按测试意图(9-9 为未来、
     # 9-8 为今日)给 backfill_nav 注入 now=NOW(与 settle_day 同款 now 参数)。
     n = acc.backfill_nav(
         lambda code, day=None: {"2026-09-02": 9.6, "2026-09-03": 9.4,
                                 "2026-09-08": 10.0}.get(day), days, now=NOW)
-    assert n == 3                                # 9-9 在未来 → 不补
+    assert n == 3                 # 08-28 在 created(09-01) 之前 → 不补; 9-9 未来 → 不补
     hist = acc.state["nav_history"]
-    assert hist[-1]["date"] == "2026-09-08"
-    assert hist[-1]["nav"] == round(600000.0 + 1000 * 10.0, 2)
-    assert [h["nav"] for h in hist][1:] == [609600.0, 609400.0, 610000.0]
+    assert [h["date"] for h in hist] == ["2026-09-02", "2026-09-03",
+                                         "2026-09-08"]
+    assert [h["nav"] for h in hist] == [609600.0, 609400.0, 610000.0]
+    assert acc.state["settled_dates"] == ["2026-09-08"]   # 今日补算即结算

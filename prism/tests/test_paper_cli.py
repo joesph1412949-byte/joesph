@@ -34,6 +34,19 @@ def test_cli_once_without_qmt(tmp_path, capsys, monkeypatch):
     assert "QMT 连接失败" in capsys.readouterr().out
 
 
+def test_cli_once_tick_error_wrapped(tmp_path, capsys, monkeypatch):
+    """M-g: --once 单轮异常 → 打印"单轮执行失败"而非裸 traceback。"""
+    monkeypatch.setattr(dm.PaperDaemon, "connect_provider",
+                        lambda self, max_retry=10, retry_wait=5: True)
+
+    def boom(self):
+        raise RuntimeError("tick boom")
+    monkeypatch.setattr(dm.PaperDaemon, "tick_once", boom)
+    main(["--once"], account=PaperAccount(state_path=tmp_path / "p.json"))
+    out = capsys.readouterr().out
+    assert "单轮执行失败" in out
+
+
 def test_gitignore_covers_paper_state():
     txt = (ROOT / ".gitignore").read_text(encoding="utf-8")
     assert ".paper_account.json" in txt

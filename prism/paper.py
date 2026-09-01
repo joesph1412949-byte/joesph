@@ -149,16 +149,17 @@ class PaperAccount:
         return max(float(nav), 0.0)
 
     # ---------- 买入 ----------
-    def buy_from_screen(self, provider, now=None):
+    def buy_from_screen(self, provider, now=None, slot=None):
         """时点选股(first_board_v04, 同一引擎) + 买入执行。
 
-        幂等: 时点键 YYYY-MM-DDTHH:MM 已在 screens_done → already_done。
-        选股失败/保存失败 fail-closed(不记账), 报告 error。"""
+        幂等键: slot 显式传入(守护按计划时点补跑, 终审 I-1)优先, 否则
+        YYYY-MM-DDTHH:MM(实际分钟, 向后兼容)。键已在 screens_done →
+        already_done。选股失败/保存失败 fail-closed(不记账), 报告 error。"""
         now = now or datetime.now()
         if self.state is None and not self.load():
             return {"error": "未初始化"}
         d = now.strftime("%Y-%m-%d")
-        ts_key = "%sT%s" % (d, now.strftime("%H:%M"))
+        ts_key = slot or "%sT%s" % (d, now.strftime("%H:%M"))
         if ts_key in self.state["screens_done"]:
             return {"candidates": 0, "bought": [], "skipped": [],
                     "env_ok": False, "already_done": True}
@@ -206,7 +207,7 @@ class PaperAccount:
                 if not code or up <= 0:
                     skipped.append({"code": code, "reason": "缺涨停价"})
                     continue
-                reason = self._buyable(code, nav)
+                reason = self._buyable(code, nav, now)
                 if reason:
                     skipped.append({"code": code, "reason": reason})
                     continue
@@ -231,10 +232,11 @@ class PaperAccount:
         return {"candidates": len(result.get("candidates", [])),
                 "bought": bought, "skipped": skipped, "env_ok": env_ok}
 
-    def _buyable(self, code, nav):
-        """买入前置判定; None=可买。"""
+    def _buyable(self, code, nav, now):
+        """买入前置判定; None=可买。今日判定用注入 now 的日期(终审 M-a,
+        不直读系统时钟——测试离线定帧、补跑不串日)。"""
         st = self.state
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = now.strftime("%Y-%m-%d")
         if any(h["code"] == code for h in st["holdings"]):
             return "已持仓"
         if any(t.get("side") == "buy" and t.get("code") == code
@@ -397,7 +399,11 @@ class PaperAccount:
         return int(float(rules.get("max_hold_days") or 5))
 
     def _due_by_kline(self, code, buy_date, provider):
-        """到期判定(缺省): 持仓股K线中 buy_date 之后的交易日数 >= max_hold_days。"""
+        """到期判定(兜底口径): 持仓股K线中 buy_date 之后的交易日数 >= max_hold_days。
+
+        注(终审 I-3): 自然日为主口径(与回测/实盘 ExitRule 一致, 见
+        PaperDaemon._due_natural); K线 bar 数仅作数据缺失兜底, 不再被
+        daemon 默认路径使用。"""
         try:
             df = provider.ds.get_kline(code, days=15)
             days = self._kline_day_strs(df)
@@ -465,6 +471,8 @@ class PaperAccount:
         filled = 0
         try:
             for d in trade_days:
+                if d < self.state["created"]:   # M-b: 不补建账日之前
+                    continue
                 if last and d <= last:
                     continue
                 if d > today:
@@ -508,8 +516,11 @@ def main(argv=None, account=None):
         if not d.connect_provider(max_retry=10, retry_wait=5):
             print("QMT 连接失败(需盘中在线)")
             return
-        print(json.dumps(d.tick_once(), ensure_ascii=False, indent=1,
-                         default=str))
+        try:
+            print(json.dumps(d.tick_once(), ensure_ascii=False, indent=1,
+                             default=str))
+        except Exception as e:                  # M-g: 单轮异常不裸 traceback
+            print("单轮执行失败: %r" % e)
         return
     ap.print_help()
 

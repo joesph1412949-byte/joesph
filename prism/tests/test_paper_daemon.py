@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """模拟盘守护调度测试 — mock 时钟/行情/选股, 全离线。"""
+import logging
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -113,11 +114,12 @@ def test_tick_settle_after_close(tmp_path, monkeypatch):
         "buy_date": "2026-09-01", "buy_price": 9.5, "entry_nav": 1e6})
     out = d.tick_once(now=datetime(2026, 9, 8, 15, 5))
     assert out["action"] == "settle"
-    # _FakeDS 只有当日一根 bar → buy_date 后 0 根 → 未到期 → 不卖, 但净值定格
+    # I-3 自然日口径: 09-01 买入 → 09-08 结算日 +7 自然日 >= 5 → 到期卖出
     assert acc.state["settled_dates"] == ["2026-09-08"]
-    assert out["settle"]["closed"] == []
-    # nav = 现金100万 + 持仓 1000×9.8(K线收盘价盯市)
-    assert out["settle"]["nav"] == 1009800.0
+    assert len(out["settle"]["closed"]) == 1
+    assert out["settle"]["closed"][0]["reason"] == "hold_expire"
+    # nav = 现金 + 卖出回款: 1e6 + 9790.2(=1000×9.8×0.999) - fee 7.44
+    assert out["settle"]["nav"] == 1009782.76
     # 幂等: 二次不重复结算
     out2 = d.tick_once(now=datetime(2026, 9, 8, 15, 10))
     assert out2["settle"] is None
@@ -211,3 +213,100 @@ def test_run_forever_backfill_after_connect(tmp_path, monkeypatch):
     with pytest.raises(_Stop):
         d.run_forever()
     assert order == ["connect", "backfill", "tick"]
+
+
+# ---------- 终审修复 I-1..I-4 / M-e ----------
+def test_catchup_after_late_start(tmp_path, monkeypatch):
+    """I-1 补跑风暴: 14:00 重启 → 10:00/13:30 两时点各补跑 1 次, 14:05
+    不再重复, 14:35 触发 14:30 时点 → 三轮 tick 后总选股次数=3(幂等键=时点)。"""
+    d, acc = _daemon(tmp_path, monkeypatch)
+    calls = []
+
+    def fake_run_screen(strategy, market_ctx, gate_factors=None,
+                        stock_contexts=None):
+        calls.append(1)
+        return {"environment_ok": False, "gate_score": 0, "candidates": [],
+                "summary": {"candidate_count": 0}}
+    monkeypatch.setattr(prism.engine, "run_screen", fake_run_screen)
+    d.tick_once(now=datetime(2026, 9, 2, 14, 0))     # 补 10:00 + 13:30
+    assert len(calls) == 2
+    assert acc.state["screens_done"] == ["2026-09-02T10:00", "2026-09-02T13:30"]
+    d.tick_once(now=datetime(2026, 9, 2, 14, 5))     # 两键已判已过 → 不重复
+    assert len(calls) == 2
+    d.tick_once(now=datetime(2026, 9, 2, 14, 35))    # 14:30 时点首次触发
+    assert len(calls) == 3
+    assert acc.state["screens_done"] == ["2026-09-02T10:00", "2026-09-02T13:30",
+                                         "2026-09-02T14:30"]
+
+
+def test_backfill_skips_today_before_close(tmp_path, monkeypatch):
+    """I-2 盘中重启: 今日未收盘 → backfill 不补今日(净值点与 settled 留给
+    15:00 的 settle_day), 只补昨日及更早缺口。"""
+    d, acc = _daemon(tmp_path, monkeypatch,
+                     now_fn=lambda: datetime(2026, 9, 3, 10, 0))
+    monkeypatch.setattr(PaperDaemon, "_trade_days",
+                        lambda self: ["2026-09-01", "2026-09-02",
+                                      "2026-09-03"])
+    n = d.backfill()
+    assert n == 2
+    dates = [h["date"] for h in acc.state["nav_history"]]
+    assert dates == ["2026-09-01", "2026-09-02"]
+    assert "2026-09-03" not in dates
+    assert acc.state["settled_dates"] == []          # 今日不标 settled
+
+
+def test_due_natural_parity(tmp_path, monkeypatch):
+    """I-3 到期口径=自然日(结算日-buy_date).days >= max_hold_days,
+    对齐实盘/回测 ExitRule; 周三(09-02)买入 → 09-07(+5)到期, 09-04(+2)未到。"""
+    d, acc = _daemon(tmp_path, monkeypatch)
+    assert d._due_natural("2026-09-02", "2026-09-07") is True   # +5 自然日
+    assert d._due_natural("2026-09-02", "2026-09-04") is False  # +2
+    assert d._due_natural("2026-09-02", "2026-09-06") is False  # +4(周末结算日)
+    # 端到端: daemon 结算分支走自然日到期 → 09-07 收盘卖出
+    acc.state["holdings"].append({
+        "code": "600000.SH", "shares": 1000, "cost": 9.5,
+        "buy_date": "2026-09-02", "buy_price": 9.5, "entry_nav": 1e6})
+    out = d.tick_once(now=datetime(2026, 9, 7, 15, 5))
+    assert out["action"] == "settle"
+    assert len(out["settle"]["closed"]) == 1
+    assert out["settle"]["closed"][0]["reason"] == "hold_expire"
+    assert acc.state["settled_dates"] == ["2026-09-07"]
+
+
+def test_corrupt_ledger_refuses_start(tmp_path, monkeypatch, caplog):
+    """I-4 损坏账本: load 失败且文件存在 → startup_guard=False, 保留原文件
+    不覆盖; run_forever 开头即拒绝(不 init、不连 QMT)。"""
+    p = tmp_path / "paper.json"
+    p.write_text("{broken json!!", encoding="utf-8")
+    raw = p.read_bytes()
+    acc = PaperAccount(state_path=p)
+    d = PaperDaemon(acc)
+    with caplog.at_level(logging.ERROR, logger="paper_daemon"):
+        assert d.startup_guard() is False
+    assert p.read_bytes() == raw                     # 未覆盖写
+    assert "拒绝启动" in caplog.text
+    order = []
+    monkeypatch.setattr(PaperDaemon, "connect_provider",
+                        lambda self, **kw: order.append("connect") or True)
+
+    class _Stop(BaseException):
+        pass
+
+    def _sleep(sec):
+        raise _Stop()
+    d.sleep_fn = _sleep
+    d.run_forever()                      # 守卫拒绝 → 直接返回(不进主循环)
+    assert order == []                               # 守卫在 connect 之前拦截
+    assert p.read_bytes() == raw                     # 全程未覆盖
+
+
+def test_settle_skips_weekend(tmp_path, monkeypatch):
+    """M-e 周六 15:05 → 不结算不记平点(idle, settled_dates/nav_history 不变)。"""
+    d, acc = _daemon(tmp_path, monkeypatch)
+    acc.state["holdings"].append({
+        "code": "600000.SH", "shares": 1000, "cost": 9.5,
+        "buy_date": "2026-09-04", "buy_price": 9.5, "entry_nav": 1e6})
+    out = d.tick_once(now=datetime(2026, 9, 5, 15, 5))
+    assert out["action"] == "idle"
+    assert acc.state["settled_dates"] == []
+    assert acc.state["nav_history"] == []

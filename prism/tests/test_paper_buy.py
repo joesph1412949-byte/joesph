@@ -142,3 +142,31 @@ def test_buy_rollback_on_save_failure(acc, monkeypatch):
     assert out.get("bought") == []              # 执行回滚
     assert acc.state["cash"] == 1000000.0       # 内存回滚
     assert acc.state["holdings"] == []
+
+
+# ---------- 终审修复 M-a: _buyable 今日判定用注入 now ----------
+def test_buy_skip_traded_today(acc, monkeypatch):
+    """同日已买过(清仓后只剩流水) → 拒买"今日已交易"; 判定用注入 now 的
+    日期而非系统时钟(注入 09-02, 系统时钟为 09-01, 旧实现会漏判重买)。"""
+    monkeypatch.setattr(prism.engine, "run_screen", _fake_run_screen(CAND))
+    now2 = datetime(2026, 9, 2, 10, 0, 0)
+    acc.buy_from_screen(_FakeProvider(ups=CAND), now=now2)
+    assert len(acc.state["trades"]) == 1
+    acc.state["holdings"] = []                  # 手动清仓, 排除"已持仓"路径
+    out = acc.buy_from_screen(_FakeProvider(ups=CAND), now=now2.replace(minute=5))
+    assert any(s["reason"] == "今日已交易" for s in out["skipped"])
+    assert out["bought"] == []
+    assert len(acc.state["trades"]) == 1        # 不重复买
+
+
+def test_buy_skip_insufficient_cash(acc, monkeypatch):
+    """现金 < 净值×30% → 跳过"现金不足", 不扣款。"""
+    monkeypatch.setattr(prism.engine, "run_screen", _fake_run_screen(CAND))
+    acc.state["holdings"].append({
+        "code": "000001.SZ", "shares": 5000, "cost": 9.5,
+        "buy_date": "2026-08-30", "buy_price": 9.5, "entry_nav": 1e6})
+    acc.state["cash"] = 12000.0                 # nav=12000+47500=59500, 阈值17850
+    out = acc.buy_from_screen(_FakeProvider(ups=CAND), now=NOW)
+    assert any(s["reason"] == "现金不足" for s in out["skipped"])
+    assert out["bought"] == []
+    assert acc.state["cash"] == 12000.0         # 未扣款

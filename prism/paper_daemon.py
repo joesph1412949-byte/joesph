@@ -51,8 +51,16 @@ class PaperDaemon:
                 if not target or k <= target]
         return rows[-1][1] if rows and rows[-1][1] > 0 else None
 
-    def due_fn(self, code, buy_date):
-        return self.account._due_by_kline(code, buy_date, self.provider)
+    def _due_natural(self, buy_date, day_str):
+        """到期判定(主口径, 终审 I-3): 自然日 (结算日 - buy_date).days
+        >= max_hold_days, 与回测/实盘 ExitRule 同口径;
+        K线 bar 数(_due_by_kline)仅作数据缺失兜底, 不再走 daemon 默认路径。"""
+        try:
+            held = (datetime.strptime(day_str, "%Y-%m-%d")
+                    - datetime.strptime(str(buy_date), "%Y-%m-%d")).days
+        except (ValueError, TypeError):
+            return False                # 日期坏值 → 不到期(保守)
+        return held >= self.account.max_hold_days()
 
     # ---------- 单轮 ----------
     def tick_once(self, now=None):
@@ -65,11 +73,14 @@ class PaperDaemon:
             return out
         d = now.strftime("%Y-%m-%d")
         hm = now.strftime("%H:%M")
-        if hm >= SETTLE_AFTER:
+        if now.weekday() < 5 and hm >= SETTLE_AFTER:    # M-e: 周末不结算不记平点
+            # ponytail: 周中节假日仍会记平点, 完整解决需交易日历
             st = self.account.state
             if d not in st.get("settled_dates", []) and self.provider:
+                # 终审 I-3: 到期按自然日口径, 闭包捕获本轮结算日 d
+                # (due_fn 形参为 (code, buy_date), 结算日经 _due_natural 注入)
                 out["settle"] = self.account.settle_day(
-                    self.close_fn, due_fn=self.due_fn,
+                    self.close_fn, due_fn=lambda c, bd: self._due_natural(bd, d),
                     provider=self.provider, now=now)
                 out["action"] = "settle"
             return out
@@ -90,7 +101,10 @@ class PaperDaemon:
                 except Exception:
                     pass
                 out["buys"].append(
-                    self.account.buy_from_screen(self.provider, now=now))
+                    # 终审 I-1: 幂等键=计划时点(slot), 14:00 重启补跑 10:00/
+                    # 13:30 后各记一次, 不再按"实际分钟"重复选股
+                    self.account.buy_from_screen(
+                        self.provider, now=now, slot="%sT%s" % (d, st_time)))
         return out
 
     # ---------- 缺口补算 ----------
@@ -111,11 +125,19 @@ class PaperDaemon:
         return ["%s-%s-%s" % (s[:4], s[4:6], s[6:8]) for s in days]
 
     def backfill(self):
-        """重启后缺口日补算(净值曲线无洞); 拿不到交易日 → 0。"""
+        """重启后缺口日补算(净值曲线无洞); 拿不到交易日 → 0。
+
+        终审 I-2: 盘中(now < 15:00, 真实/注入时钟)重启时今日未收盘 →
+        过滤今日, 今日净值点与 settled 留给 15:00 的 settle_day;
+        收盘后重启保持原语义(含今日)。"""
+        now = self.now_fn() if self.now_fn else datetime.now()
         days = self._trade_days()
+        if now.strftime("%H:%M") < SETTLE_AFTER:
+            today = now.strftime("%Y-%m-%d")
+            days = [x for x in days if x != today]
         if not days:
             return 0
-        return self.account.backfill_nav(self.close_fn, days)
+        return self.account.backfill_nav(self.close_fn, days, now=now)
 
     # ---------- 连接与主循环 ----------
     def _sleep(self, sec):
@@ -138,10 +160,22 @@ class PaperDaemon:
             self._sleep(retry_wait)
         return False
 
+    def startup_guard(self):
+        """启动守卫(§8.3, 终审 I-4): 账本存在但损坏/版本不符 → 拒绝启动,
+        保留原文件不覆盖(init 也不跑); 账本缺失(可初始化)或加载正常 → True。"""
+        if self.account.state_path.exists() and not self.account.load():
+            logging.getLogger("paper_daemon").error(
+                "账本损坏/版本不符 → 拒绝启动, 保留原文件: %s",
+                self.account.state_path)
+            return False
+        return True
+
     def run_forever(self):
         logging.basicConfig(level=logging.INFO,
                             format="%(asctime)s %(levelname)s %(message)s")
         log = logging.getLogger("paper_daemon")
+        if not self.startup_guard():
+            return
         if self.account.state is None and not self.account.load():
             log.info("账本不存在 → 初始化 100 万模拟账户")
             self.account.init_account()
