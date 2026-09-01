@@ -118,6 +118,7 @@ class PaperAccount:
             "nav": round(nav, 2),
             "total_return_pct": round((nav / st["initial_capital"] - 1) * 100, 2),
             "holdings_count": len(st["holdings"]),
+            "nav_points": len(st["nav_history"]),
             "updated_at": (st["trades"][-1]["ts"]
                            if st["trades"] else st["created"]),
         }
@@ -360,3 +361,99 @@ class PaperAccount:
             return None
         return {"code": code, "price": sell_price, "shares": h["shares"],
                 "amount": amount, "fee": fee, "reason": reason}
+
+    # ---------- 盘后结算 ----------
+    @staticmethod
+    def _n8(s):
+        """日期归一化: 去横线("2026-09-01"→"20260901"), 与K线索引同口径比较。"""
+        return str(s).replace("-", "")
+
+    def max_hold_days(self):
+        """策略最大持有交易日(sell_rules.max_hold_days, 缺省 5)。"""
+        rules = self.strategy.get("sell_rules") or {}
+        return int(float(rules.get("max_hold_days") or 5))
+
+    def _due_by_kline(self, code, buy_date, provider):
+        """到期判定(缺省): 持仓股K线中 buy_date 之后的交易日数 >= max_hold_days。"""
+        try:
+            df = provider.ds.get_kline(code, days=15)
+        except Exception:
+            return False
+        if df is None or len(df) == 0:
+            return False
+        b = self._n8(buy_date)
+        after = [ix for ix in df.index if self._n8(ix) > b]
+        return len(after) >= self.max_hold_days()
+
+    def _nav_at(self, close_fn, d):
+        """收盘盯市净值(结算/补算共用): 现金 + Σ持仓×(收盘价, 缺价回退成本)。"""
+        return self.state["cash"] + sum(
+            h["shares"] * float(close_fn(h["code"], d) or h["cost"])
+            for h in self.state["holdings"])
+
+    def settle_day(self, close_fn, due_fn=None, provider=None, now=None):
+        """盘后结算: 到期持仓按收盘价卖出 + 当日净值盯市定格 + 幂等。
+
+        close_fn(code, day=None) -> float|None; due_fn(code, buy_date) -> bool
+        (缺省 _due_by_kline); 拿不到收盘价的到期持仓保留(下个交易日再结)。"""
+        now = now or datetime.now()
+        d = now.strftime("%Y-%m-%d")
+        if self.state is None and not self.load():
+            return {"error": "未初始化"}
+        if d in self.state["settled_dates"]:
+            return {"already_done": True}
+        closed = []
+        for h in list(self.state["holdings"]):
+            due = due_fn(h["code"], h["buy_date"]) if due_fn \
+                else self._due_by_kline(h["code"], h["buy_date"], provider)
+            if not due:
+                continue
+            px = close_fn(h["code"], d)
+            if not px or px <= 0:
+                continue
+            done = self._execute_sell(h["code"], px, "hold_expire", now=now)
+            if done:
+                closed.append(done)
+        snap = self._snapshot_state()
+        nav = self._nav_at(close_fn, d)
+        self.state["live_nav"] = round(nav, 2)
+        self.state["nav_history"].append({"date": d, "nav": round(nav, 2)})
+        self.state["settled_dates"].append(d)
+        try:
+            self.save()
+        except Exception:
+            self._restore_state(snap)
+            return {"error": "状态保存失败"}
+        return {"closed": closed, "nav": round(nav, 2)}
+
+    def backfill_nav(self, close_fn, trade_days, now=None):
+        """缺口日补算: nav_history 末日后、<=今日的交易日逐日盯市。
+
+        close_fn(code, day) -> float|None(该日该股收盘价); 未来日跳过;
+        今日补算时同时记入 settled_dates(幂等防重复结算)。"""
+        now = now or datetime.now()
+        if self.state is None and not self.load():
+            return 0
+        last = (self.state["nav_history"][-1]["date"]
+                if self.state["nav_history"] else None)
+        today = now.strftime("%Y-%m-%d")
+        snap = self._snapshot_state()
+        filled = 0
+        try:
+            for d in trade_days:
+                if last and d <= last:
+                    continue
+                if d > today:
+                    continue
+                nav = self._nav_at(close_fn, d)
+                self.state["nav_history"].append(
+                    {"date": d, "nav": round(nav, 2)})
+                if d == today and d not in self.state["settled_dates"]:
+                    self.state["settled_dates"].append(d)
+                filled += 1
+            if filled:
+                self.save()
+        except Exception:
+            self._restore_state(snap)
+            return 0
+        return filled
