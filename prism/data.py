@@ -88,6 +88,24 @@ class DataProvider:
         em = self.get_market_stats()
         ctx = FactorContext(code="__MARKET__", ticks=ticks, limit_ups=limit_ups,
                             em=em or {}, index_kline=index_kline)
+        # v04 接线: mkt 快照 + 行业映射注入 _extra(F8/F9/SEC* 因子用)。
+        # 全部读本地缓存, 失败 fail-open(缺数据 → 因子得 0, 不阻塞选股)。
+        # sector_map 是 FactorContext 显式字段: get()/engine 优先读字段,
+        # 只写 _extra 会被字段遮蔽, 故字段与 _extra 同引一份映射。
+        try:
+            from prism import market_data as _md
+            cache = _md._load_cache()
+            if cache:
+                ctx._extra["mkt"] = _md.mkt_snapshot()
+                smap = {}
+                for c6, rec in (cache.get("sector_map") or {}).items():
+                    if rec and rec.get("sector"):
+                        suffix = ".SH" if c6.startswith("6") else ".SZ"
+                        smap[c6 + suffix] = rec["sector"]
+                ctx._extra["sector_map"] = smap
+                ctx.sector_map = smap
+        except Exception:
+            pass
         return ctx
 
     def build_stock_context(self, code, kline=None, index_kline=None,

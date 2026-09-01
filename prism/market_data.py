@@ -710,7 +710,8 @@ def fetch_futures(force=False):
             logger.warning("期货 %s 采集失败: %r", sym, e)
         time.sleep(0.5)
     cache["futures"] = fut
-    _save_cache(cache)
+    if todo:   # 本次确有新采集才落盘; 缓存完整时(mkt_snapshot 只读路径)不重写文件
+        _save_cache(cache)
     return fut
 
 
@@ -729,6 +730,32 @@ def futures_snapshot():
         comms = {sym: fut[sym] for sym in syms if sym in fut}
         out[scode] = {"name": name, "commodities": comms}
     return out
+
+
+def mkt_snapshot():
+    """组装引擎/实盘用的市场数据快照(run_screen 下发 ctx._extra["mkt"])。
+
+    结构与回测 CLI 注入一致: sector/global/sector_flow + futures(F8)
+    + zt_prev(F9)。全部读本地缓存(fetch_futures force=False 走缓存,
+    缓存完整时不重写文件), 单段失败降级缺键(fail-open), 不抛。
+    """
+    cache = _load_cache()
+    snap = {}
+    for key, ck in (("sector", "kline"), ("global", "global"),
+                    ("sector_flow", "flow")):
+        v = cache.get(ck)
+        if v:
+            snap[key] = v
+    try:
+        snap["futures"] = futures_snapshot()
+    except Exception as e:
+        logger.warning("futures 快照失败: %r", e)
+    try:
+        from prism.zt_history import prev_day_pool
+        snap["zt_prev"] = prev_day_pool()
+    except Exception as e:
+        logger.warning("zt_prev 快照失败: %r", e)
+    return snap
 
 
 # ---------------------------------------------------------------- 查询

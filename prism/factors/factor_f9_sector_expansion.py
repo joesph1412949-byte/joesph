@@ -5,6 +5,11 @@
 回测历史池无 hybk 题材字段, 申万口径 live/backtest 一致、全窗口可回测
 (F4 板块共振同口径)。昨日池由 mkt["zt_prev"]["codes"] 注入(回测 Task 4 /
 实盘 Task 7 接线)。
+格式契约(Task 5 审查 Minor#1): zt_prev["codes"] 条目与 sector_map 键必须
+同格式(带 .SH/.SZ 后缀的完整代码), 否则 sector_map.get(c) 全 miss →
+prev_n 恒 0 → "今日≥昨日"恒真(扩张误判)。prev_day_pool 直接透传
+zt_history 缓存条目 code(本就是 QMT 带后缀格式), data.build_market_context
+注入 sector_map 时按首位补 .SH/.SZ 后缀, 两端一致。
 有高度: 板块内当日涨停 ≥3 家 且 连板股(boards≥2) ≥2 只;
 在扩张: 板块今日涨停家数 ≥ 昨日。
 昨日池缺失 → fail-closed 0(无昨日基准无法判定扩张)。"""

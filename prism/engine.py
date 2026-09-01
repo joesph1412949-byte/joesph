@@ -171,6 +171,18 @@ def run_screen(strategy, market_ctx, gate_factors=None, stock_contexts=None):
     sec_scores = (sector_score.compute_scores(mkt_extra)
                   if score_cfg["enabled"] and mkt_extra else {})
     if environment_ok and stock_contexts:
+        # v04 接线: 市场级数据(个股 ctx 构建时拿不到)统一下发到个股 ctx。
+        # mkt 进 _extra(ctx.get("mkt")); sector_map 是字段, 个股未填时兜底。
+        sec_map = (market_ctx.get("sector_map")
+                   if market_ctx is not None else None)
+        if mkt_extra:
+            for ctx in stock_contexts.values():
+                if isinstance(getattr(ctx, "_extra", None), dict):
+                    ctx._extra.setdefault("mkt", mkt_extra)
+        if sec_map:
+            for ctx in stock_contexts.values():
+                if not (getattr(ctx, "sector_map", None) or {}):
+                    ctx.sector_map = sec_map
         min_model = (strategy.get("filters") or {}).get("candidate_min_model", 3)
         for code, ctx in stock_contexts.items():
             ev = evaluate_stock(code, ctx, strategy)

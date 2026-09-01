@@ -313,6 +313,41 @@ def qmt_zt_feed(date_yyyymmdd, cache=None, index=None):
     return out
 
 
+def prev_day_pool(today=None):
+    """上一交易日涨停代码表(F9 昨日基准)。
+
+    today: "YYYY-MM-DD" 或 date; 默认今天。取索引中 < today 的最大日期,
+    池条目取其 code 列表。无更早数据/空索引 → {"date": None, "codes": []}。
+    只读本地索引, 不触网。
+
+    键格式兼容(实测): .zt_history_index.pkl 的键是 "YYYY-MM-DD"
+    (build_index 以K线日期写入, qmt_zt_feed 查询也归一成该格式),
+    比较前两侧统一归一为 YYYYMMDD, 同时兼容 "YYYYMMDD" 键。
+    条目 code 直接透传(zt_history 缓存本就是 QMT 带后缀格式, 如
+    "600051.SH") — 与 sector_map 键(带 .SH/.SZ 后缀)同格式契约, 见
+    factor_f9_sector_expansion docstring。
+    """
+    index = _load_index() or {}
+    if not index:
+        return {"date": None, "codes": []}
+    if today is None:
+        import datetime as _dt
+        today = _dt.date.today()
+    t = today.strftime("%Y%m%d") if hasattr(today, "strftime") \
+        else str(today).replace("-", "")
+
+    def _n8(s):
+        return str(s).replace("-", "")
+
+    days = sorted((d for d in index if _n8(d) < t), key=_n8)
+    if not days:
+        return {"date": None, "codes": []}
+    day8 = _n8(days[-1])
+    items = qmt_zt_feed(day8, index=index) or []
+    return {"date": "%s-%s-%s" % (day8[:4], day8[4:6], day8[6:8]),
+            "codes": [it.get("code") for it in items if it.get("code")]}
+
+
 def build_cli():
     """CLI: python -m prism.zt_history [--limit N] [--date YYYYMMDD]"""
     import argparse
