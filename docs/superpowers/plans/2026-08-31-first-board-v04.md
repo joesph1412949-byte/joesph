@@ -815,7 +815,7 @@ Run: `python -m pytest prism/tests/test_f9_sector_expansion.py -q --import-mode=
 Expected: 7 passed
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m prism.factor_check`
-Expected: 全部 PASS（含 F8/F9，总数 45）
+Expected: 全部 PASS（含 F8/F9；总数以实际为准——存量 42 + F8 + F9 = 44，SEC5 本就不存在）
 
 - [ ] **Step 5: Commit**
 
@@ -1440,7 +1440,7 @@ Expected: 全 passed（440 基线 + 本轮新增 ≈ 470），0 failed
 - [ ] **Step 2: 因子体检**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m prism.factor_check`
-Expected: 45 因子全 PASS
+Expected: 44 因子全 PASS（42 存量 + F8 + F9）
 
 - [ ] **Step 3: 提交完整性核对**
 
