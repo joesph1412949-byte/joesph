@@ -180,7 +180,8 @@ class Backtester:
         return self._kline_cache[code]
 
     # ---------------- 选股(复用 engine) ----------------
-    def _stock_ctx(self, code, kline, mkt=None, sector_map=None):
+    def _stock_ctx(self, code, kline, mkt=None, sector_map=None,
+                   limit_ups=None):
         """回测环境的股票上下文(只用回测可得的字段)。
 
         数据适配层(审查 I1): kline_feed 的元组列表 [(date, close), ...] 组装成
@@ -202,6 +203,8 @@ class Backtester:
             extra["mkt"] = mkt
         if sector_map is not None:
             extra["sector_map"] = sector_map
+        if limit_ups is not None:
+            extra["limit_ups"] = limit_ups
         if not rows:
             return FactorContext(code=code, kline=None, **extra)
         df = pd.DataFrame({
@@ -213,7 +216,8 @@ class Backtester:
         }, index=[dt for dt, _px in rows])
         return FactorContext(code=code, kline=df, **extra)
 
-    def _pick(self, pool, asof, em=None, ticks=None, mkt=None, sector_map=None):
+    def _pick(self, pool, asof, em=None, ticks=None, mkt=None, sector_map=None,
+              prev_pool=None):
         """用策略引擎对当日涨停池选股。返回 [(code, boards, theme, composite,
         sec_score), ...](sec_score: 板块综合评分, 评分关闭/无数据时 None)。
 
@@ -230,6 +234,7 @@ class Backtester:
         mkt(市场数据层快照, 供 SEC 板块因子)可注入, 防未来函数由外部保证
         (只传入 asof 当日及之前的数据); 未注入时依赖这些数据的门槛因子得 0
         (见 _gate_notes 归因)。
+        prev_pool: 上一有效交易日涨停池, 注入 mkt['zt_prev'] 供 F9。
         """
         gate = self.strategy.get("market_gate") or {}
         gate_fids = gate.get("factors", [])
@@ -244,6 +249,9 @@ class Backtester:
             pool_ctx.append(item)
         # 防未来函数: 市场数据也按 asof 切片(因子只见当日及之前)
         mkt_sliced = _slice_mkt(mkt, asof)
+        # F9 板块延展性: 上一交易日涨停代码表(由 run() 维护传入)
+        if prev_pool is not None:
+            mkt_sliced["zt_prev"] = {"codes": [s["code"] for s in prev_pool]}
         # v5 板块综合评分(可选): 切片数据现算一次, 门槛过滤 + 记分
         score_cfg = sector_score.load_config(self.strategy)
         sec_scores = (sector_score.compute_scores(mkt_sliced)
@@ -271,7 +279,8 @@ class Backtester:
             kline = [(dt, px) for dt, px in kline_full
                      if _parse_kline_date(dt) is not None
                      and _parse_kline_date(dt) <= asof]
-            ctx = self._stock_ctx(code, kline, mkt_sliced, sector_map)
+            ctx = self._stock_ctx(code, kline, mkt_sliced, sector_map,
+                                  limit_ups=pool_ctx)
             scores = compute_model_scores(ctx, self.strategy)
             best = max([scores[m["id"]]
                         for m in self.strategy["scoring_models"]], default=0)
@@ -351,6 +360,7 @@ class Backtester:
                 list(ex.map(self._kline_for, sorted(all_codes)))
         # 第二步: 逐日回放(此时 K线全部命中缓存, 无网络等待)
         d = start_date
+        prev_pool = []   # 上一有效交易日涨停池(池空日不更新, 近似"昨日池")
         while d <= end_date:
             if progress:
                 progress(d)
@@ -359,7 +369,7 @@ class Backtester:
                 dates.append(d)
                 for code, boards, theme, composite, sec_score in self._pick(
                         pool, asof=d, em=em, ticks=ticks, mkt=mkt,
-                        sector_map=sector_map):
+                        sector_map=sector_map, prev_pool=prev_pool):
                     kline = self._kline_for(code)
                     tr = self._simulate_trade(code, kline, d, rules)
                     if tr:
@@ -378,6 +388,7 @@ class Backtester:
                             "exit_date": tr[4].strftime("%Y-%m-%d")
                             if tr[4] else None,
                         })
+                prev_pool = pool   # 今日池成为下一有效交易日的"昨日池"
             d += timedelta(days=1)
         # 净值模拟: 资金约束下的净值曲线 → 总收益/回撤/夏普(真实口径)
         curve, skipped = self._simulate_equity(trades)
