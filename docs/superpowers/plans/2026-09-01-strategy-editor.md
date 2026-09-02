@@ -37,7 +37,7 @@
   - `set_active_strategy(sid, pointer_path=None) -> None`：原子写 `{"id": sid, "updated": <ISO 时间>}`（temp+os.replace）；不校验 sid 存在性（端点层校验）
   - `ACTIVE_FILENAME = ".active.json"`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 # -*- coding: utf-8 -*-
@@ -89,12 +89,12 @@ def test_real_pointer_is_v04():
     assert (engine.STRATEGIES_DIR / ("%s.json" % rid)).is_file()
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_strategy_pointer.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt102`
 Expected: FAIL（engine 无 active_strategy_id 属性 → AttributeError）
 
-- [ ] **Step 3: 实现（engine.py 追加）**
+- [x] **Step 3: 实现（engine.py 追加）**
 
 ```python
 # ---------------- 默认策略指针(策略编辑器 spec §5) ----------------
@@ -129,12 +129,12 @@ def set_active_strategy(sid, pointer_path=None):
 
 （engine.py 头部补 import：`import json, os, datetime`——检查既有 import，缺则补。）
 
-- [ ] **Step 4: 跑测试确认通过 + 全量 paper 回归（getter 未动，零影响）**
+- [x] **Step 4: 跑测试确认通过 + 全量 paper 回归（getter 未动，零影响）**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_strategy_pointer.py prism/tests/test_paper_account.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt102`
 Expected: 6+5 passed
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add prism/engine.py .gitignore prism/tests/test_strategy_pointer.py
@@ -156,7 +156,7 @@ git commit -m "feat(prism): 默认策略指针 — 原子读写/损坏回落/git
   - /api/screen 无参数 → 用指针 id（缺省仍 first_board_v04，现测试不破坏）
   - `PaperAccount.strategy`：每次访问读指针，id 与已载策略不同才重载；**指针 JSON 损坏 → 保留当前已载策略不中断**（active_strategy_id 回落 v04——若当前已载的正是 v04 则无变化；若当前载的是用户自定义且指针坏了回落 v04 会切换——按 spec §10"坏文件保留旧策略"更稳：getter 捕获 `load_strategy` 异常保留旧策略；指针读取本身回落 v04 属正常语义。实现：`try: 新策略 = load_strategy(...) except Exception: 保留旧`）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 test_strategy_pointer.py 追加：
 
@@ -216,12 +216,12 @@ def test_screen_default_follows_pointer(client, tmp_path, monkeypatch):
             real_ptr.unlink(missing_ok=True)
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_strategy_pointer.py prism_web/tests/test_app.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt103`
 Expected: 新 2 测试 FAIL（getter 不读指针 / fallback 仍是 v04 硬编码——注意 test_screen_default_follows_pointer 会过(指针未接线时 seen=first_board_v04≠v03 FAIL ✓ 判别力成立)
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 app.py /api/screen fallback（现 L299-300）改：
 
@@ -255,12 +255,12 @@ paper.py `strategy` getter 重构（保留 Task 2(p2) 的 scan_factors 副作用
 
 （路径推导注意：`self.strategy_path` 缺省是 `prism/strategies/first_board_v04.json` → `parent.parent` = prism/；用 `engine.STRATEGIES_DIR` 更直白——实现时用 `from prism import engine; engine.STRATEGIES_DIR`。）
 
-- [ ] **Step 4: 跑测试确认通过 + 全量回归抽查**
+- [x] **Step 4: 跑测试确认通过 + 全量回归抽查**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests prism_web/tests -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt103`
 Expected: 全 passed（359+2=361，存量不破坏——尤其 test_screen_default_strategy_is_v04 仍过：指针缺省回落 v04 ✓）
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add prism_web/app.py prism/paper.py prism/tests/test_strategy_pointer.py prism_web/tests/test_app.py
@@ -282,7 +282,7 @@ git commit -m "feat(prism): 默认指针接线 — 选股fallback+模拟盘热�
   - strategy_dict 结构见 spec §3 产出（`id` 置 None 由端点填；`composite.cap` 自动 = Σ(模型权重×该模型对齐后因子权重之和)，round 2）
   - 因子权重对齐规则：用户给的 weights 截断到 factors 长度、不足补 1.0
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 # -*- coding: utf-8 -*-
@@ -376,12 +376,12 @@ def test_weights_alignment():
     assert s2["composite"]["cap"] == round(0.5 * 4.0, 2)
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_strategy_validator.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt104`
 Expected: FAIL（函数不存在）
 
-- [ ] **Step 3: 实现（engine.py 追加）**
+- [x] **Step 3: 实现（engine.py 追加）**
 
 ```python
 def _num(v, default):
@@ -468,12 +468,12 @@ def validate_strategy_payload(payload, reg=None):
     return True, [], strategy
 ```
 
-- [ ] **Step 4: 跑测试确认通过（顺带回归 paper 不受影响）**
+- [x] **Step 4: 跑测试确认通过（顺带回归 paper 不受影响）**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_strategy_validator.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt104`
 Expected: 8 passed
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add prism/engine.py prism/tests/test_strategy_validator.py
@@ -495,7 +495,7 @@ git commit -m "feat(prism): 策略校验器 — 全规则把关+cap自动+试载
   - `POST /api/strategies/<sid>/activate`：`_valid_sid` ∧ 文件存在（404）→ `set_active_strategy(sid)` → `{"ok": true, "active"}`
   - `GET /api/strategies`：响应加 `"active": active_strategy_id()`
 
-- [ ] **Step 1: 写失败测试（追加到 test_app.py）**
+- [x] **Step 1: 写失败测试（追加到 test_app.py）**
 
 ```python
 # ---------------- 策略编辑器端点 ----------------
@@ -556,12 +556,12 @@ def test_strategies_list_has_active(client, monkeypatch):
     assert r.get_json()["active"] == engine.active_strategy_id()
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism_web/tests/test_app.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt105`
 Expected: 新 4 测试 FAIL（404/无 active 字段）
 
-- [ ] **Step 3: 实现（app.py）**
+- [x] **Step 3: 实现（app.py）**
 
 `api_strategies` 返回行改：
 
@@ -618,12 +618,12 @@ def api_strategy_activate(sid):
 
 （`_dt_module` = app.py 顶部已有的 `import datetime as _dt` 同名核对——实现时按现有导入实际名替换；`os` 若未导入则补。）
 
-- [ ] **Step 4: 跑测试确认通过 + 全 app 回归**
+- [x] **Step 4: 跑测试确认通过 + 全 app 回归**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism_web/tests/test_app.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt105`
 Expected: 31 passed（27+4）
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add prism_web/app.py prism_web/tests/test_app.py
@@ -643,7 +643,7 @@ git commit -m "feat(prism_web): 策略创建/激活端点 — 校验+原子写+�
 - Consumes: Task 4 两端点（create/activate）、现有 `GET /api/factors`（id/name/category/description）、现有 `GET /api/strategy/<sid>`（复制底稿数据源）、现有 `api(url)` fetch 助手
 - Produces: 编辑面板完整交互（新建/复制底稿/分组勾选/权重/门槛/卖出/保存→刷新列表；保存**不自动激活**——用户手动点"设为默认"）
 
-- [ ] **Step 1: 写失败测试（追加到 test_app.py）**
+- [x] **Step 1: 写失败测试（追加到 test_app.py）**
 
 ```python
 def test_strategy_editor_dom(client):
@@ -655,12 +655,12 @@ def test_strategy_editor_dom(client):
         assert mark in html, "模板缺 %s" % mark
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism_web/tests/test_app.py::test_strategy_editor_dom -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt106`
 Expected: FAIL（模板缺元素）
 
-- [ ] **Step 3: 实现 HTML（index.html 策略 section 内、`#strategy-layout` 之前追加）**
+- [x] **Step 3: 实现 HTML（index.html 策略 section 内、`#strategy-layout` 之前追加）**
 
 ```html
       <div id="editor-bar" class="filter-row">
@@ -688,7 +688,7 @@ Expected: FAIL（模板缺元素）
       </div>
 ```
 
-- [ ] **Step 4: 实现 JS（app.js 文件尾追加函数组 + loadStrategies 模板增强）**
+- [x] **Step 4: 实现 JS（app.js 文件尾追加函数组 + loadStrategies 模板增强）**
 
 文件尾追加：
 
@@ -836,12 +836,12 @@ async function loadStrategies() {
 }
 ```
 
-- [ ] **Step 5: 跑测试确认通过 + 全 app 回归**
+- [x] **Step 5: 跑测试确认通过 + 全 app 回归**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism_web/tests -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt106`
 Expected: 全 passed（存量+新）
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add prism_web/templates/index.html prism_web/static/app.js prism_web/tests/test_app.py
@@ -860,12 +860,12 @@ git commit -m "feat(prism_web): 策略编辑面板 — 新建/复制底稿/分�
 - Consumes: Task 1-5 全部
 - Produces: 全量回归绿 + 真实冒烟结果 + 用户使用说明更新
 
-- [ ] **Step 1: 全量回归**
+- [x] **Step 1: 全量回归**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests prism_web/tests -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt107`
 Expected: 全 passed（基线 367 + 新增 ~19 = 约 386）
 
-- [ ] **Step 2: 真实冒烟（用户在场；**注意守护进程在跑，改指针会热生效——冒烟后必须恢复 v04 默认**）**
+- [x] **Step 2: 真实冒烟（用户在场；**注意守护进程在跑，改指针会热生效——冒烟后必须恢复 v04 默认**）**
 
 1. `python -m prism.paper --summary` → 记录当前默认（应 first_board_v04）
 2. 手动构造 payload 调 create（curl 或浏览器面板）→ 得到 custom_xxx.json
@@ -874,7 +874,7 @@ Expected: 全 passed（基线 367 + 新增 ~19 = 约 386）
 5. **恢复**：`POST /api/strategies/first_board_v04/activate` + 删除 `prism/strategies/custom_xxx.json`（冒烟产物不入库）+ 确认指针回落 v04
 6. 浏览器打开"策略"页：新建面板、设为默认按钮、★徽标可见（用户视觉验收）
 
-- [ ] **Step 3: 台账与勾选 + Commit**
+- [x] **Step 3: 台账与勾选 + Commit**
 
 ```bash
 git add docs/superpowers/plans/2026-09-01-strategy-editor.md
@@ -882,6 +882,6 @@ git commit -m "docs(plan): 策略编辑器实施完成(6任务/全量回归/真�
 ```
 （台账 .superpowers 为 gitignored，仅本地追加记录）
 
-- [ ] **Step 4: 向用户交付**
+- [x] **Step 4: 向用户交付**
 
 报告要点：网页哪里用（策略页 ➕ 新建/设为默认/复制底稿）、保存即出现在列表、默认切换三处生效且模拟盘不重启热生效、披露限制（因子参数不可改/组合有效性需自行回测）、冒烟结果
