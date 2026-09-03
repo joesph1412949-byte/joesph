@@ -70,3 +70,33 @@ def test_summary_and_detail(tmp_path):
     assert s["holdings_count"] == 0
     d = acc.detail()
     assert d["holdings"] == [] and d["trades"] == [] and d["nav_history"] == []
+
+
+def test_ledger_v2_keys_present(tmp_path):
+    """init 的新账本含排队键; summary/detail 带排队字段。"""
+    from prism.paper import PaperAccount
+    acc = PaperAccount(state_path=tmp_path / "p.json")
+    acc.init_account()
+    assert acc.state["pending_buys"] == []
+    assert acc.state["canceled_pending_codes"] == []
+    s = acc.summary()
+    assert s["pending_count"] == 0
+    d = acc.detail()
+    assert d["pending"] == []
+
+
+def test_ledger_v1_old_book_migrates(tmp_path):
+    """旧账本(无新键, version=1) load 平滑: 缺省空列表。"""
+    from prism.paper import PaperAccount
+    import json
+    st = {"version": 1, "created": "2026-09-01",
+          "initial_capital": 1000000.0, "cash": 1000000.0,
+          "holdings": [], "trades": [], "nav_history": [],
+          "live_nav": 1000000.0, "screens_done": [], "settled_dates": []}
+    p = tmp_path / "old.json"
+    p.write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+    acc = PaperAccount(state_path=p)
+    assert acc.load() is True
+    assert acc.state["pending_buys"] == []
+    assert acc.state["canceled_pending_codes"] == []
+    assert acc.state["version"] == 1

@@ -83,6 +83,8 @@ class PaperAccount:
             "live_nav": self.initial_capital,
             "screens_done": [],
             "settled_dates": [],
+            "pending_buys": [],
+            "canceled_pending_codes": [],
         }
         self.save()
         return self.state
@@ -100,6 +102,8 @@ class PaperAccount:
             return False
         if raw.get("version") != 1:
             return False
+        raw.setdefault("pending_buys", [])
+        raw.setdefault("canceled_pending_codes", [])
         self.state = raw
         return True
 
@@ -131,6 +135,7 @@ class PaperAccount:
             "total_return_pct": round((nav / st["initial_capital"] - 1) * 100, 2),
             "holdings_count": len(st["holdings"]),
             "nav_points": len(st["nav_history"]),
+            "pending_count": len(self.state.get("pending_buys", [])),
             "updated_at": (st["trades"][-1]["ts"]
                            if st["trades"] else st["created"]),
         }
@@ -144,6 +149,7 @@ class PaperAccount:
             "holdings": st["holdings"],
             "trades": st["trades"][-trade_limit:][::-1],
             "nav_history": st["nav_history"],
+            "pending": list(self.state.get("pending_buys", [])),
         }
 
     # ---------- 净值估算 ----------
