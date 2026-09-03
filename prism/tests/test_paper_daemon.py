@@ -310,3 +310,139 @@ def test_settle_skips_weekend(tmp_path, monkeypatch):
     assert out["action"] == "idle"
     assert acc.state["settled_dates"] == []
     assert acc.state["nav_history"] == []
+
+
+# ---------- Task 3: 守护排板轮询/结算清理/跨日清理 ----------
+def _pending_tick():
+    """建委托用合格 tick(原生字段, bidVol=手: 50万手×100×10元=5亿 ≥ 2000万)。"""
+    return {"lastPrice": 10.0, "lastVolume": 1_000_000,
+            "bidVol": [500_000], "lastClose": 10.0}
+
+
+class _QueueTickDS:
+    """排板轮询 ds: 带 codes(轮询) → 穿越队列量的封板 tick(手差60万手=
+    6000万股 ≥ queued 5000万股+30000股); 无参(卖盯市) → 原默认 9.8。"""
+
+    @staticmethod
+    def get_full_market_ticks(codes=None):
+        if codes:
+            return {c: {"lastPrice": 10.0, "lastVolume": 1_600_000,
+                        "bidVol": [500_000], "lastClose": 10.0}
+                    for c in codes}
+        return {"600000.SH": {"lastPrice": 9.8}}
+
+
+def test_tick_once_checks_pending_each_round(tmp_path, monkeypatch):
+    """每轮排板检查(§2.3): 成交后 pending 移除、仓位出现; 返回 dict 带
+    pending_filled/pending_canceled 键。"""
+    d, acc = _daemon(tmp_path, monkeypatch)
+    d.provider.ds = _QueueTickDS
+    assert acc.create_pending_buy(
+        "600000", 10.0, datetime(2026, 9, 2, 10, 0, 5),
+        _pending_tick()) is not None
+    acc.state["screens_done"].append("2026-09-02T10:00")   # 屏蔽时点选股
+    out = d.tick_once(now=datetime(2026, 9, 2, 10, 1, 0))
+    assert out["pending_filled"] == ["600000"]
+    assert out["pending_canceled"] == []
+    assert acc.state["pending_buys"] == []
+    assert len(acc.state["holdings"]) == 1
+    assert acc.state["holdings"][0]["buy_date"] == "2026-09-02"
+    fee = 300000.0 * 0.00026
+    assert acc.state["cash"] == pytest.approx(1_000_000.0 - 300000.0 - fee)
+
+
+def test_quote_ticks_fail_open(tmp_path, monkeypatch):
+    """轮询行情异常 → {}(fail-open 保守): pending 保持排队, tick_once 不炸。"""
+    d, acc = _daemon(tmp_path, monkeypatch)
+    assert acc.create_pending_buy(
+        "600000", 10.0, datetime(2026, 9, 2, 10, 0, 5),
+        _pending_tick()) is not None
+    acc.state["screens_done"].append("2026-09-02T10:00")
+
+    class _BoomDS:
+        @staticmethod
+        def get_full_market_ticks(codes=None):
+            if codes:
+                raise RuntimeError("行情断")
+            return {}
+    d.provider.ds = _BoomDS
+    out = d.tick_once(now=datetime(2026, 9, 2, 10, 1, 0))
+    assert out["pending_filled"] == [] and out["pending_canceled"] == []
+    assert len(acc.state["pending_buys"]) == 1      # tick 缺失 → 保持排队
+
+
+def test_tick_settle_clears_pending(tmp_path, monkeypatch):
+    """收盘失效(§2.3.3): 15:00 后结算轮先撤 pending(queue_expire/解冻)再结算;
+    撤单幂等键随结算日切重置(I-2)。"""
+    d, acc = _daemon(tmp_path, monkeypatch)
+    assert acc.create_pending_buy(
+        "600000", 10.0, datetime(2026, 9, 8, 10, 0, 5),
+        _pending_tick()) is not None
+    acc.state["canceled_pending_codes"].append("000001")   # 当日早前撤单键
+    out = d.tick_once(now=datetime(2026, 9, 8, 15, 5))
+    assert out["action"] == "settle"
+    assert out["pending_canceled"] == ["600000"]
+    assert acc.state["pending_buys"] == []
+    assert acc.state["canceled_pending_codes"] == []
+    assert any(t["reason"] == "queue_expire" for t in acc.state["trades"])
+    assert acc.available_cash() == acc.state["cash"]       # 解冻
+    assert acc.state["settled_dates"] == ["2026-09-08"]
+
+
+def _run_forever_one_tick(monkeypatch, d):
+    """mock connect/backfill/tick + sleep 哨兵: run_forever 跑一轮即停。"""
+    monkeypatch.setattr(PaperDaemon, "connect_provider",
+                        lambda self, **kw: True)
+    monkeypatch.setattr(PaperDaemon, "backfill", lambda self: 0)
+    monkeypatch.setattr(
+        PaperDaemon, "tick_once",
+        lambda self, now=None: {"action": "idle", "sells": [], "buys": [],
+                                "settle": None, "pending_filled": [],
+                                "pending_canceled": []})
+
+    class _Stop(BaseException):          # 测试哨兵: 绕过 tick 层 except Exception
+        pass
+
+    def _sleep(sec):
+        raise _Stop()
+    d.sleep_fn = _sleep
+    return _Stop
+
+
+def test_run_forever_expires_cross_day_pending(tmp_path, monkeypatch):
+    """跨日启动(§2.4): 昨日 pending 启动即收盘失效; 撤单幂等键(属昨日,
+    按最后流水日判定)一并重置 — 审查 I-2 forward-requirement。"""
+    d, acc = _daemon(tmp_path, monkeypatch,
+                     now_fn=lambda: datetime(2026, 9, 2, 9, 0))
+    assert acc.create_pending_buy(
+        "600000", 10.0, datetime(2026, 9, 1, 10, 0, 5),
+        _pending_tick()) is not None
+    acc.state["canceled_pending_codes"].append("000001")
+    acc.state["trades"].append({"side": "buy", "code": "000001",
+                                "date": "2026-09-01",
+                                "reason": "queue_cancel_break"})
+    acc.save()          # 落盘: run_forever.startup_guard 会 load 重读磁盘态
+    with pytest.raises(_run_forever_one_tick(monkeypatch, d)):
+        d.run_forever()
+    assert acc.state["pending_buys"] == []
+    assert acc.state["canceled_pending_codes"] == []
+    assert any(t["reason"] == "queue_expire" for t in acc.state["trades"])
+
+
+def test_run_forever_keeps_same_day_pending(tmp_path, monkeypatch):
+    """同日重启: 今日 pending/撤单键保留(当日禁排不因重启失效, §2.4)。"""
+    d, acc = _daemon(tmp_path, monkeypatch,
+                     now_fn=lambda: datetime(2026, 9, 2, 11, 0))
+    assert acc.create_pending_buy(
+        "600000", 10.0, datetime(2026, 9, 2, 10, 0, 5),
+        _pending_tick()) is not None
+    acc.state["canceled_pending_codes"].append("000001")
+    acc.state["trades"].append({"side": "buy", "code": "000001",
+                                "date": "2026-09-02",
+                                "reason": "queue_cancel_break"})
+    acc.save()          # 落盘: run_forever.startup_guard 会 load 重读磁盘态
+    with pytest.raises(_run_forever_one_tick(monkeypatch, d)):
+        d.run_forever()
+    assert len(acc.state["pending_buys"]) == 1
+    assert acc.state["canceled_pending_codes"] == ["000001"]
+    assert not any(t["reason"] == "queue_expire" for t in acc.state["trades"])

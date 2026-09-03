@@ -85,3 +85,23 @@ def test_live_nav_updated(acc):
     acc.sell_check({"600000.SH": {"lastPrice": 9.8}}, now=NOW)
     # 1000×9.8=9800 持仓市值 + 600000 现金
     assert acc.state["live_nav"] == round(600000.0 + 9800.0, 2)
+
+
+def test_sell_skips_limit_down(acc):
+    """跌停日(现价 ≤ 昨收×0.9)卖出跳过(持仓保留, 设计 §4); 次日恢复可卖。"""
+    acc.state["trades"] = []                    # 清流水避免干扰
+    acc.state["holdings"][0]["cost"] = 10.0     # 现价落于止盈/止损判定区间
+    out = acc.sell_check({"600000.SH": {"lastPrice": 9.0, "lastClose": 10.0}},
+                         now=NOW)               # 10% 跌停: 10×0.9=9.0
+    assert out == [] and len(acc.state["holdings"]) == 1   # 跳过不卖
+    # 次日 10.8 ≥ cost10×1.08 止盈线 → 恢复卖出判定
+    out2 = acc.sell_check({"600000.SH": {"lastPrice": 10.8, "lastClose": 10.0}},
+                          now=datetime(2026, 9, 3, 12, 0, 0))
+    assert len(out2) == 1 and out2[0]["reason"] == "take_profit"
+
+
+def test_sell_no_last_close_fails_open(acc):
+    """tick 缺 lastClose → 不判跌停, 照常走止盈止损(fail-open, §4)。"""
+    acc.state["holdings"][0]["cost"] = 10.0
+    out = acc.sell_check({"600000.SH": {"lastPrice": 9.0}}, now=NOW)
+    assert len(out) == 1 and out[0]["reason"] == "stop_loss"

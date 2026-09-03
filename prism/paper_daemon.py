@@ -62,13 +62,24 @@ class PaperDaemon:
             return False                # 日期坏值 → 不到期(保守)
         return held >= self.account.max_hold_days()
 
+    # ---------- 排板轮询行情(设计 §5) ----------
+    def _quote_ticks(self, codes):
+        """排板轮询行情(原生字段透传, daemon 不转量纲); 异常 → 空(fail-open)。"""
+        if not codes or getattr(self.provider, "ds", None) is None:
+            return {}
+        try:
+            return self.provider.ds.get_full_market_ticks(list(codes)) or {}
+        except Exception:
+            return {}
+
     # ---------- 单轮 ----------
     def tick_once(self, now=None):
         """一轮: 15:00后未结算→结算(幂等); 盘中→tick卖检查+到点选股; 其余 idle。
 
         行情异常/账本未初始化 → 本轮跳过不记账(设计 §8/§11)。"""
         now = now or (self.now_fn() if self.now_fn else datetime.now())
-        out = {"action": "idle", "sells": [], "buys": [], "settle": None}
+        out = {"action": "idle", "sells": [], "buys": [], "settle": None,
+               "pending_filled": [], "pending_canceled": []}
         if self.account.state is None and not self.account.load():
             return out
         d = now.strftime("%Y-%m-%d")
@@ -77,6 +88,12 @@ class PaperDaemon:
             # ponytail: 周中节假日仍会记平点, 完整解决需交易日历
             st = self.account.state
             if d not in st.get("settled_dates", []) and self.provider:
+                # 收盘失效(设计 §2.3.3): 结算前 pending 全撤(解冻+expire 流水);
+                # 撤单幂等键随日切重置(I-2), 与撤单流水一并由 settle_day 落盘
+                for p in list(st.get("pending_buys", [])):
+                    self.account._dispose_pending(p["code"], "queue_expire", now)
+                    out["pending_canceled"].append(p["code"])
+                st["canceled_pending_codes"] = []
                 # 终审 I-3: 到期按自然日口径, 闭包捕获本轮结算日 d
                 # (due_fn 形参为 (code, buy_date), 结算日经 _due_natural 注入)
                 out["settle"] = self.account.settle_day(
@@ -93,6 +110,13 @@ class PaperDaemon:
             return out              # 行情失败 → 本轮跳过, 不记账
         out["action"] = "tick"
         out["sells"] = self.account.sell_check(ticks, now=now)
+        # 排板轮询(设计 §2.3): 每轮对 pending 判成交/开板撤单(每事件临界段)
+        pcodes = [p["code"] for p in self.account.state.get("pending_buys", [])]
+        if pcodes:
+            r = self.account.check_pending_buys(self._quote_ticks(pcodes),
+                                                now=now)
+            out["pending_filled"] = r["filled"]
+            out["pending_canceled"] = r["canceled"]
         for st_time in SCREEN_TIMES:
             if hm >= st_time and "%sT%s" % (d, st_time) \
                     not in self.account.state["screens_done"]:
@@ -104,7 +128,8 @@ class PaperDaemon:
                     # 终审 I-1: 幂等键=计划时点(slot), 14:00 重启补跑 10:00/
                     # 13:30 后各记一次, 不再按"实际分钟"重复选股
                     self.account.buy_from_screen(
-                        self.provider, now=now, slot="%sT%s" % (d, st_time)))
+                        self.provider, now=now, slot="%sT%s" % (d, st_time),
+                        tick_provider=self._quote_ticks))
         return out
 
     # ---------- 缺口补算 ----------
@@ -188,6 +213,17 @@ class PaperDaemon:
         filled = self.backfill()
         if filled:
             log.info("缺口日补算 %d 天", filled)
+        # 跨日启动清理(设计 §2.4): 旧 pending 收盘失效; 撤单幂等键(I-2)按
+        # 最后流水日重置——非今日 ⇒ 键属上一交易日 → 清。须先清键再失效
+        # (queue_expire 流水会把"最后流水日"推到今日, 顺序反了会误保留)。
+        now0 = self.now_fn() if self.now_fn else datetime.now()
+        today = now0.strftime("%Y-%m-%d")
+        st = self.account.state
+        if (st.get("trades") or [{}])[-1].get("date", "") != today:
+            st["canceled_pending_codes"] = []
+        for p in list(st.get("pending_buys", [])):
+            if not (p.get("created") or "").startswith(today):
+                self.account._dispose_pending(p["code"], "queue_expire", now0)
         log.info("模拟盘守护启动(策略=%s, 100万, 每%d秒一轮)",
                  self.account.strategy.get("id"), POLL_SECONDS)
         while True:

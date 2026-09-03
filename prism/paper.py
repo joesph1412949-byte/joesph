@@ -475,6 +475,14 @@ class PaperAccount:
             price = float(t.get("lastPrice") or 0)
             if price <= 0:
                 continue
+            # 跌停日卖不出(设计 §4, 顺延次日): 现价 ≤ 昨收×(1-幅度); 幅度
+            # 30/68 前缀 20%, 其余 10%(ST 不特殊, §9 披露); 昨收缺失 →
+            # 不判照常卖(fail-open)。跳过=持仓保留, 止盈止损次日再判。
+            lc = float(t.get("lastClose") or 0)
+            if lc > 0:
+                ratio = 0.20 if h["code"].startswith(("30", "68")) else 0.10
+                if price <= lc * (1 - ratio) + 0.001:
+                    continue
             cost = float(h["cost"])
             if price >= cost * (1 + tp):
                 reason = "take_profit"
