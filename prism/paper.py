@@ -167,11 +167,14 @@ class PaperAccount:
         return max(float(nav), 0.0)
 
     # ---------- 买入 ----------
-    def buy_from_screen(self, provider, now=None, slot=None):
-        """时点选股(first_board_v04, 同一引擎) + 买入执行。
+    def buy_from_screen(self, provider, now=None, slot=None,
+                        tick_provider=None):
+        """时点选股(first_board_v04, 同一引擎) + 排板委托创建(改道: 不再直接成交)。
 
-        幂等键: slot 显式传入(守护按计划时点补跑, 终审 I-1)优先, 否则
-        YYYY-MM-DDTHH:MM(实际分钟, 向后兼容)。键已在 screens_done →
+        tick_provider: callable(codes)->{code: tick}, daemon 在时点前拉一次候选池
+        盘口注入; 不传 → tick={} → create_pending_buy 保守不建(记 skips
+        "排板不通过")。幂等键: slot 显式传入(守护按计划时点补跑, 终审 I-1)优先,
+        否则 YYYY-MM-DDTHH:MM(实际分钟, 向后兼容)。键已在 screens_done →
         already_done。选股失败/保存失败 fail-closed(不记账), 报告 error。"""
         now = now or datetime.now()
         if self.state is None and not self.load():
@@ -219,6 +222,13 @@ class PaperAccount:
         bought, skipped = [], []
         if env_ok:
             nav = self._nav_estimate()
+            provider_tick = {}
+            if tick_provider is not None:
+                try:      # 时点前拉一次候选池盘口; 失败保守视为无盘口(下方全部不建)
+                    provider_tick = tick_provider(
+                        [c.get("code") for c in result.get("candidates", [])]) or {}
+                except Exception:
+                    provider_tick = {}
             for c in result.get("candidates", []):
                 code = c.get("code")
                 up = float(c.get("up_stop_price") or 0)
@@ -232,12 +242,13 @@ class PaperAccount:
                 if self._one_word_board(code, up, provider):
                     skipped.append({"code": code, "reason": "一字板买不到"})
                     continue
-                done = self._execute_buy(code, up, now=now)
-                if done:
-                    bought.append(done)
-                    nav = self._nav_estimate()   # 买入后更新可用净值
-                else:
-                    skipped.append({"code": code, "reason": "执行失败"})
+                tick = (provider_tick or {}).get(code) or {}
+                p = self.create_pending_buy(code, up, now, tick)
+                if p is None:
+                    skipped.append({"code": code, "reason": "排板不通过"})
+                    continue
+                bought.append(p)
+                nav = self._nav_estimate()   # 建委托后更新可用净值(冻结口径)
         snap = self._snapshot_state()
         self.state["screens_done"].append(ts_key)
         try:
@@ -251,15 +262,22 @@ class PaperAccount:
                 "bought": bought, "skipped": skipped, "env_ok": env_ok}
 
     def _buyable(self, code, nav, now):
-        """买入前置判定; None=可买。今日判定用注入 now 的日期(终审 M-a,
-        不直读系统时钟——测试离线定帧、补跑不串日)。"""
+        """买入前置判定(排板四道+现金/仓位); None=可排。今日判定用注入 now 的
+        日期(终审 M-a, 不直读系统时钟)。"今日已交易"=今日已成交(queue_fill/screen
+        执行口径)——开板撤单/收盘失效的未成交流水不计入, 由"今日已撤单"键单独挡。"""
         st = self.state
         today = now.strftime("%Y-%m-%d")
         if any(h["code"] == code for h in st["holdings"]):
             return "已持仓"
         if any(t.get("side") == "buy" and t.get("code") == code
-               and t.get("date") == today for t in st["trades"]):
+               and t.get("date") == today
+               and t.get("reason") in ("screen", "queue_fill")
+               for t in st["trades"]):
             return "今日已交易"
+        if any(p.get("code") == code for p in st.get("pending_buys", [])):
+            return "已在排队中"
+        if code in st.get("canceled_pending_codes", []):
+            return "今日已撤单"
         if len(st["holdings"]) >= self.max_positions:
             return "仓位已满"
         if st["cash"] < nav * self.position_ratio:
@@ -276,6 +294,124 @@ class PaperAccount:
             return True
         low = float(df["low"].iloc[-1])
         return low >= up_price - 0.01
+
+    # ---------- 排板队列状态机(设计 §2/§3) ----------
+    def available_cash(self):
+        """可用现金 = cash − Σ冻结(排板挂单锁定额)。"""
+        return self.state["cash"] - sum(p.get("frozen", 0.0)
+                                        for p in self.state.get("pending_buys", []))
+
+    def create_pending_buy(self, code, up_price, now, tick):
+        """排板委托: 前置检查(五关+封单+尾盘)→冻结→入 pending。
+        tick 缺失返回 None(保守: 无盘口不排)。"""
+        if not tick:
+            return None
+        nav = self._nav_estimate()
+        reason = self._buyable(code, nav, now)
+        if reason:
+            return None
+        if now.strftime("%H:%M") >= "14:30":
+            return None
+        bv = tick.get("bidVol") or [0]
+        bid_vol = bv[0] or 0
+        if bid_vol * up_price < 20_000_000:
+            return None
+        # 金额(沿用 _execute_buy 的手数/金额口径: 净值30% → 100股取整)
+        amount = nav * self.position_ratio
+        shares = int(amount // (up_price * 100)) * 100
+        if shares <= 0:
+            return None
+        frozen = shares * up_price
+        if self.available_cash() < frozen:
+            return None
+        snap = self._snapshot_state()
+        self.state["pending_buys"].append({
+            "code": code, "shares": shares, "price": up_price,
+            "amount": round(frozen, 4), "frozen": round(frozen, 4),
+            "queued_shares": int(bid_vol),
+            "base_volume": int(tick.get("lastVolume") or 0),
+            "created": now.strftime("%Y-%m-%dT%H:%M:%S"),
+            "slot": now.strftime("T%H:%M")})
+        try:
+            self.save()
+        except Exception:
+            self._restore_state(snap)
+            return None
+        return self.state["pending_buys"][-1]
+
+    def check_pending_buys(self, ticks, now=None):
+        """每轮排板判定: 成交/开板撤单/保持。每事件独立临界段。"""
+        now = now or datetime.now()
+        filled, canceled = [], []
+        for p in list(self.state.get("pending_buys", [])):
+            t = ticks.get(p["code"])
+            if not t:
+                continue                      # tick 缺失 → 保持排队
+            last = t.get("lastPrice")
+            if last is None:
+                continue
+            if last < p["price"] - 0.001:
+                self._dispose_pending(p["code"], "queue_cancel_break", now)
+                canceled.append(p["code"])
+                continue
+            dvol = int(t.get("lastVolume") or 0) - p["base_volume"]
+            if dvol >= p["queued_shares"] + p["shares"] \
+                    and abs(last - p["price"]) <= 0.001:
+                if self._execute_fill_buy(p, now):
+                    filled.append(p["code"])
+        return {"filled": filled, "canceled": canceled}
+
+    def _execute_fill_buy(self, p, now):
+        """排板成交记账(临界段): 按挂单价成交, 无上滑; 解冻差额隐含
+        (frozen 不扣——成交扣实际金额, pending 移除后冻结自然释放)。"""
+        code, shares, price = p["code"], p["shares"], p["price"]
+        amount = shares * price
+        fee = amount * (self.fee_rate + self.transfer_fee)   # 佣金万2.5+过户万0.1
+        snap = self._snapshot_state()
+        try:
+            st = self.state
+            if st["cash"] < amount + fee:
+                return False
+            nav = self._nav_estimate()
+            d = now.strftime("%Y-%m-%d")
+            ts = now.strftime("%Y-%m-%dT%H:%M:%S")
+            st["cash"] = round(st["cash"] - amount - fee, 4)
+            # holdings 字段与既有 _execute_buy 完全对齐(cost/buy_price/entry_nav)
+            st["holdings"].append({"code": code, "shares": shares,
+                                   "cost": price, "buy_date": d,
+                                   "buy_price": price, "entry_nav": nav})
+            st["trades"].append({"side": "buy", "code": code, "shares": shares,
+                                 "price": price, "fee": round(fee, 4),
+                                 "date": d, "reason": "queue_fill", "ts": ts})
+            st["pending_buys"] = [x for x in st["pending_buys"]
+                                  if x["code"] != code]
+            self.save()
+            return True
+        except Exception:
+            self._restore_state(snap)
+            return False
+
+    def _dispose_pending(self, code, reason, now):
+        """撤单/失效(临界段): 解冻 + 未成交流水 + 幂等键。"""
+        snap = self._snapshot_state()
+        try:
+            st = self.state
+            p = next((x for x in st["pending_buys"] if x["code"] == code), None)
+            if p is None:
+                return
+            st["pending_buys"] = [x for x in st["pending_buys"]
+                                  if x["code"] != code]
+            st["trades"].append({"side": "buy", "code": code,
+                                 "shares": p["shares"], "price": p["price"],
+                                 "date": now.strftime("%Y-%m-%d"),
+                                 "reason": reason,
+                                 "ts": now.strftime("%Y-%m-%dT%H:%M:%S")})
+            if reason == "queue_cancel_break":
+                if code not in st["canceled_pending_codes"]:
+                    st["canceled_pending_codes"].append(code)
+            self.save()
+        except Exception:
+            self._restore_state(snap)
 
     def _execute_buy(self, code, up_price, now=None):
         """买入执行(临界段: 内存改→不变量校验→save, 失败回滚)。"""
