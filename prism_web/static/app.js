@@ -572,6 +572,21 @@ function renderPaper(sum, det) {
     `<tr><td>${h.code}</td><td>${h.shares}</td><td>${h.cost}</td>` +
     `<td>${h.buy_date}</td></tr>`).join("") ||
     "<tr><td colspan=4 class='hint'>空仓等待信号</td></tr>";
+  // 排板排队区(Q4): pending_buys 只读展示 — queued_shares 存股, 显示折回手
+  const pb = document.getElementById("paper-pending");
+  const pc = document.getElementById("paper-pending-count");
+  const pend = (det && det.pending) || [];
+  if (pc) pc.textContent = pend.length ? `（${pend.length} 笔排队中）` : "";
+  if (pb) pb.innerHTML = pend.length ?
+    `<table><thead><tr><th>代码</th><th>委托价</th><th>股数</th>` +
+    `<th>前方封单(手)</th><th>已排队(分)</th></tr></thead><tbody>` +
+    pend.map(p => {
+      const t = new Date(p.created).getTime();
+      const mins = isFinite(t) ? Math.max(0, Math.round((Date.now() - t) / 60000)) : "-";
+      return `<tr><td>${escHtml(p.code)}</td><td>${p.price}</td><td>${p.shares}</td>` +
+        `<td>${p.queued_shares / 100}</td><td>${mins}</td></tr>`;
+    }).join("") + `</tbody></table>`
+    : `<div class="hint">无排队委托</div>`;
   const tb = document.querySelector("#paper-trades tbody");
   if (tb) tb.innerHTML = (det && det.trades || []).map(t =>
     `<tr><td>${t.ts}</td><td>${t.side}</td><td>${t.code}</td>` +

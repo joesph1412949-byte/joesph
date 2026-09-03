@@ -503,6 +503,36 @@ def test_paper_endpoints_with_ledger(client, tmp_path, monkeypatch):
     assert d["holdings"][0]["code"] == "600000.SH"
 
 
+def test_paper_pending_dom(client):
+    """模拟盘 tab 含排队区骨架(排队中 + paper-pending)。"""
+    r = client.get("/")
+    html = r.get_data(as_text=True)
+    assert "排队中" in html and "paper-pending" in html
+
+
+def test_paper_detail_pending_field(client, tmp_path, monkeypatch):
+    """detail 透出 pending 排队区(含委托字段); summary 带 pending_count。"""
+    import prism.paper as paper_mod
+
+    class RealTmpAcc(paper_mod.PaperAccount):
+        def __init__(self, **kw):
+            super().__init__(state_path=tmp_path / "p.json", **kw)
+    monkeypatch.setattr(paper_mod, "PaperAccount", RealTmpAcc)
+    acc = RealTmpAcc()
+    acc.init_account(created="2026-09-01")
+    acc.state["pending_buys"].append({
+        "code": "600000.SH", "shares": 30000, "price": 10.0,
+        "amount": 300000.0, "frozen": 300000.0,
+        "queued_shares": 2000000, "base_volume": 1000000,
+        "created": "2026-09-02T10:00:05", "slot": "T10:00"})
+    acc.save()
+    s = client.get("/api/paper/summary").get_json()
+    assert s["pending_count"] == 1
+    d = client.get("/api/paper/detail").get_json()
+    assert d["pending"][0]["code"] == "600000.SH"
+    assert d["pending"][0]["queued_shares"] == 2000000
+
+
 # ---------------- 策略编辑器端点(Task 4: create/activate/active 字段) ----------------
 
 _EDITOR_PAYLOAD = {

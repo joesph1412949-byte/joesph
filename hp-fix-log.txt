@@ -1,0 +1,6 @@
+﻿=== HP fix script started 09/01/2026 12:03:31 ===
+1) HpMallWindowsService stopped and disabled
+2) BluetoothAdvertising processes killed (count: 1)
+3) C:\$WinREAgent deleted (~1.9 GB freed)
+4) CrashDumps cleaned (files removed: 0)
+=== HP fix script done 09/01/2026 12:03:31 ===

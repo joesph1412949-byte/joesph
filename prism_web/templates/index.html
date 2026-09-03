@@ -143,6 +143,10 @@
         (到价即卖/三时点选股买入)。逐笔与净值由本地账本
         <code>.paper_account.json</code> 记录, 程序重启自动续跑。</p>
       <div id="paper-summary" class="cards"></div>
+      <div id="paper-pending-wrap">
+        <h3 style="margin-bottom:6px;">排队中 <span id="paper-pending-count" class="hint"></span></h3>
+        <div id="paper-pending"></div>
+      </div>
       <div id="paper-layout" style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
         <div>
           <h3>当前持仓</h3>

@@ -38,7 +38,7 @@
   - `detail(trade_limit=50)` 响应加 `"pending": [...]`（原样 list，含每项 code/shares/price/queued_shares/base_volume/created/slot/frozen）
   - 兼容：旧账本（无新键）load 后 `pending_buys=[]`、`canceled_pending_codes=[]`——**version 恒 1**
 
-- [ ] **Step 1: 写失败测试（追加 test_paper_account.py）**
+- [x] **Step 1: 写失败测试（追加 test_paper_account.py）**
 
 ```python
 def test_ledger_v2_keys_present():
@@ -73,12 +73,12 @@ def test_ledger_v1_old_book_migrates():
 
 （注意 test 内 `tmp_path` 需 fixture 参数——模板上下文，实现者确保签名 `def test_...(tmp_path)`。）
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_paper_account.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt116`
 Expected: 新 2 测试 FAIL（KeyError pending_buys / summary 无字段）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 paper.py 三处小改：
 
@@ -126,13 +126,13 @@ detail() 加：
         out["pending"] = list(self.state.get("pending_buys", []))
 ```
 
-- [ ] **Step 4: 跑测试确认通过 + paper 全回归**
+- [x] **Step 4: 跑测试确认通过 + paper 全回归**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_paper_account.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt116`
 Expected: 全 passed（存量 + 新 2）
 再跑 `prism/tests` 全量确认零破坏。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add prism/paper.py prism/tests/test_paper_account.py
@@ -155,7 +155,7 @@ git commit -m "feat(prism): 账本v2扩展 — pending_buys/canceled_codes键+su
   - `_execute_fill_buy(pending, now)`：成交记账（内部临界段）
   - `_dispose_pending(code, reason, now)`：撤单/失效共用（解冻 + 未成交流水 + 幂等键）
 
-- [ ] **Step 1: 写失败测试（新建 test_paper_queue.py，10 测试以下表为准）**
+- [x] **Step 1: 写失败测试（新建 test_paper_queue.py，10 测试以下表为准）**
 
 下表 10 个测试全部逐字落盘（fixture `acc(tmp_path)` 复用；tick 构造 helper `_tick(last_price, volume, bid_vol=0, last_close=None)` 返回 `{"lastPrice","lastVolume","bidVol":[bid_vol],"lastClose"}`）：
 
@@ -190,12 +190,12 @@ def test_create_freezes_cash(acc):
     assert len(acc.state["pending_buys"]) == 1          # 保持排队
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_paper_queue.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt117`
 Expected: FAIL（create_pending_buy 不存在）
 
-- [ ] **Step 3: 实现（paper.py）**
+- [x] **Step 3: 实现（paper.py）**
 
 `buy_from_screen` 候选循环中 `done = self._execute_buy(code, up, now=now)` 改为：
 
@@ -353,17 +353,17 @@ Expected: FAIL（create_pending_buy 不存在）
 
 （注：`_execute_fill_buy` 里 `now` 来自 check 传入；`holdings` 加仓字段与既有 `_execute_buy` 对齐——实现时对照现有 holdings 条目结构，避免字段不一致。）
 
-- [ ] **Step 4: 落全 10 测试并跑绿**
+- [x] **Step 4: 落全 10 测试并跑绿**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_paper_queue.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt117`
 Expected: 10 passed
 
-- [ ] **Step 5: 归回归（paper 全量）**
+- [x] **Step 5: 归回归（paper 全量）**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt117`
 Expected: 全绿（含既有 buy/sell/settle 测试——buy_from_screen 改道后 `test_paper_buy` 需同步：原测试期待 _execute_buy 直接成交 → 改为期待 pending 或适配 provider_tick 注入。**测试同步是本任务必做部分**）
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add prism/paper.py prism/tests/test_paper_queue.py prism/tests/test_paper_buy.py
@@ -388,7 +388,7 @@ git commit -m "feat(prism): 排板状态机核心 — 建委托/三结局/冻结
   - `run_forever` 启动时清理跨日 pending（created 非当日 → expire）
   - 卖出端：`sell_check` 持仓循环内、止盈止损判定前加跌停跳过
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 test_paper_sell.py 追加：
 
@@ -433,12 +433,12 @@ def test_tick_once_checks_pending_each_round(mk_daemon):
 
 （tick_once 返回结构需扩展 `pending_filled`/`pending_canceled` 键——实现时并入返回 dict，既有断言不受影响因为 key 是新增。）
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_paper_sell.py prism/tests/test_paper_daemon.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt118`
 Expected: 新测试 FAIL（无跌停跳过 / tick_once 无 pending 检查）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 paper.py `sell_check` 止盈止损判定前插入（持仓循环内、`price <= 0` 检查后）：
 
@@ -511,12 +511,12 @@ paper_daemon.py：
                                               datetime.now())
 ```
 
-- [ ] **Step 4: 跑测试确认通过 + paper 全量回归**
+- [x] **Step 4: 跑测试确认通过 + paper 全量回归**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt118`
 Expected: 全绿（含既有 daemon/sell 测试——tick_once 返回键新增不影响既有断言）
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add prism/paper.py prism/paper_daemon.py prism/tests/test_paper_sell.py prism/tests/test_paper_daemon.py
@@ -536,7 +536,7 @@ git commit -m "feat(prism): 卖出跌停顺延 + 守护排板轮询/结算清理
 - Consumes: Task 1 `detail()` 的 `pending` 区；Task 2/3 全部
 - Produces: 网页"排队中"可视（code/名称/委托价/股数/前方封单/等待时长）+ 未成交流水天然显示
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 test_app.py 追加：
 
@@ -558,12 +558,12 @@ def test_paper_detail_pending_field(client, monkeypatch):
 
 （test_paper_detail_pending_field 需复用既有 test_app 的 paper mock 机制——实现时核对现有 RealTmpAcc 注入模式沿用。）
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism_web/tests/test_app.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt119`
 Expected: 新 2 测试 FAIL（无排队区 / detail 无 pending 键——Task 1 已加键则第二个可能已过，以实际为准）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 index.html 模拟盘 tab（持仓表前）加：
 
@@ -590,25 +590,25 @@ app.js `renderPaper` 内（现有 holdings 渲染后）追加：
 
 （`minsSince` 小助手：按分钟差格式化；`escHtml` 已存在 ✓；`det` 为 renderPaper 现 detail 变量名——实现时按实际命名核对。）
 
-- [ ] **Step 4: 跑测试确认通过 + 全量回归**
+- [x] **Step 4: 跑测试确认通过 + 全量回归**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests prism_web/tests -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt119`
 Expected: 全绿（基线 401 + 新增 ~18 = 约 419）
 
-- [ ] **Step 5: 真实冒烟（用户在场；收盘后主要验证结算清理路径）**
+- [x] **Step 5: 真实冒烟（用户在场；收盘后主要验证结算清理路径）**
 
 1. `python -m prism.paper --summary` → 确认账本正常（含 pending_count 字段）
 2. 手动造一条 pending 验证存活/清理：用 `--once`?（CLI 无建委托入口——冒烟用测试账户 json 手工注入 pending → 起守护短跑 → 观察当日清理/跨日清理）——**简化**：验证 `--summary` 字段 + 守护启动日志无异常 + 若开盘时段则观察真实排队（不在场时段则等下一交易日）
 3. 网页模拟盘 tab：排队区可见（无委托时"无排队委托"提示）
 4. 安全确认：QMT_SIGNALS 零写入；账本原子保存正常
 
-- [ ] **Step 6: 台账 + 勾选 + 交付**
+- [x] **Step 6: 台账 + 勾选 + 交付**
 
 ```bash
 git add docs/superpowers/plans/2026-09-02-paper-queue.md
 git commit -m "docs(plan): 排板队列状态机实施完成(4任务/全量回归/冒烟)"
 ```
 
-- [ ] **Step 7: 交付报告（通俗）**
+- [x] **Step 7: 交付报告（通俗）**
 
 要点：模拟盘现在"打板要排队"了（成交要穿越队列、开板就撤、收盘作废）；网页"排队中"栏看得到正在排什么；未成交流水透明可查；卖出端跌停顺延；数字会比以前难看是真实的；等待下一交易日真实验收（10:00 时点看真实排队/成交/撤单）
