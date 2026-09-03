@@ -8,7 +8,9 @@
   30万/10元 = 30000 股、冻结 30 万。断言改为 30000/300000, 冻结语义
   (cash 不变、available=cash−frozen)不变。
 - 示例 bid_vol=50万股×10元=500万 < 封单门槛 2000万 → 建委托必 None,
-  示例却断言成功建单。故合格 tick 的 bid_vol 用 200 万股(=2000万门槛恰过)。
+  示例却断言成功建单。故合格 tick 的 bid_vol 用 200 万手(=2亿股×10元=20亿
+  元, 远超 2000万门槛; 审查 I-1 后 bidVol 原始值=手, 摄入 ×100 折股)。
+  门槛拒绝用例(bid_vol=10手数级)见 test_gate_seal_amount。
 - test5"两笔都30%各30万"在 100 万现金下永远可并容纳 3 笔(0.3+0.3≤1),
   第二笔不可能"现金不足"。用"现金40万+持仓60万"(净值仍100万)使每笔仍
   冻结30万, 第二笔 available=40万−30万=10万 < 30万 → None, 意图保留。
@@ -24,7 +26,9 @@ from prism.paper import PaperAccount
 
 
 def _tick(last_price, volume, bid_vol=0, last_close=None):
-    """xtdata 原生字段名 tick 构造: 手数口径 volume/bidVol。"""
+    """xtdata 原生字段名 tick 构造。量纲(审查 I-1): volume(lastVolume)=**手**,
+    bid_vol(bidVol[0])=**手**(手数口径; create_pending_buy 摄入 ×100 折股,
+    check 时 Δ手×100 折股)——mock 数字按此口径构造。"""
     return {"lastPrice": last_price, "lastVolume": volume,
             "bidVol": [bid_vol], "lastClose": last_close}
 
@@ -37,7 +41,8 @@ def acc(tmp_path):
 
 
 # 净值 100 万 × 30% = 30 万 → 30000 股 @10.0, 冻结 30 万
-_BID_OK = 2_000_000          # 200万股×10元 = 2000万 → 过封单门槛
+# _BID_OK 单位=手: 200万手 = 2亿股 ×10元 = 20亿元 ≥ 2000万 → 过封单门槛
+_BID_OK = 2_000_000
 
 
 def test_create_freezes_cash(acc):
@@ -57,7 +62,9 @@ def test_create_freezes_cash(acc):
 
 
 def test_fill_when_queue_crossed(acc):
-    """ΔV=queued+shares 且 last==price → 整单成交: holdings/扣款/流水/清 pending。"""
+    """成交穿越: Δ手×100(股) ≥ queued_shares(股)+shares(股) 且 last==price →
+    整单成交: holdings/扣款/流水/清 pending。volume=303万手 → 手差=203万手
+    (=2.03亿股 ≥ 2.0003亿股门槛)。"""
     acc.create_pending_buy("600000", 10.0, datetime(2026, 9, 2, 10, 0, 5),
                            _tick(10.0, 1_000_000, bid_vol=_BID_OK))
     out = acc.check_pending_buys({"600000": _tick(10.0, 3_030_000)},
@@ -148,10 +155,13 @@ def test_canceled_code_blocks_retry(acc):
 
 
 def test_gate_seal_amount(acc):
-    """封单金额门槛: bidVol1×price < 2000万 → 不建委托。"""
+    """封单金额门槛: bidVol0(手)×100×price < 2000万 → 不建委托。
+    bid_vol=1万手=100万股 → 封单金额=100万股×10元=1000万 < 2000万。
+    (审查 I-1 改口径后重定标: 原 10 万"股"数字在 ×100 门槛下 1 亿已过门,
+    按"封单 1000 万元"原意图取 1 万手。)"""
     p = acc.create_pending_buy("600000", 10.0, datetime(2026, 9, 2, 10, 0, 5),
-                               _tick(10.0, 1_000_000, bid_vol=100_000))
-    assert p is None                                  # 100万×10=1000万 < 2000万
+                               _tick(10.0, 1_000_000, bid_vol=10_000))
+    assert p is None                                  # 100万股×10元=1000万 < 2000万
     assert acc.state["pending_buys"] == []
 
 
@@ -164,7 +174,8 @@ def test_gate_tail_no_queue(acc):
 
 
 def test_fill_price_no_slip(acc):
-    """排队成交价 = 挂单价(无 +0.1% 上滑): holdings cost 恰为 10.0。"""
+    """排队成交价 = 挂单价(无 +0.1% 上滑): holdings cost 恰为 10.0。
+    (同 test_fill_when_queue_crossed 的 Δ手 穿越构造。)"""
     acc.create_pending_buy("600000", 10.0, datetime(2026, 9, 2, 10, 0, 5),
                            _tick(10.0, 1_000_000, bid_vol=_BID_OK))
     acc.check_pending_buys({"600000": _tick(10.0, 3_030_000)},

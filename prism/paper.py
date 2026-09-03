@@ -314,7 +314,9 @@ class PaperAccount:
             return None
         bv = tick.get("bidVol") or [0]
         bid_vol = bv[0] or 0
-        if bid_vol * up_price < 20_000_000:
+        # 量纲(审查 I-1): bidVol[0] 单位=手(xtdata 手数口径) → ×100 折股;
+        # 封单金额(元) = 股×价, 门槛 2000 万。
+        if bid_vol * 100 * up_price < 20_000_000:
             return None
         # 金额(沿用 _execute_buy 的手数/金额口径: 净值30% → 100股取整)
         amount = nav * self.position_ratio
@@ -328,7 +330,9 @@ class PaperAccount:
         self.state["pending_buys"].append({
             "code": code, "shares": shares, "price": up_price,
             "amount": round(frozen, 4), "frozen": round(frozen, 4),
-            "queued_shares": int(bid_vol),
+            # queued_shares 单位=股: bidVol[0](手)×100, 与 holdings.shares 同量纲
+            "queued_shares": int(bid_vol) * 100,
+            # base_volume 单位=手: 与 lastVolume 同口径原样存; check 时手差×100→股
             "base_volume": int(tick.get("lastVolume") or 0),
             "created": now.strftime("%Y-%m-%dT%H:%M:%S"),
             "slot": now.strftime("T%H:%M")})
@@ -354,7 +358,9 @@ class PaperAccount:
                 self._dispose_pending(p["code"], "queue_cancel_break", now)
                 canceled.append(p["code"])
                 continue
-            dvol = int(t.get("lastVolume") or 0) - p["base_volume"]
+            # dvol 单位=股: lastVolume(手) − base_volume(手) = 手差, ×100 折股,
+            # 与 queued_shares(股)+shares(股) 同量纲比较(成交条件才可满足)
+            dvol = (int(t.get("lastVolume") or 0) - p["base_volume"]) * 100
             if dvol >= p["queued_shares"] + p["shares"] \
                     and abs(last - p["price"]) <= 0.001:
                 if self._execute_fill_buy(p, now):

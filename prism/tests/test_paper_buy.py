@@ -20,13 +20,15 @@ NOW = datetime(2026, 9, 1, 10, 0, 0)
 
 
 def _tick(last_price, volume, bid_vol=0, last_close=None):
-    """xtdata 原生字段名 tick: 封单门槛需 bidVol×price>=2000万。"""
+    """xtdata 原生字段名 tick。量纲(审查 I-1): volume(lastVolume)=**手**,
+    bid_vol(bidVol[0])=**手**(手数口径; 封单金额=bid_vol×100(股)×价)。
+    """
     return {"lastPrice": last_price, "lastVolume": volume,
             "bidVol": [bid_vol], "lastClose": last_close}
 
 
 def _ticks_for(code, price, volume):
-    """候选池盘口注入: 200万股(bidVol)×10元=2000万 恰过封单门槛。"""
+    """候选池盘口注入: 200万手(bidVol)=2亿股×10元=20亿元 ≥ 2000万 过封单门槛。"""
     return lambda codes: {code: _tick(price, volume, bid_vol=2_000_000)}
 
 
@@ -189,7 +191,8 @@ def test_buy_skip_traded_today(acc, monkeypatch):
     now2 = datetime(2026, 9, 2, 10, 0, 0)
     acc.buy_from_screen(_FakeProvider(ups=CAND), now=now2,
                         tick_provider=_ticks_for("600000.SH", 10.0, 1_000_000))
-    # 成交量穿越前排(1e6+200万+3万)且 last==涨停价 → 排板成交
+    # 成交量穿越前排(Δ手×100≥queued股+shares股): 303万手−100万手=203万手
+    # →2.03亿股 ≥ 2亿股+3万股 → 且 last==涨停价 → 排板成交
     acc.check_pending_buys({"600000.SH": _tick(10.0, 3_030_000)},
                            now=now2.replace(minute=1))
     assert len(acc.state["trades"]) == 1
