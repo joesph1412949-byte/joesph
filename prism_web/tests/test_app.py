@@ -63,6 +63,9 @@ def test_strategy_detail(client):
 def test_screen_default_strategy_is_v04(client, tmp_path, monkeypatch):
     """/api/screen 无 strategy 参数 → 默认 first_board_v04(实盘切换,
     2026-09-01 用户决策; v03 起默认为 default.json, 本测试锁定新默认)。"""
+    import prism.engine as engine
+    # I-F1: 指针隔离 — 空 tmp 目录 → 指针缺失回落 v04, 不再依赖仓库真实指针
+    monkeypatch.setattr(engine, "STRATEGIES_DIR", tmp_path)
     monkeypatch.setattr(app_module.ds_obj, "_connected", True)
     monkeypatch.setattr(app_module, "SNAPSHOT_PATH",
                         tmp_path / "screen_result.json")

@@ -648,13 +648,16 @@ async function copyToEditor(sid) {
   const s = data.strategy;
   await openEditor({
     models: (s.scoring_models || []).map(m => ({
-      name: m.name, weight: m.weight, factors: m.factors, weights: m.weights})),
+      name: m.name, weight: m.weight,
+      factors: (m.factors || []).map(x => typeof x === "string" ? x : x.id),
+      weights: (m.factors || []).map(x => typeof x === "string" ? 1.0 : (x.weight || 1.0)),
+    })),
     gate_factors: (s.market_gate || {}).factors || [],
     gate_threshold: (s.market_gate || {}).threshold,
     candidate_min_model: (s.filters || {}).candidate_min_model,
     sell: s.sell_rules || {},
   });
-  alert("已载入「" + (s.name || sid) + "」为底稿, 改名后保存为新策略");
+  alert("已载入「" + (s.name || sid) + "」为底稿, 改名后保存为新策略。组合方式将按 top3_weighted 保存");
 }
 
 function collectEditorPayload() {
@@ -692,7 +695,9 @@ async function saveStrategy() {
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify(collectEditorPayload())});
     if (!res.ok) {
-      errBox.innerHTML = (res.errors || [res.error || "未知错误"]).map(e => `<div>${e}</div>`).join("");
+      // M1: 后端错误文案含用户输入/策略名 → 转义后再入 innerHTML
+      errBox.innerHTML = (res.errors || [res.error || "未知错误"])
+        .map(e => `<div>${escHtml(e)}</div>`).join("");
       return;
     }
     alert("已保存: " + res.id + " (可在列表点「设为默认」启用)");   // M2
