@@ -165,25 +165,27 @@ def test_f2_not_sealed_matches_old():
 
 
 # ---------- F3 封单强度 ----------
+# 注: 2026-09-02 单位修复(bidVol=手, 封单额=bidVol×100×价)。旧实现缺 ×100
+# (按头算金额) 是 bug, 迁移对比不再适用 → 改为独立语义断言, 不再比对 _old_stock。
 
-def test_f3_seal_strength_matches_old():
-    code = "000001.SZ"
-    tick, detail = (_hit_tick(bidVol=[1000000, 0, 0, 0, 0],
-                              bidPrice=[11.0, 0, 0, 0, 0]),
-                    _hit_detail(11.0, 1e8))  # 封单额1.1e7 >= 流通市值1.1e9*0.5%
-    old = _old_stock(code, tick, detail)["F3"]
-    res = reg.get_factor("F3")["func"](_stock_ctx(code, tick, detail))
-    assert res["score"] == old["score"] == 1
-
-
-def test_f3_insufficient_matches_old():
+def test_f3_seal_strength_passes_when_sufficient():
+    """1万手封单(≈1亿股) ×11元 = 1.1e9 ≥ 流通市值1.1e9×0.5%=5.5e6 → 1分。"""
     code = "000001.SZ"
     tick, detail = (_hit_tick(bidVol=[10000, 0, 0, 0, 0],
                               bidPrice=[11.0, 0, 0, 0, 0]),
-                    _hit_detail(11.0, 1e8))
-    old = _old_stock(code, tick, detail)["F3"]
+                    _hit_detail(11.0, 1e8))     # 流通市值1.1e9
     res = reg.get_factor("F3")["func"](_stock_ctx(code, tick, detail))
-    assert res["score"] == old["score"] == 0
+    assert res["score"] == 1
+
+
+def test_f3_seal_strength_fails_when_insufficient():
+    """100手封单(1万股) ×11元 = 1.1e5 < 流通市值0.5% → 0分。"""
+    code = "000001.SZ"
+    tick, detail = (_hit_tick(bidVol=[100, 0, 0, 0, 0],
+                              bidPrice=[11.0, 0, 0, 0, 0]),
+                    _hit_detail(11.0, 1e8))
+    res = reg.get_factor("F3")["func"](_stock_ctx(code, tick, detail))
+    assert res["score"] == 0
     assert "封单不足" in res["note"]
 
 

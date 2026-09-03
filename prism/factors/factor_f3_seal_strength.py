@@ -14,7 +14,8 @@ def compute(ctx):
     tick = ctx.tick or {}
     bid0 = (tick.get("bidPrice") or [0])[0]
     bidv0 = (tick.get("bidVol") or [0])[0]
-    seal_amount = bid0 * bidv0
+    # bidVol 单位=手(xtdata 官方示例实证) → ×100 折股 → 封单金额(元)
+    seal_amount = bid0 * bidv0 * 100
     float_mv = ctx.up_price * float_vol
     code = ctx.code or ""
     ratio = 0.005 if not code.startswith(("300", "301", "688")) else 0.002
