@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""M6横盘突破 / M7年线企稳 / Y8中市值 / SEC策略加载 测试。全离线。"""
+"""M6横盘突破 / M7年线企稳 / Y8中市值 测试。全离线。"""
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -9,8 +9,6 @@ import pandas as pd
 
 import prism.registry as reg
 from prism.context import FactorContext
-from prism.engine import load_strategy
-from prism.strategies import STRATEGIES_DIR
 import prism.factors  # noqa: F401  触发扫描注册
 
 
@@ -92,30 +90,6 @@ def test_y8_missing_fund_fails_open():
     res = reg.get_factor("Y8")["func"](
         FactorContext(code="600000.SH", fund={}))
     assert res["score"] == 0
-
-
-def test_sector_momentum_strategy_loads():
-    """SEC 实验策略可加载且因子都存在。"""
-    sp = STRATEGIES_DIR / "sector_momentum.json"
-    assert sp.exists()
-    s = load_strategy(sp)
-    fids = set()
-    for m in s["scoring_models"]:
-        for f in m["factors"]:
-            fids.add(f["id"] if isinstance(f, dict) else f)
-    assert fids == {"SEC1", "SEC2", "SEC3", "SEC4", "SEC6", "M1", "M6"}
-    # 门槛含宏观因子
-    gate = s["market_gate"]["factors"]
-    assert set(gate) <= {"N1", "N6", "N7", "N8"} and gate
-    # v4: 门槛需3/4通过(弱市不开仓) + 移动止盈配置
-    assert s["market_gate"]["threshold"] == 3
-    assert s["sell_rules"].get("trailing_pct") == [8, 5]
-    # v5: 板块综合评分链(设计 §4.1) — 回测未过验收, 默认关闭(保留实验)
-    ss = s["sector_score"]
-    assert ss["enabled"] is False
-    assert ss["threshold"] == 75
-    assert ss["position"]["step"] == 0.05
-    assert ss["position"]["cap_ratio"] == 0.45
 
 
 def test_new_factors_registered():

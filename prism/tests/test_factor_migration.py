@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """因子迁移比对: 新因子(prism.factors) vs 旧实现(strategy_web.factors) 输出一致。
 
-对全部 24 个因子逐因子构造相同假数据, 分别跑旧实现与新注册因子, 断言
-score(必要时含 note)一致; 另含 default.json 可加载验收。
-东财/手填因子不调网络: ctx.fund / ctx.manual 直接注入假数据。
+对全部 23 个存活迁移因子逐因子构造相同假数据, 分别跑旧实现与新注册因子, 断言
+score(必要时含 note)一致; 另含 36 因子注册核对与 full_factor_v1 验收位(文件 Task F2 落盘)。
+东财因子不调网络: ctx.fund 直接注入假数据。
 """
 import sys
 import datetime as _dt
@@ -16,7 +16,6 @@ import pytest
 
 import prism.registry as reg
 from prism.context import FactorContext
-from prism.engine import load_strategy
 import prism.factors  # noqa: F401  触发扫描注册
 
 # ---- 旧实现(比对基准) ----
@@ -24,9 +23,9 @@ from strategy_web.factors import FactorEngine  # noqa: F401
 from strategy_web.fundamental import FundamentalFeed  # noqa: F401
 
 
-ALL_24_IDS = ["F1", "F2", "F3", "F4", "F5", "F6", "F7",
+ALL_23_IDS = ["F1", "F2", "F3", "F4", "F5", "F6", "F7",
               "Y1", "Y2", "Y3", "Y4", "Y5", "Y6", "Y7",
-              "S1", "S2", "S3", "S4", "S5", "S6", "S7",
+              "S2", "S3", "S4", "S6",
               "N1", "N2", "N3", "N4", "N5"]
 
 
@@ -336,20 +335,6 @@ def test_y4_flat_matches_old():
     assert res["score"] == old["score"] == 0
 
 
-# ---------- 手填因子(S1/S5/S7): ctx.manual 注入 ----------
-
-@pytest.mark.parametrize("fid", ["S1", "S5", "S7"])
-def test_manual_factor_reads_manual(fid):
-    res = reg.get_factor(fid)["func"](_ctx(manual={fid: 1}))
-    assert res["score"] == 1
-
-
-@pytest.mark.parametrize("fid", ["S1", "S5", "S7"])
-def test_manual_factor_missing_zero(fid):
-    res = reg.get_factor(fid)["func"](_ctx(manual={}))
-    assert res["score"] == 0
-
-
 # ---------- S2 量价堆积密度 ----------
 
 def test_s2_matches_old():
@@ -602,10 +587,10 @@ def test_n5_below_threshold_matches_old():
     assert res["score"] == old["score"] == 0
 
 
-# ---------- 注册完整性 + 分类 + default.json 验收 ----------
+# ---------- 注册完整性 + 分类 ----------
 
-def test_all_24_factors_registered():
-    for fid in ALL_24_IDS:
+def test_all_23_factors_registered():
+    for fid in ALL_23_IDS:
         assert fid in reg.FACTORS, "因子未注册: %s" % fid
 
 
@@ -613,12 +598,29 @@ def test_factor_categories():
     assert reg.FACTORS["F1"]["category"] == "first_board"
     assert reg.FACTORS["F7"]["category"] == "first_board"
     assert reg.FACTORS["Y1"]["category"] == "monster"
-    assert reg.FACTORS["S1"]["category"] == "momentum"
+    assert reg.FACTORS["S2"]["category"] == "momentum"
     for fid in ["N1", "N2", "N3", "N4", "N5"]:
         assert reg.FACTORS[fid]["category"] == "node"
 
 
-def test_default_strategy_loads():
-    """验收: default.json 可被 load_strategy 成功加载(24 因子全部已注册)。"""
-    s = load_strategy(Path(__file__).parent.parent / "strategies" / "default.json")
-    assert s["id"] == "default"
+# ---------- 2026-09-03 清理: 删除因子缺席 + full_factor_v1 验收 ----------
+
+def test_removed_factors_absent():
+    """2026-09-03 清理: M1-M5 与 S1/S5/S7 已删除, 不再注册。"""
+    for fid in ("M1", "M2", "M3", "M4", "M5", "S1", "S5", "S7"):
+        assert fid not in reg.FACTORS, "%s 应已删除" % fid
+    assert len(reg.FACTORS) == 36
+
+
+def test_full_factor_v1_loads():
+    """验收: full_factor_v1 四层 36 因子可加载且因子全部注册。"""
+    from prism.engine import load_strategy
+    s = load_strategy(Path(__file__).parent.parent / "strategies"
+                      / "full_factor_v1.json")
+    assert s["id"] == "full_factor_v1"
+    fids = [f for m in s["scoring_models"] for f in m["factors"]]
+    gate = s["market_gate"]["factors"]
+    assert len(fids) == 28            # 9 首板 + 8 妖股 + 11 势能板块
+    assert len(gate) == 8             # N1-N8
+    assert len(set(fids) | set(gate)) == 36   # 评分与门控无重叠, 合计 36
+    assert all(f in reg.FACTORS for f in set(fids) | set(gate))

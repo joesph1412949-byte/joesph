@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
-"""first_board_v03/v04 策略文件测试 + default.json 快照保护。全离线。"""
-import json
+"""first_board_v03/v04 策略文件测试。全离线。"""
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -10,27 +9,6 @@ import prism.factors  # noqa: F401
 import prism.registry as reg
 
 STRAT_DIR = Path(__file__).parent.parent / "strategies"
-
-DEFAULT_SNAPSHOT = {
-    "id": "default",
-    "name": "默认四模型策略",
-    "description": "兼容现有 4 模型 24 因子的默认策略。势能模型原手填因子 S1/S5/S7 已替换为 K线自动因子 M1/M2/M5(全自动计算, 可回测验证)。",
-    "market_gate": {"model": "node", "threshold": 3,
-                    "factors": ["N1", "N2", "N3", "N4", "N5"]},
-    "scoring_models": [
-        {"id": "first_board", "name": "首板", "weight": 0.60,
-         "factors": ["F1", "F2", "F3", "F4", "F5", "F6", "F7"]},
-        {"id": "monster", "name": "妖股", "weight": 0.25,
-         "factors": ["Y1", "Y2", "Y3", "Y4", "Y5", "Y6", "Y7"]},
-        {"id": "momentum", "name": "势能", "weight": 0.15,
-         "factors": ["M1", "M2", "S2", "S3", "S4", "S6", "M5"]}
-    ],
-    "composite": {"mode": "top3_weighted", "weights": [0.60, 0.25, 0.15],
-                  "cap": 7.0},
-    "filters": {"candidate_min_model": 3, "environment_threshold": 3},
-    "sell_rules": {"take_profit_pct": 0.08, "stop_loss_pct": 0.05,
-                   "max_hold_days": 5}
-}
 
 
 def _load(name):
@@ -58,11 +36,6 @@ def test_v03_baseline_matches_v04_except_factors():
     assert v03["composite"]["cap"] == 7.0
     for key in ("market_gate", "filters", "sell_rules"):
         assert v03[key] == v04[key], key      # 除因子/上限外完全同构
-
-
-def test_default_snapshot_unchanged():
-    with open(STRAT_DIR / "default.json", encoding="utf-8") as f:
-        assert json.load(f) == DEFAULT_SNAPSHOT
 
 
 def test_v04_runs_end_to_end_smoke():

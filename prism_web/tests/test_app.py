@@ -48,21 +48,21 @@ def test_strategies_list(client):
     assert r.status_code == 200
     data = r.get_json()
     assert data["ok"] is True
-    assert any(s["id"] == "default" for s in data["strategies"])
+    assert any(s["id"] == "first_board_v04" for s in data["strategies"])
 
 
 def test_strategy_detail(client):
-    r = client.get("/api/strategy/default")
+    r = client.get("/api/strategy/first_board_v04")
     assert r.status_code == 200
     data = r.get_json()
     assert data["ok"] is True
-    assert data["strategy"]["id"] == "default"
+    assert data["strategy"]["id"] == "first_board_v04"
     assert data["strategy"]["scoring_models"]
 
 
 def test_screen_default_strategy_is_v04(client, tmp_path, monkeypatch):
     """/api/screen 无 strategy 参数 → 默认 first_board_v04(实盘切换,
-    2026-09-01 用户决策; v03 起默认为 default.json, 本测试锁定新默认)。"""
+    2026-09-01 用户决策; 本测试锁定新默认, 历史默认策略文件已删)。"""
     import prism.engine as engine
     # I-F1: 指针隔离 — 空 tmp 目录 → 指针缺失回落 v04, 不再依赖仓库真实指针
     monkeypatch.setattr(engine, "STRATEGIES_DIR", tmp_path)
@@ -166,7 +166,7 @@ def test_backtest_unknown_strategy_404(client):
 
 def test_backtest_feeds_unavailable_500(client, monkeypatch):
     monkeypatch.setattr(app_module, "_BACKTEST_FEEDS_OK", False)
-    r = client.get("/api/backtest?strategy=default&start=20260101&end=20260105")
+    r = client.get("/api/backtest?strategy=first_board_v04&start=20260101&end=20260105")
     assert r.status_code == 500
     assert r.get_json()["ok"] is False
     assert "回测数据源不可用" in r.get_json()["error"]
@@ -222,7 +222,7 @@ def test_screen_runs_prism_engine(client, tmp_path, monkeypatch):
     }
     monkeypatch.setattr(app_module, "_run_prism_screen",
                         lambda strategy, provider: dict(canned))
-    r = client.post("/api/screen", json={"strategy": "default"})
+    r = client.post("/api/screen", json={"strategy": "first_board_v04"})
     assert r.status_code == 200
     data = r.get_json()
     assert data["environment_ok"] is True
@@ -238,13 +238,13 @@ def test_screen_runs_prism_engine(client, tmp_path, monkeypatch):
 def test_manual_roundtrip(client, tmp_path, monkeypatch):
     """旧路由 /api/stock/<code>/manual 保留冒烟(临时文件避免污染)。
 
-    手填因子已全部被 K线自动因子取代(2026-08): S1/S5/S7 移出手填集合 →
-    写入任何手填因子都被拒(400), 读取返回空 {}。"""
+    手填因子已全部被 K线自动因子取代(2026-08; 原 S1/S5/S7 因子已于
+    09-03 删除) → 写入任何非手填因子都被拒(400), 读取返回空 {}。"""
     from manual_store import ManualStore
     s = ManualStore(str(tmp_path / "m.json"))
     monkeypatch.setattr(app_module, "manual_store_obj", s)
-    r = client.post("/api/stock/002859.SZ/manual", json={"S1": 1})
-    assert r.status_code == 400          # S1 不再是手填因子 → 拒
+    r = client.post("/api/stock/002859.SZ/manual", json={"F1": 1})
+    assert r.status_code == 400          # F1 非手填因子 → 拒
     r2 = client.get("/api/stock/002859.SZ/manual")
     assert r2.get_json() == {}           # 无手填因子 → 空
 
@@ -292,7 +292,7 @@ def test_screen_market_payload_contract(client, tmp_path, monkeypatch):
     monkeypatch.setattr(app_module, "DataProvider",
                         lambda ds=None, manual=None: provider)
 
-    r = client.post("/api/screen", json={"strategy": "default"})
+    r = client.post("/api/screen", json={"strategy": "first_board_v04"})
     assert r.status_code == 200
     m = r.get_json()["market"]
     assert m["stage"] == "回暖期"          # gate_score=4 → classify_market
@@ -301,7 +301,8 @@ def test_screen_market_payload_contract(client, tmp_path, monkeypatch):
     assert m["limit_up_count"] == 0
     assert m["top_themes"] == [{"name": "AI"}, {"name": "机器人"}]
     # 门槛因子逐个收集为 {fid: {"score":…, "note":…}}
-    for fid in ("N1", "N2", "N3", "N4", "N5"):
+    # (v04 门槛仅 N1; 原 default 为 N1-N5 已删, full_factor_v1 落盘后可扩回多因子)
+    for fid in ("N1",):
         assert fid in m["factors"], "market.factors 缺 %s" % fid
         assert "score" in m["factors"][fid] and "note" in m["factors"][fid]
 
@@ -323,7 +324,7 @@ def test_screen_candidates_merged_fields(client, tmp_path, monkeypatch):
                                            "strength": "强", "position": "50%",
                                            "first_board": 4, "monster": 3,
                                            "momentum": 2},
-                                "factors": {"F1": 1, "Y1": 1, "S1": 1, "F2": 0},
+                                "factors": {"F1": 1, "Y1": 1, "S2": 1, "F2": 0},
                                 "up_stop_price": None, "last": None}],
                 "summary": {"candidate_count": 1, "a_count": 1, "b_count": 0,
                             "c_count": 0, "d_count": 0}}
@@ -335,7 +336,7 @@ def test_screen_candidates_merged_fields(client, tmp_path, monkeypatch):
     monkeypatch.setattr(app_module, "DataProvider",
                         lambda ds=None, manual=None: provider)
 
-    r = client.post("/api/screen", json={"strategy": "default"})
+    r = client.post("/api/screen", json={"strategy": "first_board_v04"})
     assert r.status_code == 200
     c = r.get_json()["candidates"][0]
     assert c["name"] == "洁美科技"
@@ -346,7 +347,7 @@ def test_screen_candidates_merged_fields(client, tmp_path, monkeypatch):
     am = c["auto_manual"]
     assert am["F1"] == "auto"
     assert am["Y1"] == "fundamental"      # 东财个股因子
-    assert am["S1"] == "auto"             # S1 已移出手填集合(2026-08) → 归为 auto
+    assert am["S2"] == "auto"             # S2 现存非手填因子 → 归为 auto
     assert am["F2"] == "auto"
 
 
@@ -369,7 +370,7 @@ def test_screen_lock_conflict_409(client, monkeypatch):
 
 def test_backtest_start_after_end_400(client):
     """M1: start > end → 400(不再返回 200 空报告)。"""
-    r = client.get("/api/backtest?strategy=default&start=20260110&end=20260105")
+    r = client.get("/api/backtest?strategy=first_board_v04&start=20260110&end=20260105")
     assert r.status_code == 400
     assert "不能晚于" in r.get_json()["error"]
 
