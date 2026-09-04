@@ -31,6 +31,14 @@ def _next_weekday(d):
     return cur.isoformat()
 
 
+def _limit_ratio(code):
+    """分板涨停系数回落: 688/300/301→20%, 其余→10%。
+    ponytail: 近似——tick 无股票名, 不含 ST(±5%)/北交所(±30%); F1 因子
+    (factor_f1_first_board.py)另有 8/4→30% 档但系数是局部变量不可 import。
+    真实值以 daemon 注入的 upStopPrice/downStopPrice 为准, 此处仅兜底。"""
+    return 0.20 if code.startswith(("300", "301", "688")) else 0.10
+
+
 class PaperAccount:
     """模拟账户: 账本 + 买入/卖出执行 + 结算 + 查询。
 
@@ -350,9 +358,15 @@ class PaperAccount:
                     skipped.append({"code": code, "reason": "无行情"})
                     continue
                 prev = float(t["lastClose"])
-                up = round(prev * 1.1, 2)          # 今日涨停价(主板 10%)
-                low = round(prev * 0.9, 2)         # 今日跌停价
-                # ponytail: 跟随引擎口径 — ST/创业板涨跌停幅度差异不在此扩
+                # 涨跌停价: tick 显式字段优先(daemon 注入真实值, 引擎口径=
+                # 数据源 UpStopPrice); 缺失 → 分板系数回落(禁全局 ±10%:
+                # 20cm/ST 误判会让涨停开盘死价排队或照买, spec §5①)
+                up = float(t.get("upStopPrice") or 0)
+                low = float(t.get("downStopPrice") or 0)
+                if not up:
+                    up = round(prev * (1 + _limit_ratio(code)), 2)
+                if not low:
+                    low = round(prev * (1 - _limit_ratio(code)), 2)
                 open_px = float(t["open"])
                 nav = self._nav_estimate()
                 reason = self._buyable(code, nav, now)

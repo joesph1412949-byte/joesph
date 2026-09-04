@@ -149,10 +149,17 @@ def test_position_ratio_fallback_without_execution(tmp_path, monkeypatch):
     assert a.position_ratio == 0.42                 # 回落构造参数
 
 
-def _otick(open_px, last_close, bid_vol=100_000, last_volume=1_000_000):
-    """开盘买入用 tick: open=开盘价, lastClose=昨收。"""
-    return {"lastPrice": open_px, "open": open_px, "lastClose": last_close,
-            "lastVolume": last_volume, "bidVol": [bid_vol]}
+def _otick(open_px, last_close, bid_vol=100_000, last_volume=1_000_000,
+           up_stop=None, down_stop=None):
+    """开盘买入用 tick: open=开盘价, lastClose=昨收; 涨跌停价默认不给
+    (回落分板系数), 显式传入时带 upStopPrice/downStopPrice(Task4 注入口径)。"""
+    t = {"lastPrice": open_px, "open": open_px, "lastClose": last_close,
+         "lastVolume": last_volume, "bidVol": [bid_vol]}
+    if up_stop is not None:
+        t["upStopPrice"] = up_stop
+    if down_stop is not None:
+        t["downStopPrice"] = down_stop
+    return t
 
 
 def test_open_buy_at_open_price(acc, monkeypatch):
@@ -181,6 +188,36 @@ def test_open_buy_one_word_queues(acc):
     assert out["queued"] == ["600000"] and out["bought"] == []
     p = acc.state["pending_buys"][0]
     assert p["price"] == 11.0 and p["base_volume"] == 1_000_000  # 走排队状态机
+    assert acc.state["planned_buys"] == []
+
+
+def test_open_buy_20cm_one_word_queues(acc):
+    """创业板(20cm)无显式涨跌停字段 → 分板系数回落 up=12.0, 一字排队价 12.0
+    (回归: 旧全局 10% 误算 11.0 → 死价永不成交)。"""
+    acc.state["planned_buys"] = [{"code": "300001", "score": 5.0,
+                                  "date": "2026-09-04",
+                                  "for_date": "2026-09-07"}]
+    ticks = {"300001": _otick(12.0, 10.0, bid_vol=2_000_000)}  # 开盘=+20%涨停
+    out = acc.execute_open_buys(lambda codes: ticks,
+                                now=datetime(2026, 9, 7, 9, 26))
+    assert out["queued"] == ["300001"] and out["bought"] == []
+    p = acc.state["pending_buys"][0]
+    assert p["price"] == 12.0                       # 分板回落 10×1.2, 非 11.0
+    assert acc.state["planned_buys"] == []
+
+
+def test_open_buy_explicit_upstop_wins(acc):
+    """tick 显式 upStopPrice 优先于分板回落(模拟 ST ±5%):
+    昨收10 开盘11 == 真实涨停 → 排队价 10.5, 不得按 11.0 误排/照买。"""
+    acc.state["planned_buys"] = [{"code": "600000", "score": 5.0,
+                                  "date": "2026-09-04",
+                                  "for_date": "2026-09-07"}]
+    ticks = {"600000": _otick(11.0, 10.0, bid_vol=2_000_000, up_stop=10.5)}
+    out = acc.execute_open_buys(lambda codes: ticks,
+                                now=datetime(2026, 9, 7, 9, 26))
+    assert out["queued"] == ["600000"] and out["bought"] == []
+    p = acc.state["pending_buys"][0]
+    assert p["price"] == 10.5                       # 显式字段胜过 10% 回落
     assert acc.state["planned_buys"] == []
 
 
