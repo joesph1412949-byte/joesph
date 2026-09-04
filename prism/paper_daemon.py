@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""模拟盘守护进程: 盘中实时盯盘 + 三时点选股 + 收盘结算 + 缺口补算。
+"""模拟盘守护进程: 盘中实时盯盘 + 15:05收盘选股 + 次日开盘买入 + 收盘结算 + 缺口补算。
 
 用法: python -m prism.paper_daemon
 安全(设计 §8): 本进程绝不写 D:\\QMT_SIGNALS、不调用任何下单接口——纯记账;
@@ -10,14 +10,17 @@ from datetime import datetime
 
 from prism.paper import PaperAccount
 
-SCREEN_TIMES = ("10:00", "13:30", "14:30")
+LOG = logging.getLogger("paper_daemon")
+PICK_SLOT = "15:05"               # 收盘选股时点(spec §5)
+OPEN_WINDOW = ("09:26", "09:35")  # 次日开盘买入窗口(spec §5)
 SETTLE_AFTER = "15:00"
 POLL_SECONDS = 5
 INDEX_CODE = "000001.SH"          # 上证指数: 交易日历来源
 
 
 class PaperDaemon:
-    """调度器: 每 POLL_SECONDS 一轮; 时点选股/收盘结算由 tick_once 触发。"""
+    """调度器: 每 POLL_SECONDS 一轮; 15:05选股/开盘买入窗口/收盘结算由
+    tick_once 触发。"""
 
     def __init__(self, account, ticks_fn=None, sleep_fn=None, now_fn=None):
         self.account = account
@@ -72,9 +75,27 @@ class PaperDaemon:
         except Exception:
             return {}
 
+    # ---------- 开盘买入行情(spec §5, C2 注入) ----------
+    def _open_buy_ticks(self, codes):
+        """开盘买入行情: 轮询行情 + 注入真实涨跌停价(来源 ds.get_instrument
+        的 UpStopPrice/DownStopPrice, data.py 同模式); 拿不到 → 不补
+        (paper 层自动分板回落)。"""
+        ticks = self._quote_ticks(codes)
+        for code, t in ticks.items():
+            try:
+                det = self.provider.ds.get_instrument(code) or {}
+            except Exception:
+                continue
+            if det.get("UpStopPrice"):
+                t["upStopPrice"] = det["UpStopPrice"]
+            if det.get("DownStopPrice"):
+                t["downStopPrice"] = det["DownStopPrice"]
+        return ticks
+
     # ---------- 单轮 ----------
     def tick_once(self, now=None):
-        """一轮: 15:00后未结算→结算(幂等); 盘中→tick卖检查+到点选股; 其余 idle。
+        """一轮: 15:00后未结算→结算(幂等)+15:05收盘选股; 09:26-09:35 开盘
+        买入窗口; 盘中→tick卖检查; 其余 idle。
 
         行情异常/账本未初始化 → 本轮跳过不记账(设计 §8/§11)。"""
         now = now or (self.now_fn() if self.now_fn else datetime.now())
@@ -100,6 +121,35 @@ class PaperDaemon:
                     self.close_fn, due_fn=lambda c, bd: self._due_natural(bd, d),
                     provider=self.provider, now=now)
                 out["action"] = "settle"
+            # 收盘选股(spec §5): 15:05, 同 tick 先结算后选股; 幂等键带日期
+            # (C1: pickT<日>T15:05 每日唯一), 结果落日志(C3)
+            if hm >= PICK_SLOT and self.provider \
+                    and "pickT%sT%s" % (d, PICK_SLOT) \
+                    not in st["screens_done"]:
+                try:
+                    self.provider.invalidate()   # 刷新涨停池缓存
+                except Exception:
+                    pass
+                out["pick"] = self.account.pick_top5_at_close(
+                    self.provider, now=now, slot="%sT%s" % (d, PICK_SLOT))
+                out["action"] = "pick"
+                LOG.info("收盘选股: env_ok=%s picked=%s",
+                         out["pick"].get("env_ok"),
+                         [p["code"] for p in out["pick"].get("picked", [])])
+            return out
+        # 开盘买入窗口(spec §5): 09:26-09:35, 消费 for_date==今日 的计划;
+        # 触发轮直接返回(买优先于盯盘), 计划被消费后下轮恢复正常盯盘
+        if now.weekday() < 5 and OPEN_WINDOW[0] <= hm <= OPEN_WINDOW[1] \
+                and self.provider and any(
+                    p.get("for_date") == d
+                    for p in self.account.state.get("planned_buys", [])):
+            out["open_buys"] = self.account.execute_open_buys(
+                self._open_buy_ticks, now=now)
+            out["action"] = "open_buys"
+            LOG.info("开盘买入: bought=%s queued=%s skipped=%s",
+                     out["open_buys"].get("bought"),
+                     out["open_buys"].get("queued"),
+                     out["open_buys"].get("skipped"))
             return out
         if not self.in_session(now) or self.provider is None:
             return out
@@ -117,19 +167,6 @@ class PaperDaemon:
                                                 now=now)
             out["pending_filled"] = r["filled"]
             out["pending_canceled"] = r["canceled"]
-        for st_time in SCREEN_TIMES:
-            if hm >= st_time and "%sT%s" % (d, st_time) \
-                    not in self.account.state["screens_done"]:
-                try:
-                    self.provider.invalidate()   # 刷新涨停池缓存
-                except Exception:
-                    pass
-                out["buys"].append(
-                    # 终审 I-1: 幂等键=计划时点(slot), 14:00 重启补跑 10:00/
-                    # 13:30 后各记一次, 不再按"实际分钟"重复选股
-                    self.account.buy_from_screen(
-                        self.provider, now=now, slot="%sT%s" % (d, st_time),
-                        tick_provider=self._quote_ticks))
         return out
 
     # ---------- 缺口补算 ----------
@@ -224,6 +261,15 @@ class PaperDaemon:
         for p in list(st.get("pending_buys", [])):
             if not (p.get("created") or "").startswith(today):
                 self.account._dispose_pending(p["code"], "queue_expire", now0)
+        # 计划清理(spec §6): for_date<今日 的开盘买入计划作废(错过开盘窗口,
+        # 记日志不追买); 今日计划保留待 09:26 窗口消费
+        stale = [p for p in st.get("planned_buys", [])
+                 if p.get("for_date", "") < today]
+        if stale:
+            st["planned_buys"] = [p for p in st["planned_buys"]
+                                  if p.get("for_date", "") >= today]
+            self.account.save()
+            log.info("计划清理: 作废 %d 只(错过开盘窗口)", len(stale))
         log.info("模拟盘守护启动(策略=%s, 100万, 每%d秒一轮)",
                  self.account.strategy.get("id"), POLL_SECONDS)
         while True:

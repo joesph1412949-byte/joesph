@@ -89,26 +89,10 @@ def test_tick_sells_in_session(tmp_path, monkeypatch):
     assert acc.state["live_nav"] == 1009800.0
 
 
-def test_tick_screen_at_timepoint(tmp_path, monkeypatch):
-    d, acc = _daemon(tmp_path, monkeypatch)
-    calls = []
-
-    def fake_run_screen(strategy, market_ctx, gate_factors=None,
-                        stock_contexts=None):
-        calls.append(1)
-        return {"environment_ok": True, "gate_score": 1, "candidates": CAND,
-                "summary": {"candidate_count": 1}}
-    monkeypatch.setattr(prism.engine, "run_screen", fake_run_screen)
-    out = d.tick_once(now=datetime(2026, 9, 2, 10, 0, 5))
-    assert len(calls) == 1                        # 10:00 时点触发选股
-    assert acc.state["screens_done"] == ["2026-09-02T10:00"]
-    out2 = d.tick_once(now=datetime(2026, 9, 2, 10, 5))
-    assert len(calls) == 1                        # 幂等: 同时点不重复
-    assert out2["buys"] == []
-
-
 def test_tick_settle_after_close(tmp_path, monkeypatch):
     d, acc = _daemon(tmp_path, monkeypatch)
+    # 屏蔽 15:05 pick(本测试只管 settle; pick 行为见 test_tick_once_pick_slot)
+    acc.state["screens_done"].append("pickT2026-09-08T15:05")
     acc.state["holdings"].append({
         "code": "600000.SH", "shares": 1000, "cost": 9.5,
         "buy_date": "2026-09-01", "buy_price": 9.5, "entry_nav": 1e6})
@@ -216,29 +200,6 @@ def test_run_forever_backfill_after_connect(tmp_path, monkeypatch):
 
 
 # ---------- 终审修复 I-1..I-4 / M-e ----------
-def test_catchup_after_late_start(tmp_path, monkeypatch):
-    """I-1 补跑风暴: 14:00 重启 → 10:00/13:30 两时点各补跑 1 次, 14:05
-    不再重复, 14:35 触发 14:30 时点 → 三轮 tick 后总选股次数=3(幂等键=时点)。"""
-    d, acc = _daemon(tmp_path, monkeypatch)
-    calls = []
-
-    def fake_run_screen(strategy, market_ctx, gate_factors=None,
-                        stock_contexts=None):
-        calls.append(1)
-        return {"environment_ok": False, "gate_score": 0, "candidates": [],
-                "summary": {"candidate_count": 0}}
-    monkeypatch.setattr(prism.engine, "run_screen", fake_run_screen)
-    d.tick_once(now=datetime(2026, 9, 2, 14, 0))     # 补 10:00 + 13:30
-    assert len(calls) == 2
-    assert acc.state["screens_done"] == ["2026-09-02T10:00", "2026-09-02T13:30"]
-    d.tick_once(now=datetime(2026, 9, 2, 14, 5))     # 两键已判已过 → 不重复
-    assert len(calls) == 2
-    d.tick_once(now=datetime(2026, 9, 2, 14, 35))    # 14:30 时点首次触发
-    assert len(calls) == 3
-    assert acc.state["screens_done"] == ["2026-09-02T10:00", "2026-09-02T13:30",
-                                         "2026-09-02T14:30"]
-
-
 def test_backfill_skips_today_before_close(tmp_path, monkeypatch):
     """I-2 盘中重启: 今日未收盘 → backfill 不补今日(净值点与 settled 留给
     15:00 的 settle_day), 只补昨日及更早缺口。"""
@@ -263,6 +224,8 @@ def test_due_natural_parity(tmp_path, monkeypatch):
     assert d._due_natural("2026-09-02", "2026-09-04") is False  # +2
     assert d._due_natural("2026-09-02", "2026-09-06") is False  # +4(周末结算日)
     # 端到端: daemon 结算分支走自然日到期 → 09-07 收盘卖出
+    # (屏蔽 15:05 pick, 本测试只管 settle)
+    acc.state["screens_done"].append("pickT2026-09-07T15:05")
     acc.state["holdings"].append({
         "code": "600000.SH", "shares": 1000, "cost": 9.5,
         "buy_date": "2026-09-02", "buy_price": 9.5, "entry_nav": 1e6})
@@ -340,7 +303,6 @@ def test_tick_once_checks_pending_each_round(tmp_path, monkeypatch):
     assert acc.create_pending_buy(
         "600000", 10.0, datetime(2026, 9, 2, 10, 0, 5),
         _pending_tick()) is not None
-    acc.state["screens_done"].append("2026-09-02T10:00")   # 屏蔽时点选股
     out = d.tick_once(now=datetime(2026, 9, 2, 10, 1, 0))
     assert out["pending_filled"] == ["600000"]
     assert out["pending_canceled"] == []
@@ -357,7 +319,6 @@ def test_quote_ticks_fail_open(tmp_path, monkeypatch):
     assert acc.create_pending_buy(
         "600000", 10.0, datetime(2026, 9, 2, 10, 0, 5),
         _pending_tick()) is not None
-    acc.state["screens_done"].append("2026-09-02T10:00")
 
     class _BoomDS:
         @staticmethod
@@ -379,6 +340,8 @@ def test_tick_settle_clears_pending(tmp_path, monkeypatch):
         "600000", 10.0, datetime(2026, 9, 8, 10, 0, 5),
         _pending_tick()) is not None
     acc.state["canceled_pending_codes"].append("000001")   # 当日早前撤单键
+    # 屏蔽 15:05 pick(本测试只管 settle; pick 行为见 test_tick_once_pick_slot)
+    acc.state["screens_done"].append("pickT2026-09-08T15:05")
     out = d.tick_once(now=datetime(2026, 9, 8, 15, 5))
     assert out["action"] == "settle"
     assert out["pending_canceled"] == ["600000"]
@@ -446,3 +409,124 @@ def test_run_forever_keeps_same_day_pending(tmp_path, monkeypatch):
     assert len(acc.state["pending_buys"]) == 1
     assert acc.state["canceled_pending_codes"] == ["000001"]
     assert not any(t["reason"] == "queue_expire" for t in acc.state["trades"])
+
+
+# ---------- Task 4: 15:05 收盘选股 + 09:26-09:35 开盘买入窗口 ----------
+def test_tick_once_pick_slot(tmp_path, monkeypatch, caplog):
+    """15:05 后 → pick_top5_at_close 触发, slot 带日期(C1: 幂等键
+    pickT<日期>T15:05 每日唯一); 同日不重复, 次日同一时刻重新选股;
+    结果落日志(C3)。"""
+    d, acc = _daemon(tmp_path, monkeypatch)
+    slots = []
+
+    def fake_pick(provider, now=None, slot=None):
+        slots.append(slot)
+        acc.state["screens_done"].append("pickT" + slot)   # 同真实幂等键
+        return {"picked": [], "env_ok": True}
+
+    monkeypatch.setattr(acc, "pick_top5_at_close", fake_pick)
+    with caplog.at_level(logging.INFO, logger="paper_daemon"):
+        out = d.tick_once(now=datetime(2026, 9, 4, 15, 6))       # 周五
+        assert out["action"] == "pick"
+        assert slots == ["2026-09-04T15:05"]          # slot 必须带日期(C1)
+        assert "收盘选股" in caplog.text              # 结果落日志(C3)
+        d.tick_once(now=datetime(2026, 9, 4, 15, 10))
+        assert slots == ["2026-09-04T15:05"]          # 同日幂等: 不重复
+        d.tick_once(now=datetime(2026, 9, 7, 15, 6))  # 次个交易日同时刻
+        assert slots == ["2026-09-04T15:05",
+                         "2026-09-07T15:05"]          # 重新选股(C1)
+
+
+def test_tick_once_open_window(tmp_path, monkeypatch, caplog):
+    """09:26-09:35 窗口: 有今日计划 → execute_open_buys 触发,
+    action=open_buys; 窗口外不触发; 结果落日志(C3)。"""
+    d, acc = _daemon(tmp_path, monkeypatch)
+    calls = []
+
+    def fake_exec(tick_provider, now=None):
+        calls.append(tick_provider)
+        acc.state["planned_buys"] = []                # 同真实消费语义
+        return {"bought": ["600000"], "queued": [], "skipped": []}
+
+    monkeypatch.setattr(acc, "execute_open_buys", fake_exec)
+    plan = {"code": "600000", "score": 5.0, "date": "2026-09-07",
+            "for_date": "2026-09-08"}
+    with caplog.at_level(logging.INFO, logger="paper_daemon"):
+        acc.state["planned_buys"] = [plan]
+        out = d.tick_once(now=datetime(2026, 9, 8, 9, 25))
+        assert out["action"] == "idle" and calls == []      # 窗口前
+        acc.state["planned_buys"] = [plan]
+        out = d.tick_once(now=datetime(2026, 9, 8, 9, 26))
+        assert out["action"] == "open_buys"                 # 窗口起点(含)
+        assert out["open_buys"]["bought"] == ["600000"]
+        assert len(calls) == 1 and callable(calls[0])
+        assert "开盘买入" in caplog.text                    # C3
+        acc.state["planned_buys"] = [plan]
+        out = d.tick_once(now=datetime(2026, 9, 8, 9, 36))
+        assert out["action"] == "tick" and len(calls) == 1  # 窗口终点(不含)
+
+
+def test_tick_once_no_intraday_queue(tmp_path, monkeypatch):
+    """盘中 10:00/13:30/14:30 不再建买入队列(Task 4 删除盘中时点)。"""
+    d, acc = _daemon(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(acc, "buy_from_screen",
+                        lambda *a, **k: calls.append(1))
+    for hm in ((10, 1), (13, 31), (14, 31)):
+        out = d.tick_once(now=datetime(2026, 9, 2, *hm))
+        assert out["action"] == "tick" and out["buys"] == []
+    assert calls == []                            # 全程未触发 buy_from_screen
+
+
+def test_open_buy_ticks_inject_limits(tmp_path, monkeypatch):
+    """C2: 开盘买入行情注入真实涨跌停价(ds.get_instrument 的
+    UpStopPrice/DownStopPrice); 拿不到 → 不补(paper 层分板回落)。"""
+    d, acc = _daemon(tmp_path, monkeypatch)
+
+    class _LimitDS:
+        @staticmethod
+        def get_full_market_ticks(codes=None):
+            return {c: {"lastPrice": 10.0, "open": 10.5, "lastClose": 10.0}
+                    for c in (codes or [])}
+
+        @staticmethod
+        def get_instrument(code):
+            return ({"UpStopPrice": 11.0, "DownStopPrice": 9.0}
+                    if code == "600000.SH" else {})
+
+    d.provider.ds = _LimitDS
+    captured = []
+
+    def fake_exec(tick_provider, now=None):
+        captured.append(tick_provider)
+        acc.state["planned_buys"] = []
+        return {"bought": [], "queued": [], "skipped": []}
+
+    monkeypatch.setattr(acc, "execute_open_buys", fake_exec)
+    acc.state["planned_buys"] = [{"code": "600000.SH", "score": 5.0,
+                                  "date": "2026-09-07",
+                                  "for_date": "2026-09-08"}]
+    out = d.tick_once(now=datetime(2026, 9, 8, 9, 30))
+    assert out["action"] == "open_buys"
+    ticks = captured[0](["600000.SH", "000001.SZ"])
+    assert ticks["600000.SH"]["upStopPrice"] == 11.0     # 真实涨停价注入
+    assert ticks["600000.SH"]["downStopPrice"] == 9.0
+    assert "upStopPrice" not in ticks["000001.SZ"]       # 缺失不补(回落)
+
+
+def test_startup_purges_stale_plans(tmp_path, monkeypatch, caplog):
+    """启动清理(spec §6): for_date<今日 的 planned_buys 作废(错过开盘
+    窗口不追买), 今日计划保留待窗口消费。"""
+    d, acc = _daemon(tmp_path, monkeypatch,
+                     now_fn=lambda: datetime(2026, 9, 8, 9, 0))
+    acc.state["planned_buys"] = [
+        {"code": "600000", "score": 5.0, "date": "2026-09-07",
+         "for_date": "2026-09-07"},               # 昨日计划 → 作废
+        {"code": "600001", "score": 4.0, "date": "2026-09-07",
+         "for_date": "2026-09-08"}]               # 今日计划 → 保留
+    acc.save()          # 落盘: run_forever.startup_guard 会 load 重读磁盘态
+    with caplog.at_level(logging.INFO, logger="paper_daemon"):
+        with pytest.raises(_run_forever_one_tick(monkeypatch, d)):
+            d.run_forever()
+    assert [p["code"] for p in acc.state["planned_buys"]] == ["600001"]
+    assert "计划清理" in caplog.text
