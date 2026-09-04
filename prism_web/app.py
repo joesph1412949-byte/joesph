@@ -8,7 +8,7 @@
   GET /api/backtest           东财数据源回测(?strategy=&start=&end=YYYYMMDD)
   GET/POST /api/automation    自动化暂停开关(读/写 PAUSE_FILE)
 /api/screen 改用 prism 引擎(load_strategy + DataProvider + run_screen),
-支持可选 strategy 参数(默认 default)。
+支持可选 strategy 参数(默认指针激活策略; 回测缺省 first_board_v04)。
 启动：python prism_web/app.py，浏览器访问 http://localhost:5000
 """
 import sys
@@ -555,7 +555,7 @@ def api_strategy_activate(sid):
 @app.route("/api/backtest")
 def api_backtest():
     from prism.backtest import Backtester
-    sid = request.args.get("strategy", "default")
+    sid = request.args.get("strategy", "first_board_v04")
     start = request.args.get("start")
     end = request.args.get("end")
     if not start or not end:

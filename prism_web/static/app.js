@@ -309,8 +309,8 @@ function renderFactors(screenResult, code, manual) {
       ${badge}<span>${v===1?'✓':'✗'}</span>
     </div>`;
   }
-  // 手动因子总输入（覆盖所有可手填项）
-  const MANUAL_ALL = ["S1","S5","S7"];
+  // 手动因子总输入(手填因子已全部删除, 2026-09-03 → 空集合)
+  const MANUAL_ALL = [];
   html += `<div style="padding:8px 0;margin-top:8px;border-top:1px solid #eee">
     <b>手填因子</b>`;
   for (const f of MANUAL_ALL) {
@@ -325,7 +325,7 @@ function renderFactors(screenResult, code, manual) {
 }
 
 async function saveManual(code) {
-  const MANUAL_ALL = ["S1","S5","S7"];
+  const MANUAL_ALL = [];
   const payload = {};
   for (const f of MANUAL_ALL) {
     const el = document.getElementById("man-" + f);
