@@ -188,6 +188,9 @@ def _build_market_payload(market_ctx, market_factors, gate_score, limit_ups):
     top_themes = em.get("top_themes") or []
     return {
         "node_score": gate_score,
+        # 门控标准总数(策略 market_gate.factors 数): 前端分母动态化,
+        # 不再写死 /5(full_factor_v1 为 8 因子门槛)
+        "gate_total": len(market_factors),
         "stage": classify_market(gate_score),
         "factors": market_factors,
         "total_amount": total_amount,

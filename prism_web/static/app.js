@@ -116,15 +116,16 @@ function renderMarket(market) {
   const banner = document.getElementById("market-banner");
   if (state.screenResult.environment_ok) {
     banner.className = "env-ok";
-    banner.innerHTML = `✅ 市场环境达标: ${market.stage} · 节点模型 ${market.node_score}/5 · 允许选股`;
+    banner.innerHTML = `✅ 市场环境达标: ${market.stage} · 节点模型 ${market.node_score}/${market.gate_total ?? 5} · 允许选股`;
   } else {
     banner.className = "env-bad";
-    banner.innerHTML = `⛔ 市场环境不达标: ${market.stage} · 节点模型 ${market.node_score}/5 · 空仓等待`;
+    banner.innerHTML = `⛔ 市场环境不达标: ${market.stage} · 节点模型 ${market.node_score}/${market.gate_total ?? 5} · 空仓等待`;
   }
   // 节点因子卡片
   const cards = document.getElementById("node-cards");
   cards.innerHTML = "";
-  const names = { N1:"涨停指数", N2:"情绪周期", N3:"首板溢价", N4:"连板高度", N5:"成交额" };
+  const names = { N1:"涨停指数", N2:"情绪周期", N3:"首板溢价", N4:"连板高度", N5:"成交额",
+    N6:"美股映射", N7:"美债平稳", N8:"VIX平稳" };
   for (const [f, info] of Object.entries(market.factors)) {
     const hit = info.score === 1;
     cards.insertAdjacentHTML("beforeend",
@@ -294,10 +295,14 @@ function renderFactors(screenResult, code, manual) {
   const factors = cand.factors;
   const src = cand.auto_manual || {};
   const names = { F1:"首板确认",F2:"早封板",F3:"封单强度",F4:"板块共振",F5:"量价堆积",
-    F6:"大盘配合",F7:"题材新颖",Y1:"小市值",Y2:"筹码干净",Y3:"倍量突破",Y4:"均线多头",
-    Y5:"多概念",Y6:"事件催化",Y7:"游资现身",S2:"量价堆积密度",S3:"最小阻力",
-    S4:"均线系统",S6:"板块共振强度",
-    N1:"涨停指数",N2:"情绪周期",N3:"首板溢价",N4:"连板高度",N5:"成交额" };
+    F6:"大盘配合",F7:"题材新颖",F8:"行业边际",F9:"板块延展",
+    Y1:"小市值",Y2:"筹码干净",Y3:"倍量突破",Y4:"均线多头",
+    Y5:"多概念",Y6:"事件催化",Y7:"游资现身",Y8:"中市值启动",
+    S2:"量价堆积密度",S3:"最小阻力",S4:"均线系统",S6:"板块共振强度",
+    M6:"横盘突破",M7:"年线企稳",
+    SEC1:"板块连阳",SEC2:"板块10日涨幅",SEC3:"板块资金流入",SEC4:"板块不拥挤",SEC6:"行业共振",
+    N1:"涨停指数",N2:"情绪周期",N3:"首板溢价",N4:"连板高度",N5:"成交额",
+    N6:"美股映射",N7:"美债平稳",N8:"VIX平稳" };
   let html = "";
   for (const [f, v] of Object.entries(factors)) {
     const src_ = src[f] || "auto";

@@ -297,6 +297,7 @@ def test_screen_market_payload_contract(client, tmp_path, monkeypatch):
     m = r.get_json()["market"]
     assert m["stage"] == "回暖期"          # gate_score=4 → classify_market
     assert m["node_score"] == 4
+    assert m["gate_total"] == 1            # 门控标准总数=策略 gate 因子数(v04 仅 N1)
     assert m["total_amount"] == 1.2e12     # 从 market_ctx.ticks 求和
     assert m["limit_up_count"] == 0
     assert m["top_themes"] == [{"name": "AI"}, {"name": "机器人"}]
