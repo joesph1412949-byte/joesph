@@ -39,6 +39,19 @@ def _limit_ratio(code):
     return 0.20 if code.startswith(("300", "301", "688")) else 0.10
 
 
+def _tick_same_day(t, now):
+    """tick 自校验: time 字段(毫秒时间戳, int/float)日期 == now 日期。
+    缺失/无法解析/不符 → False(fail-closed, 宁可不买不可幽灵成交):
+    假日/非交易时段 QMT 返回昨日完整快照(open/lastClose 齐全), 盲成交
+    会按昨日开盘价造幽灵持仓+净值污染; 新直接成交路径无 queue_expire
+    兜底, 只能在这里挡。"""
+    try:
+        ts = float(t.get("time"))
+        return datetime.fromtimestamp(ts / 1000.0).date() == now.date()
+    except Exception:
+        return False
+
+
 class PaperAccount:
     """模拟账户: 账本 + 买入/卖出执行 + 结算 + 查询。
 
@@ -356,6 +369,9 @@ class PaperAccount:
                 t = ticks.get(code)
                 if not t or not t.get("open") or not t.get("lastClose"):
                     skipped.append({"code": code, "reason": "无行情"})
+                    continue
+                if not _tick_same_day(t, now):   # 陈旧快照守卫(假日幽灵成交)
+                    skipped.append({"code": code, "reason": "非当日行情"})
                     continue
                 prev = float(t["lastClose"])
                 # 涨跌停价: tick 显式字段优先(daemon 注入真实值, 引擎口径=

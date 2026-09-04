@@ -149,12 +149,19 @@ def test_position_ratio_fallback_without_execution(tmp_path, monkeypatch):
     assert a.position_ratio == 0.42                 # 回落构造参数
 
 
+_TICK_MS = int(datetime(2026, 9, 7, 9, 26).timestamp() * 1000)  # 测试当日 09:26
+
+
 def _otick(open_px, last_close, bid_vol=100_000, last_volume=1_000_000,
-           up_stop=None, down_stop=None):
+           up_stop=None, down_stop=None, time=_TICK_MS):
     """开盘买入用 tick: open=开盘价, lastClose=昨收; 涨跌停价默认不给
-    (回落分板系数), 显式传入时带 upStopPrice/downStopPrice(Task4 注入口径)。"""
+    (回落分板系数), 显式传入时带 upStopPrice/downStopPrice(Task4 注入口径)。
+    time=行情毫秒时间戳(xtdata 口径), 默认与测试 now(2026-09-07 09:26)对齐;
+    传 None → 不带 time 键(测 fail-closed), 传昨日时间戳 → 模拟假日陈旧快照。"""
     t = {"lastPrice": open_px, "open": open_px, "lastClose": last_close,
          "lastVolume": last_volume, "bidVol": [bid_vol]}
+    if time is not None:
+        t["time"] = int(time)
     if up_stop is not None:
         t["upStopPrice"] = up_stop
     if down_stop is not None:
@@ -241,6 +248,37 @@ def test_open_buy_missing_tick_skipped(acc):
                                 now=datetime(2026, 9, 7, 9, 26))
     assert out["skipped"] == [{"code": "600000", "reason": "无行情"}]
     assert acc.state["planned_buys"] == []
+
+
+def test_open_buy_stale_snapshot_skipped(acc):
+    """假日幽灵成交修复: 非交易时段 QMT 返回昨日完整快照(open/lastClose
+    齐全) → tick 自校验按 time 日期拒绝, 不得按昨日开盘价成交(fail-closed:
+    宁可不买不可幽灵持仓); 计划消费后清空。"""
+    acc.state["planned_buys"] = [{"code": "600000", "score": 5.0,
+                                  "date": "2026-09-04",
+                                  "for_date": "2026-09-07"}]
+    ticks = {"600000": _otick(10.5, 10.0,
+                              time=datetime(2026, 9, 4, 15, 0).timestamp() * 1000)}
+    out = acc.execute_open_buys(lambda codes: ticks,
+                                now=datetime(2026, 9, 7, 9, 26))
+    assert out["bought"] == [] and out["queued"] == []
+    assert out["skipped"] == [{"code": "600000", "reason": "非当日行情"}]
+    assert acc.state["planned_buys"] == []         # 消费后清空
+    assert acc.state["holdings"] == []             # 无幽灵持仓
+
+
+def test_open_buy_missing_time_skipped(acc):
+    """tick 无 time 字段(结构异常) → fail-closed 同样拒绝, 不盲成交。"""
+    acc.state["planned_buys"] = [{"code": "600000", "score": 5.0,
+                                  "date": "2026-09-04",
+                                  "for_date": "2026-09-07"}]
+    ticks = {"600000": _otick(10.5, 10.0, time=None)}   # 不带 time 键
+    out = acc.execute_open_buys(lambda codes: ticks,
+                                now=datetime(2026, 9, 7, 9, 26))
+    assert out["bought"] == [] and out["queued"] == []
+    assert out["skipped"] == [{"code": "600000", "reason": "非当日行情"}]
+    assert acc.state["planned_buys"] == []
+    assert acc.state["holdings"] == []
 
 
 def test_open_buy_stale_plan_untouched(acc):

@@ -491,7 +491,8 @@ def test_open_buy_ticks_inject_limits(tmp_path, monkeypatch):
 
         @staticmethod
         def get_instrument(code):
-            return ({"UpStopPrice": 11.0, "DownStopPrice": 9.0}
+            # 11.5 ≠ 昨收10×1.1 → 与分板公式不巧合, 证明显式字段生效(T4-M1)
+            return ({"UpStopPrice": 11.5, "DownStopPrice": 9.0}
                     if code == "600000.SH" else {})
 
     d.provider.ds = _LimitDS
@@ -509,7 +510,7 @@ def test_open_buy_ticks_inject_limits(tmp_path, monkeypatch):
     out = d.tick_once(now=datetime(2026, 9, 8, 9, 30))
     assert out["action"] == "open_buys"
     ticks = captured[0](["600000.SH", "000001.SZ"])
-    assert ticks["600000.SH"]["upStopPrice"] == 11.0     # 真实涨停价注入
+    assert ticks["600000.SH"]["upStopPrice"] == 11.5     # 真实涨停价注入
     assert ticks["600000.SH"]["downStopPrice"] == 9.0
     assert "upStopPrice" not in ticks["000001.SZ"]       # 缺失不补(回落)
 
