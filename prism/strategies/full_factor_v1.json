@@ -13,9 +13,11 @@
      "factors": ["M6", "M7", "S2", "S3", "S4", "S6",
                  "SEC1", "SEC2", "SEC3", "SEC4", "SEC6"]}
   ],
-  "composite": {"mode": "top3_weighted", "weights": [0.60, 0.25, 0.15],
-                "cap": 9.05},
+  "composite": {"mode": "average", "cap": 9.3333},
   "filters": {"candidate_min_model": 3, "environment_threshold": 3},
-  "sell_rules": {"take_profit_pct": 0.08, "stop_loss_pct": 0.05,
-                 "max_hold_days": 5}
+  "sell_rules": {"take_profit_pct": 0.15, "stop_loss_pct": 0.05,
+                 "max_hold_days": 5},
+  "execution": {"mode": "next_open_topn", "top_n": 5, "pct": 0.15,
+                "open_window": "09:26-09:35", "pick_slot": "15:05",
+                "one_word_fallback": "queue"}
 }

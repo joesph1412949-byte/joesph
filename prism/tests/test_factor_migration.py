@@ -624,3 +624,9 @@ def test_full_factor_v1_loads():
     assert len(gate) == 8             # N1-N8
     assert len(set(fids) | set(gate)) == 36   # 评分与门控无重叠, 合计 36
     assert all(f in reg.FACTORS for f in set(fids) | set(gate))
+    comp = s["composite"]
+    assert comp["mode"] == "average" and abs(comp["cap"] - 9.3333) < 1e-9
+    assert "weights" not in comp
+    ex = s["execution"]
+    assert ex["top_n"] == 5 and ex["pct"] == 0.15
+    assert s["sell_rules"]["take_profit_pct"] == 0.15

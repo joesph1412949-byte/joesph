@@ -14,7 +14,13 @@ NOW = datetime(2026, 9, 2, 10, 0, 0)      # 9-2(持仓 9-1 买入, 已过 T+1)
 
 
 @pytest.fixture
-def acc(tmp_path):
+def acc(tmp_path, monkeypatch):
+    # 卖出规则钉死(0.08/0.05): sell_check 经 PaperAccount.strategy 动态读激活
+    # 策略指针, full_factor_v1 止盈 0.08→0.15 起会漂移本组测试前提 → 掐断耦合。
+    pin = {"id": "sell_rules_pin",
+           "sell_rules": {"take_profit_pct": 0.08, "stop_loss_pct": 0.05,
+                          "max_hold_days": 5}}
+    monkeypatch.setattr(PaperAccount, "strategy", property(lambda self: pin))
     a = PaperAccount(state_path=tmp_path / "paper.json")
     a.init_account(created="2026-09-01")
     a.state["cash"] = 600000.0
