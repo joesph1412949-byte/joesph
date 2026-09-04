@@ -1,0 +1,21 @@
+{
+  "id": "full_factor_v1",
+  "name": "全因子四层 v1",
+  "description": "36因子四层框架(环境门控+首板+妖股+势能板块)。惯例: 今后新增因子默认归入对应层组合进本策略(特殊要求除外)。2026-09-03 起为模拟盘主力策略。",
+  "market_gate": {"model": "node", "threshold": 3,
+                  "factors": ["N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8"]},
+  "scoring_models": [
+    {"id": "first_board", "name": "首板", "weight": 0.60,
+     "factors": ["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9"]},
+    {"id": "monster", "name": "妖股", "weight": 0.25,
+     "factors": ["Y1", "Y2", "Y3", "Y4", "Y5", "Y6", "Y7", "Y8"]},
+    {"id": "momentum", "name": "势能板块", "weight": 0.15,
+     "factors": ["M6", "M7", "S2", "S3", "S4", "S6",
+                 "SEC1", "SEC2", "SEC3", "SEC4", "SEC6"]}
+  ],
+  "composite": {"mode": "top3_weighted", "weights": [0.60, 0.25, 0.15],
+                "cap": 9.05},
+  "filters": {"candidate_min_model": 3, "environment_threshold": 3},
+  "sell_rules": {"take_profit_pct": 0.08, "stop_loss_pct": 0.05,
+                 "max_hold_days": 5}
+}
