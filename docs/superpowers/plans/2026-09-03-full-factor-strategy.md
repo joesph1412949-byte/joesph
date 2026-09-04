@@ -34,7 +34,7 @@
 - Modify: `prism/tests/test_factor_migration.py`、`prism/tests/test_first_board_strategies.py`、`prism/tests/test_m67_strategy.py`、`prism_web/tests/test_app.py`
 - Test: 全量回归（基线 423，删除死测试后以实际为准，必须全绿）
 
-- [ ] **Step 1: 写"删除后状态"失败测试（先落测试再删，TDD）**
+- [x] **Step 1: 写"删除后状态"失败测试（先落测试再删，TDD）**
 
 `prism/tests/test_factor_migration.py` 末尾追加（文件头部核对有 `from prism import registry as reg` 与 `from pathlib import Path`，缺则补）：
 
@@ -60,12 +60,12 @@ def test_full_factor_v1_loads():
     assert all(f in reg.FACTORS for f in set(fids) | set(gate))
 ```
 
-- [ ] **Step 2: 跑新测试确认失败**
+- [x] **Step 2: 跑新测试确认失败**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_factor_migration.py::test_removed_factors_absent prism/tests/test_factor_migration.py::test_full_factor_v1_loads -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt123`
 Expected: FAIL（因子仍在注册表 44 个 / full_factor_v1.json 不存在）
 
-- [ ] **Step 3: 执行删除 + 死引用清理**
+- [x] **Step 3: 执行删除 + 死引用清理**
 
 ```bash
 git rm prism/factors/factor_m1_momentum.py prism/factors/factor_m2_volume_surge.py prism/factors/factor_m3_ma_bullish.py prism/factors/factor_m4_breakout.py prism/factors/factor_m5_low_volatility.py prism/factors/factor_s1_manual.py prism/factors/factor_s5_financing.py prism/factors/factor_s7_manual.py
@@ -79,12 +79,12 @@ git rm prism/strategies/default.json prism/strategies/five_factor.json prism/str
 4. `test_app.py`：L51 `assert any(s["id"] == "default" ...)` → `assert any(s["id"] == "full_factor_v1" ...)`；L55/59 `/api/strategy/default` → `/api/strategy/full_factor_v1` 及断言 id 同步；L169/372 `strategy=default` → `strategy=first_board_v04`（回测路径用 v04，测试环境已验证可跑）；L225/295/338 `strategy=default` → `strategy=first_board_v04`；L241-247 手填端点用例：`/api/stock/002859.SZ/manual` post S1 仍期待 400（S1 不在注册表 → 同样拒），**跑完核对仍绿**；L326-349 用例：payload 里 `"S1": 1` 与 `am["S1"] == "auto"` 断言——S1 因子已不存在，改为选一个现存非手填因子（如 `"F1": 1`，断言 `am["F1"] == "auto"`），语义不变（非手填因子归 auto）
 5. 若实现中发现勘察清单外的死引用（grep `default\.json|five_factor|sector_momentum` 与 `"(M1|S1|S5|S7)"` 于 tests/ 与源码），同规则处置并在报告注明
 
-- [ ] **Step 4: 跑测试确认通过（因子清理后）**
+- [x] **Step 4: 跑测试确认通过（因子清理后）**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests prism_web/tests -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt123`
 Expected: test_removed_factors_absent / test_full_factor_v1_loads 仍 FAIL（full_factor_v1.json 未建——Task F2），**其余全绿**；若 full_factor_v1 缺文件导致 load 报错其他测试连带红，核对只有那 2 个新测试红
 
-- [ ] **Step 5: Commit（分两笔：删除一笔、测试清理与新增一笔）**
+- [x] **Step 5: Commit（分两笔：删除一笔、测试清理与新增一笔）**
 
 ```bash
 git add -A prism/factors prism/strategies
@@ -106,7 +106,7 @@ git commit -m "test(prism): 因子清理测试面同步 — 死引用清零+36�
 - Consumes: engine `load_strategy(path)`（现有）；`engine.set_active_strategy(sid)`（现有）；engine 回落逻辑（指针所指文件缺失 → first_board_v04）
 - Produces: 策略文件 `full_factor_v1.json`（守护/回测/选股经指针消费）；MEMORY.md 惯例条目
 
-- [ ] **Step 1: 创建策略文件（逐字，spec §3）**
+- [x] **Step 1: 创建策略文件（逐字，spec §3）**
 
 `prism/strategies/full_factor_v1.json`：
 
@@ -134,12 +134,12 @@ git commit -m "test(prism): 因子清理测试面同步 — 死引用清零+36�
 }
 ```
 
-- [ ] **Step 2: 跑验收测试转绿**
+- [x] **Step 2: 跑验收测试转绿**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_factor_migration.py -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt123`
 Expected: 全 passed（含 test_full_factor_v1_loads）
 
-- [ ] **Step 3: 指针切换（运行时动作，经引擎 API 不手工改文件）**
+- [x] **Step 3: 指针切换（运行时动作，经引擎 API 不手工改文件）**
 
 ```bash
 python -c "import sys; sys.path.insert(0, r'D:\cc-joesph'); from prism.engine import set_active_strategy; ok, err = set_active_strategy('full_factor_v1'); print(ok, err)"
@@ -148,7 +148,7 @@ Expected: `True None`（或该函数实际返回签名——实现者先 `grep -
 
 验证指针：`Get-Content prism/strategies/.active.json` → `{"id": "full_factor_v1", ...}`；守护日志（job_output pwsh-9 尾部）出现策略 id 变化或下次访问生效（热重载无报错）。
 
-- [ ] **Step 4: MEMORY.md 更新**
+- [x] **Step 4: MEMORY.md 更新**
 
 `MEMORY.md` 三处（精确编辑）：
 1. 「项目现状」的模拟盘行替换为：`**模拟盘**：100 万 paper trading；守护 python -m prism.paper_daemon（后台作业 pwsh-9）；当前激活策略 = **full_factor_v1**（2026-09-03 起主力；此前 default 已删除——净值归因切换点 09-03，账本不清零）`
@@ -161,7 +161,7 @@ Expected: `True None`（或该函数实际返回签名——实现者先 `grep -
 - **新增因子默认组合进 full_factor_v1**：按四层归位——环境/情绪类→market_gate（N 系）；首板确认类→first_board 模型（F 系）；妖股类→monster 模型（Y 系）；形态/板块类→momentum 模型（M/S/SEC 系）。加入策略 JSON 对应层 factors 数组并**重算 composite.cap**（Σ 模型权重×该模型因子数）。特殊要求（如仅供实验/仅供回测）才不入，需用户明说
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add prism/strategies/full_factor_v1.json MEMORY.md
@@ -176,23 +176,23 @@ git commit -m "feat(prism): 全因子四层策略full_factor_v1上默认 + 新�
 - Modify: `docs/superpowers/plans/2026-09-03-full-factor-strategy.md`（勾选）
 - Test: 全量回归
 
-- [ ] **Step 1: 全量回归**
+- [x] **Step 1: 全量回归**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests prism_web/tests -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt123`
 Expected: 全绿（数量随删除死测试变化，以实际为准）
 
-- [ ] **Step 2: 死引用清零验证**
+- [x] **Step 2: 死引用清零验证**
 
 Run: `git grep -n "five_factor\|sector_momentum" -- prism prism_web` 与 `git grep -n "\"M1\"\|\"S1\"\|\"S5\"\|\"S7\"\|\"M2\"\|\"M3\"\|\"M4\"\|\"M5\"" -- prism prism_web`
 Expected: 仅剩测试内联模型 id（"m1" 小写与 A1/AS1 夹具组合）与历史文档；因子引用清零。残留即回 Task F1 Step 3 补清
 
-- [ ] **Step 3: 守护实测（模拟盘换引擎第一现场）**
+- [x] **Step 3: 守护实测（模拟盘换引擎第一现场）**
 
 1. `job_output pwsh-9` 尾部：守护无报错；下次策略访问后日志显示新策略 id（或用 `python -m prism.paper --summary` 旁证账本健康）
 2. 网页 5000 端口 F5：策略列表见 full_factor_v1 带 ★；模拟盘 tab 正常
 3. `python -m prism.paper --summary` → exists true、无异常
 
-- [ ] **Step 4: 台账 + 勾选 + Commit**
+- [x] **Step 4: 台账 + 勾选 + Commit**
 
 ```bash
 git add docs/superpowers/plans/2026-09-03-full-factor-strategy.md
