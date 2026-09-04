@@ -29,7 +29,7 @@
 **Interfaces:**
 - Produces: JSON 顶层新增 `"execution": {"mode": "next_open_topn", "top_n": 5, "pct": 0.15, "open_window": "09:26-09:35", "pick_slot": "15:05", "one_word_fallback": "queue"}`；`composite` = `{"mode": "average", "cap": 9.3333}`（weights 键删除）；`sell_rules.take_profit_pct` = 0.15。Task 2/3/4 依赖这些键名。
 
-- [ ] **Step 1: 改 JSON**（逐字）
+- [x] **Step 1: 改 JSON**（逐字）
 
 ```json
   "composite": {"mode": "average", "cap": 9.3333},
@@ -43,7 +43,7 @@
 
 （composite 行替换原 L16-17 两行；sell_rules 替换 L19-20；execution 插在 sell_rules 之后、收尾 `}` 之前。scoring_models 里的 weight 字段保留不动——模型级 weight 仅 top3_weighted 模式使用，average 模式忽略，删除会牵连编辑器回显。）
 
-- [ ] **Step 2: 测试断言扩展**（test_factor_migration.py 的 test_full_factor_v1_loads 内追加）
+- [x] **Step 2: 测试断言扩展**（test_factor_migration.py 的 test_full_factor_v1_loads 内追加）
 
 ```python
     comp = s["composite"]
@@ -54,11 +54,11 @@
     assert s["sell_rules"]["take_profit_pct"] == 0.15
 ```
 
-- [ ] **Step 3: 编辑器依赖检查**：`git grep -n "top3_weighted\|composite" -- prism_web/static/app.js`。若编辑器加载策略时读 `composite.weights` 用于回显（模板策略编辑页），给缺失分支加空值兜底（如 `(s.composite||{}).weights||[]`），不加新功能。
+- [x] **Step 3: 编辑器依赖检查**：`git grep -n "top3_weighted\|composite" -- prism_web/static/app.js`。若编辑器加载策略时读 `composite.weights` 用于回显（模板策略编辑页），给缺失分支加空值兜底（如 `(s.composite||{}).weights||[]`），不加新功能。
 
-- [ ] **Step 4: 跑测**：`python -m pytest prism/tests/test_factor_migration.py prism_web/tests -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt127` → 全绿。
+- [x] **Step 4: 跑测**：`python -m pytest prism/tests/test_factor_migration.py prism_web/tests -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt127` → 全绿。
 
-- [ ] **Step 5: Commit** `feat(prism): full_factor_v1 三层等权+execution块+止盈15%`
+- [x] **Step 5: Commit** `feat(prism): full_factor_v1 三层等权+execution块+止盈15%`
 
 ---
 
@@ -72,7 +72,7 @@
 - Consumes: 引擎 `run_screen(strategy, market_ctx, gate_factors, stock_contexts)`（与 buy_from_screen L187-212 同一编排）；Task 1 的 `execution.top_n/pct/pick_slot`。
 - Produces: `PaperAccount.pick_top5_at_close(provider, now=None, slot=None) -> {"picked": [...], "env_ok": bool, "already_done"?: True}`；state 新键 `planned_buys` = `[{"code": str, "score": float, "date": "YYYY-MM-DD", "for_date": "YYYY-MM-DD"}]`；模块函数 `_next_weekday(d: str) -> str`（跳过周六日）；`self.position_ratio` 在策略加载后被 `execution.pct` 覆盖（无 execution 块回落构造参数值）。
 
-- [ ] **Step 1: 写失败测试**（test_open_top5.py 新建；provider/tick 构造参照 test_paper_queue.py 的 _tick 与 test_paper_buy.py 的 fake provider 模式，全离线）
+- [x] **Step 1: 写失败测试**（test_open_top5.py 新建；provider/tick 构造参照 test_paper_queue.py 的 _tick 与 test_paper_buy.py 的 fake provider 模式，全离线）
 
 ```python
 # -*- coding: utf-8 -*-
@@ -179,9 +179,9 @@ def test_pick_replaces_old_plans(acc, monkeypatch):
 
 （`...` 处按 test_pick_top5_stores_plans 原样补全桩——计划不重复粘贴，实现者复制同文件已有桩。分数并列决胜用例：候选 composite 相同 → 按 code 升序取前 N。）
 
-- [ ] **Step 2: 跑测确认 FAIL**（`pick_top5_at_close`/`_next_weekday` 不存在 → AttributeError/ImportError）
+- [x] **Step 2: 跑测确认 FAIL**（`pick_top5_at_close`/`_next_weekday` 不存在 → AttributeError/ImportError）
 
-- [ ] **Step 3: 实现**。paper.py 模块级：
+- [x] **Step 3: 实现**。paper.py 模块级：
 
 ```python
 def _next_weekday(d):
@@ -278,9 +278,9 @@ def _next_weekday(d):
 
 同时把 buy_from_screen 的门禁求值段改为调用 `self._screen_candidates(provider)`（消重；buy_from_screen 本身保留——打板机制保有，仅守护调度不再调它）。幂等键加 `pickT` 前缀与盘中 `T%H:%M` 键不冲突。
 
-- [ ] **Step 4: 跑测 PASS** + `python -m pytest prism/tests -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt127` 全绿。
+- [x] **Step 4: 跑测 PASS** + `python -m pytest prism/tests -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt127` 全绿。
 
-- [ ] **Step 5: Commit** `feat(prism): 收盘选股前五落计划+仓位从execution.pct`
+- [x] **Step 5: Commit** `feat(prism): 收盘选股前五落计划+仓位从execution.pct`
 
 ---
 
@@ -294,7 +294,7 @@ def _next_weekday(d):
 - Consumes: Task 2 的 `planned_buys` 结构；`create_pending_buy(code, up_price, now, tick)`（既有，封单门槛/半残守卫/冻结全 inherited）；`_execute_buy(code, up_price, now=None)`（L433）。
 - Produces: `_execute_buy(self, code, up_price, now=None, slip=None)`（slip=None→self.slippage；0.0→无滑点，返回值不变）；`PaperAccount.execute_open_buys(tick_provider, now=None) -> {"bought": [...], "queued": [...], "skipped": [{code, reason}]}`——消费 `for_date == 今日` 的计划并整体清空；`for_date != 今日` 的计划不动。
 
-- [ ] **Step 1: 写失败测试**（追加进 test_open_top5.py；tick 用 test_paper_queue._tick 同构 `{"lastPrice", "lastVolume", "bidVol", "lastClose", "open"}`——注意需带 `open` 字段，扩展本地 helper）
+- [x] **Step 1: 写失败测试**（追加进 test_open_top5.py；tick 用 test_paper_queue._tick 同构 `{"lastPrice", "lastVolume", "bidVol", "lastClose", "open"}`——注意需带 `open` 字段，扩展本地 helper）
 
 ```python
 def _otick(open_px, last_close, bid_vol=100_000, last_volume=1_000_000):
@@ -361,9 +361,9 @@ def test_open_buy_stale_plan_untouched(acc):
     assert out["bought"] == [] and len(acc.state["planned_buys"]) == 1
 ```
 
-- [ ] **Step 2: 跑测 FAIL**（方法不存在）。
+- [x] **Step 2: 跑测 FAIL**（方法不存在）。
 
-- [ ] **Step 3: 实现**。_execute_buy 签名加 `slip=None`，`buy_price = round(up_price * (1 + (self.slippage if slip is None else slip)), 4)`。新方法：
+- [x] **Step 3: 实现**。_execute_buy 签名加 `slip=None`，`buy_price = round(up_price * (1 + (self.slippage if slip is None else slip)), 4)`。新方法：
 
 ```python
     def execute_open_buys(self, tick_provider, now=None):
@@ -422,9 +422,9 @@ def test_open_buy_stale_plan_untouched(acc):
 
 涨停/跌停价口径：主板 ±10% `round(prev*1.1, 2)`/`round(prev*0.9, 2)`——与引擎 up_stop_price 同式（`grep -n "1.1" prism/engine.py` 对齐写法）。ST/创业板差异属既有引擎口径，不在此扩（`# ponytail: 跟随引擎口径`）。
 
-- [ ] **Step 4: 跑测 PASS** + `python -m pytest prism/tests -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt127` 全绿。
+- [x] **Step 4: 跑测 PASS** + `python -m pytest prism/tests -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt127` 全绿。
 
-- [ ] **Step 5: Commit** `feat(prism): 开盘买入窗口(开盘价成交/一字板转排队/跌停跳过)`
+- [x] **Step 5: Commit** `feat(prism): 开盘买入窗口(开盘价成交/一字板转排队/跌停跳过)`
 
 ---
 
@@ -438,7 +438,7 @@ def test_open_buy_stale_plan_untouched(acc):
 - Consumes: Task 2 `pick_top5_at_close(provider, now, slot="15:05")`；Task 3 `execute_open_buys(tick_provider, now)`；既有 tick_provider 注入模式（daemon 现调用 buy_from_screen 的传参方式，`grep -n "tick_provider" prism/paper_daemon.py`）。
 - Produces: 调度常量 `PICK_SLOT = "15:05"`、`OPEN_WINDOW = ("09:26", "09:35")`；tick_once 动作键扩展 `"pick"`/`"open_buys"`；启动清理清 `for_date < 今日` 的 planned_buys。
 
-- [ ] **Step 1: 改造失败测试**（test_paper_daemon.py：删/改 10:00/13:30 建队列断言；新增）
+- [x] **Step 1: 改造失败测试**（test_paper_daemon.py：删/改 10:00/13:30 建队列断言；新增）
 
 ```python
 def test_tick_once_pick_slot(monkeypatch, ...):
@@ -460,9 +460,9 @@ def test_startup_purges_stale_plans(...):
 
 （桩的具体构造与该文件既有 fake provider/account 模式一致——实现者读现有测试后对齐，断言语义如注释。）
 
-- [ ] **Step 2: 跑测 FAIL**。
+- [x] **Step 2: 跑测 FAIL**。
 
-- [ ] **Step 3: 实现**。L13：
+- [x] **Step 3: 实现**。L13：
 
 ```python
 PICK_SLOT = "15:05"
@@ -505,14 +505,14 @@ run_forever 启动清理（L216 跨日清理处）追加：
             logger.info("计划清理: 作废 %d 只(错过开盘窗口)" % len(stale))
 ```
 
-- [ ] **Step 4: 跑测 PASS** + 全量 `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests prism_web/tests -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt127` 全绿（基线 419+新增）。
+- [x] **Step 4: 跑测 PASS** + 全量 `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests prism_web/tests -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt127` 全绿（基线 419+新增）。
 
-- [ ] **Step 5: Commit** `feat(prism): 守护调度改为15:05选股+09:26开盘买入窗口(移除盘中排队时点)`
+- [x] **Step 5: Commit** `feat(prism): 守护调度改为15:05选股+09:26开盘买入窗口(移除盘中排队时点)`
 
 ---
 
 ### Task 5: 收尾——MEMORY.md + 台账 + 交付
 
-- [ ] **Step 1:** MEMORY.md 模拟盘行更新：执行节奏（15:05 选前五 → 次日 09:26-09:35 开盘价买 15%/只 → 一字板转排队 → 止盈 15%/止损 5%/5 日）、三层等权、归因切换点（生效首个交易日）。
-- [ ] **Step 2:** `.superpowers/sdd/progress.md` 记录三任务与验证证据；plan 复选框全勾。
-- [ ] **Step 3:** Commit `docs: 开盘前五执行策略落地记录`。
+- [x] **Step 1:** MEMORY.md 模拟盘行更新：执行节奏（15:05 选前五 → 次日 09:26-09:35 开盘价买 15%/只 → 一字板转排队 → 止盈 15%/止损 5%/5 日）、三层等权、归因切换点（生效首个交易日）。
+- [x] **Step 2:** `.superpowers/sdd/progress.md` 记录三任务与验证证据；plan 复选框全勾。
+- [x] **Step 3:** Commit `docs: 开盘前五执行策略落地记录`。
