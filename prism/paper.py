@@ -314,6 +314,11 @@ class PaperAccount:
             return None
         bv = tick.get("bidVol") or [0]
         bid_vol = bv[0] or 0
+        # C 守卫: 半残 tick(行情未就绪, lastVolume 缺失/0) → 不建委托,
+        # 否则 base_volume=0 会破坏 ΔV 口径(2026-09-04 实测 3 笔中招)。
+        base_volume = int(tick.get("lastVolume") or 0)
+        if base_volume <= 0:
+            return None
         # 量纲(审查 I-1): bidVol[0] 单位=手(xtdata 手数口径) → ×100 折股;
         # 封单金额(元) = 股×价, 门槛 2000 万。
         if bid_vol * 100 * up_price < 20_000_000:
@@ -333,7 +338,7 @@ class PaperAccount:
             # queued_shares 单位=股: bidVol[0](手)×100, 与 holdings.shares 同量纲
             "queued_shares": int(bid_vol) * 100,
             # base_volume 单位=手: 与 lastVolume 同口径原样存; check 时手差×100→股
-            "base_volume": int(tick.get("lastVolume") or 0),
+            "base_volume": base_volume,
             "created": now.strftime("%Y-%m-%dT%H:%M:%S"),
             "slot": now.strftime("T%H:%M")})
         try:
@@ -355,7 +360,17 @@ class PaperAccount:
             if last is None:
                 continue
             if last < p["price"] - 0.001:
-                self._dispose_pending(p["code"], "queue_cancel_break", now)
+                # 路径②(真实打板主成交通道): 炸板时若建单时初始队列已被卖单
+                # 吃穿(ΔV ≥ queued+shares), 说明已轮到我们 → 按涨停价成交;
+                # 未吃穿 → 真没排到, 撤单(流水记 ΔV 供事后归因)。
+                dvol_break = ((int(t.get("lastVolume") or 0)
+                               - p["base_volume"]) * 100)
+                if dvol_break >= p["queued_shares"] + p["shares"] \
+                        and self._execute_fill_buy(p, now):
+                    filled.append(p["code"])
+                    continue
+                self._dispose_pending(p["code"], "queue_cancel_break",
+                                      now, dvol=dvol_break)
                 canceled.append(p["code"])
                 continue
             # dvol 单位=股: lastVolume(手) − base_volume(手) = 手差, ×100 折股,
@@ -397,8 +412,9 @@ class PaperAccount:
             self._restore_state(snap)
             return False
 
-    def _dispose_pending(self, code, reason, now):
-        """撤单/失效(临界段): 解冻 + 未成交流水 + 幂等键。"""
+    def _dispose_pending(self, code, reason, now, dvol=None):
+        """撤单/失效(临界段): 解冻 + 未成交流水 + 幂等键。
+        dvol: 撤单时累计成交量(股), 仅开板撤单传入——记入流水供事后归因。"""
         snap = self._snapshot_state()
         try:
             st = self.state
@@ -407,11 +423,14 @@ class PaperAccount:
                 return
             st["pending_buys"] = [x for x in st["pending_buys"]
                                   if x["code"] != code]
-            st["trades"].append({"side": "buy", "code": code,
-                                 "shares": p["shares"], "price": p["price"],
-                                 "date": now.strftime("%Y-%m-%d"),
-                                 "reason": reason,
-                                 "ts": now.strftime("%Y-%m-%dT%H:%M:%S")})
+            entry = {"side": "buy", "code": code,
+                     "shares": p["shares"], "price": p["price"],
+                     "date": now.strftime("%Y-%m-%d"),
+                     "reason": reason,
+                     "ts": now.strftime("%Y-%m-%dT%H:%M:%S")}
+            if dvol is not None:
+                entry["dvol_shares"] = dvol     # 撤单时累计成交量(股), 事后归因
+            st["trades"].append(entry)
             if reason == "queue_cancel_break":
                 if code not in st["canceled_pending_codes"]:
                     st["canceled_pending_codes"].append(code)

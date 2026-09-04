@@ -165,6 +165,48 @@ def test_gate_seal_amount(acc):
     assert acc.state["pending_buys"] == []
 
 
+def test_create_rejects_zero_volume_tick(acc):
+    """C 守卫: 半残 tick(行情未就绪, lastVolume 缺失/0) → 不建委托。
+    (2026-09-04 实测: 守护启动秒建单 base_volume=0 破坏 ΔV 口径。)"""
+    p1 = acc.create_pending_buy(
+        "600000", 10.0, datetime(2026, 9, 2, 10, 0, 5),
+        _tick(10.0, 0, bid_vol=_BID_OK))
+    p2 = acc.create_pending_buy(
+        "600000", 10.0, datetime(2026, 9, 2, 10, 0, 5),
+        {"lastPrice": 10.0, "bidVol": [_BID_OK]})          # lastVolume 键缺失
+    assert p1 is None and p2 is None
+    assert acc.state["pending_buys"] == []
+
+
+def test_fill_on_break_when_queue_eaten(acc):
+    """A 路径②(真实打板主成交通道): 炸板(last<price)但初始队列已被吃穿
+    (Δ手×100 ≥ queued+shares) → 按涨停价成交, 不撤单。"""
+    acc.create_pending_buy("600000", 10.0, datetime(2026, 9, 2, 10, 0, 5),
+                           _tick(10.0, 1_000_000, bid_vol=_BID_OK))
+    # last=9.97(开板), Δ手=2_030_000手=2.03亿股 ≥ 2.0003亿股(队列+本单) → 成交
+    out = acc.check_pending_buys({"600000": _tick(9.97, 3_030_000)},
+                                 now=datetime(2026, 9, 2, 10, 0, 35))
+    assert out == {"filled": ["600000"], "canceled": []}
+    st = acc.state
+    assert len(st["holdings"]) == 1
+    assert st["holdings"][0]["cost"] == 10.0               # 涨停价成交
+    assert st["holdings"][0]["buy_price"] == 10.0
+    assert st["pending_buys"] == []
+
+
+def test_cancel_on_break_records_dvol(acc):
+    """A: 开板但队列未吃穿(ΔV 不足) → 照常撤单, 流水新增 dvol_shares
+    (事后可查"当时排到没有/差多少")。"""
+    acc.create_pending_buy("600000", 10.0, datetime(2026, 9, 2, 10, 0, 5),
+                           _tick(10.0, 1_000_000, bid_vol=_BID_OK))
+    out = acc.check_pending_buys({"600000": _tick(9.98, 1_500_000)},
+                                 now=datetime(2026, 9, 2, 10, 0, 35))
+    assert out == {"filled": [], "canceled": ["600000"]}
+    t = acc.state["trades"][-1]
+    assert t["reason"] == "queue_cancel_break"
+    assert t["dvol_shares"] == (1_500_000 - 1_000_000) * 100   # 5000万股
+
+
 def test_gate_tail_no_queue(acc):
     """尾盘不排: now>=14:30 → 不建委托(其余门槛全过)。"""
     p = acc.create_pending_buy("600000", 10.0, datetime(2026, 9, 2, 14, 30, 5),
