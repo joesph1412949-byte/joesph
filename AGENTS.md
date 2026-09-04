@@ -2,6 +2,8 @@
 
 You have superpowers.
 
+**Read [MEMORY.md](MEMORY.md) first** — 用户合作偏好与项目现状（会话开头必读；完成里程碑后主动更新该文件）。
+
 ## Skill System
 
 **Below is your introduction to using skills. For all other skills, use the `Skill` tool.**
