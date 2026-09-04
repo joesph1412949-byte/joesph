@@ -325,6 +325,60 @@ class PaperAccount:
             return {"error": "状态保存失败"}
         return {"picked": picked, "env_ok": env_ok}
 
+    def execute_open_buys(self, tick_provider, now=None):
+        """开盘买入窗口消费(spec §5): 按开盘价买/一字板转排队/跌停跳过。
+        仅消费 for_date==今日 的计划; 处理后整体清空。窗口判定在守护侧。"""
+        now = now or datetime.now()
+        if self.state is None and not self.load():
+            return {"error": "未初始化"}
+        today = now.strftime("%Y-%m-%d")
+        plans = [p for p in self.state.get("planned_buys", [])
+                 if p.get("for_date") == today]
+        if not plans:
+            return {"bought": [], "queued": [], "skipped": []}
+        try:
+            ticks = tick_provider([p["code"] for p in plans]) or {}
+        except Exception:
+            ticks = {}
+        bought, queued, skipped = [], [], []
+        snap = self._snapshot_state()
+        try:
+            for p in plans:
+                code = p["code"]
+                t = ticks.get(code)
+                if not t or not t.get("open") or not t.get("lastClose"):
+                    skipped.append({"code": code, "reason": "无行情"})
+                    continue
+                prev = float(t["lastClose"])
+                up = round(prev * 1.1, 2)          # 今日涨停价(主板 10%)
+                low = round(prev * 0.9, 2)         # 今日跌停价
+                # ponytail: 跟随引擎口径 — ST/创业板涨跌停幅度差异不在此扩
+                open_px = float(t["open"])
+                nav = self._nav_estimate()
+                reason = self._buyable(code, nav, now)
+                if reason:
+                    skipped.append({"code": code, "reason": reason})
+                    continue
+                if open_px >= up - 0.001:          # 开盘即板 → 排队替补
+                    if self.create_pending_buy(code, up, now, t):
+                        queued.append(code)
+                    else:
+                        skipped.append({"code": code, "reason": "排板不通过"})
+                elif open_px <= low + 0.001:       # 跌停开盘 → 保护跳过
+                    skipped.append({"code": code, "reason": "跌停开盘"})
+                elif self._execute_buy(code, open_px, now, slip=0.0):
+                    bought.append(code)
+                else:
+                    skipped.append({"code": code, "reason": "买入失败"})
+            self.state["planned_buys"] = [
+                x for x in self.state.get("planned_buys", [])
+                if x.get("for_date") != today]
+            self.save()
+        except Exception:
+            self._restore_state(snap)
+            return {"error": "开盘买入失败"}
+        return {"bought": bought, "queued": queued, "skipped": skipped}
+
     def _buyable(self, code, nav, now):
         """买入前置判定(排板四道+现金/仓位); None=可排。今日判定用注入 now 的
         日期(终审 M-a, 不直读系统时钟)。"今日已交易"=今日已成交(queue_fill/screen
@@ -502,13 +556,13 @@ class PaperAccount:
         except Exception:
             self._restore_state(snap)
 
-    def _execute_buy(self, code, up_price, now=None):
+    def _execute_buy(self, code, up_price, now=None, slip=None):
         """买入执行(临界段: 内存改→不变量校验→save, 失败回滚)。"""
         now = now or datetime.now()
         snap = self._snapshot_state()
         nav = self._nav_estimate()
         target = nav * self.position_ratio
-        buy_price = round(up_price * (1 + self.slippage), 4)
+        buy_price = round(up_price * (1 + (self.slippage if slip is None else slip)), 4)
         shares = int(target / buy_price / 100) * 100
         if shares <= 0:
             return None

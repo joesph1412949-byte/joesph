@@ -147,3 +147,69 @@ def test_position_ratio_fallback_without_execution(tmp_path, monkeypatch):
     a.init_account(created="2026-09-04")
     assert a.strategy["id"] == "open_top5_noexec"
     assert a.position_ratio == 0.42                 # 回落构造参数
+
+
+def _otick(open_px, last_close, bid_vol=100_000, last_volume=1_000_000):
+    """开盘买入用 tick: open=开盘价, lastClose=昨收。"""
+    return {"lastPrice": open_px, "open": open_px, "lastClose": last_close,
+            "lastVolume": last_volume, "bidVol": [bid_vol]}
+
+
+def test_open_buy_at_open_price(acc, monkeypatch):
+    acc.state["planned_buys"] = [{"code": "600000", "score": 5.0,
+                                  "date": "2026-09-04",
+                                  "for_date": "2026-09-07"}]
+    # acc fixture 桩掉 strategy 属性 → execution.pct 覆盖未触发, 显式对齐 15%
+    monkeypatch.setattr(acc, "position_ratio", 0.15)
+    ticks = {"600000": _otick(10.50, 10.0)}       # 开盘+5%, 非板
+    out = acc.execute_open_buys(lambda codes: ticks,
+                                now=datetime(2026, 9, 7, 9, 26))
+    assert out["bought"] == ["600000"] and out["queued"] == []
+    h = acc.state["holdings"][0]
+    assert h["cost"] == 10.50                      # 开盘价无滑点
+    assert h["shares"] == 14200                    # 100万×15%=15万; 150000//(10.5*100)=142手→14200股
+    assert acc.state["planned_buys"] == []         # 消费后清空
+
+
+def test_open_buy_one_word_queues(acc):
+    acc.state["planned_buys"] = [{"code": "600000", "score": 5.0,
+                                  "date": "2026-09-04",
+                                  "for_date": "2026-09-07"}]
+    ticks = {"600000": _otick(11.0, 10.0, bid_vol=2_000_000)}  # 开盘=涨停(一字)
+    out = acc.execute_open_buys(lambda codes: ticks,
+                                now=datetime(2026, 9, 7, 9, 26))
+    assert out["queued"] == ["600000"] and out["bought"] == []
+    p = acc.state["pending_buys"][0]
+    assert p["price"] == 11.0 and p["base_volume"] == 1_000_000  # 走排队状态机
+    assert acc.state["planned_buys"] == []
+
+
+def test_open_buy_down_limit_skipped(acc):
+    acc.state["planned_buys"] = [{"code": "600000", "score": 5.0,
+                                  "date": "2026-09-04",
+                                  "for_date": "2026-09-07"}]
+    ticks = {"600000": _otick(9.0, 10.0)}          # 开盘=跌停
+    out = acc.execute_open_buys(lambda codes: ticks,
+                                now=datetime(2026, 9, 7, 9, 26))
+    assert out["bought"] == [] and out["queued"] == []
+    assert out["skipped"] == [{"code": "600000", "reason": "跌停开盘"}]
+    assert acc.state["planned_buys"] == []         # 仍清空(消费)
+
+
+def test_open_buy_missing_tick_skipped(acc):
+    acc.state["planned_buys"] = [{"code": "600000", "score": 5.0,
+                                  "date": "2026-09-04",
+                                  "for_date": "2026-09-07"}]
+    out = acc.execute_open_buys(lambda codes: {},
+                                now=datetime(2026, 9, 7, 9, 26))
+    assert out["skipped"] == [{"code": "600000", "reason": "无行情"}]
+    assert acc.state["planned_buys"] == []
+
+
+def test_open_buy_stale_plan_untouched(acc):
+    acc.state["planned_buys"] = [{"code": "600000", "score": 5.0,
+                                  "date": "2026-09-03",
+                                  "for_date": "2026-09-04"}]   # 昨日计划
+    out = acc.execute_open_buys(lambda codes: {"600000": _otick(10.5, 10.0)},
+                                now=datetime(2026, 9, 7, 9, 26))
+    assert out["bought"] == [] and len(acc.state["planned_buys"]) == 1
