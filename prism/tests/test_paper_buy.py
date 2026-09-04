@@ -87,10 +87,11 @@ def test_buy_creates_pending(acc, monkeypatch):
                               tick_provider=_ticks_for("600000.SH", 10.0, 1_000_000))
     assert out["env_ok"] is True and len(out["bought"]) == 1
     b = out["bought"][0]
-    # 净值30%=30万 / 涨停价10.0(排板成交无上滑) → 30000股; 冻结=shares×price
-    assert b["shares"] == 30000
+    # 净值×execution.pct 15%=15万 / 涨停价10.0(排板成交无上滑) → 15000股;
+    # (spec §4: position_ratio 读 full_factor_v1 execution.pct=0.15, 冻结=shares×price)
+    assert b["shares"] == 15000
     assert b["price"] == 10.0
-    assert b["amount"] == pytest.approx(300000.0, rel=1e-3)
+    assert b["amount"] == pytest.approx(150000.0, rel=1e-3)
     st = acc.state
     assert st["cash"] == 1000000.0                # 冻结不改 cash
     assert len(st["pending_buys"]) == 1           # 入队而非直接成交
@@ -206,13 +207,13 @@ def test_buy_skip_traded_today(acc, monkeypatch):
 
 
 def test_buy_skip_insufficient_cash(acc, monkeypatch):
-    """现金 < 净值×30% → 跳过"现金不足", 不扣款。"""
+    """现金 < 净值×execution.pct(15%) → 跳过"现金不足", 不扣款。"""
     monkeypatch.setattr(prism.engine, "run_screen", _fake_run_screen(CAND))
     acc.state["holdings"].append({
         "code": "000001.SZ", "shares": 5000, "cost": 9.5,
         "buy_date": "2026-08-30", "buy_price": 9.5, "entry_nav": 1e6})
-    acc.state["cash"] = 12000.0                 # nav=12000+47500=59500, 阈值17850
+    acc.state["cash"] = 8000.0                  # nav=8000+47500=55500, 阈值8325(15%)
     out = acc.buy_from_screen(_FakeProvider(ups=CAND), now=NOW)
     assert any(s["reason"] == "现金不足" for s in out["skipped"])
     assert out["bought"] == []
-    assert acc.state["cash"] == 12000.0         # 未扣款
+    assert acc.state["cash"] == 8000.0          # 未扣款

@@ -21,6 +21,16 @@ _REQUIRED_KEYS = ("version", "created", "initial_capital", "cash", "holdings",
                   "settled_dates")
 
 
+def _next_weekday(d):
+    """下一交易日(仅跳周六日, 不含节假日历——ponytail: 模拟盘可接受)。"""
+    from datetime import date, timedelta
+    y, m, dd = map(int, d.split("-"))
+    cur = date(y, m, dd) + timedelta(days=1)
+    while cur.weekday() >= 5:
+        cur += timedelta(days=1)
+    return cur.isoformat()
+
+
 class PaperAccount:
     """模拟账户: 账本 + 买入/卖出执行 + 结算 + 查询。
 
@@ -35,6 +45,7 @@ class PaperAccount:
             else _DEFAULT_STRATEGY
         self.initial_capital = float(initial_capital)
         self.position_ratio = float(position_ratio)
+        self._position_ratio_ctor = self.position_ratio   # execution.pct 缺失时的回落基线
         self.max_positions = int(max_positions)
         self.fee_rate = float(fee_rate)
         self.slippage = float(slippage)
@@ -58,6 +69,11 @@ class PaperAccount:
                 reg.scan_factors(force=True)   # 幂等重扫注册因子库(load_strategy 校验依赖)
                 self._strategy = load_strategy(
                     engine.STRATEGIES_DIR / ("%s.json" % sid))
+                # execution.pct 覆盖默认仓位(spec §4); 无 execution 块回落构造参数
+                exec_pct = ((self._strategy or {}).get("execution") or {}) \
+                    .get("pct")
+                self.position_ratio = (float(exec_pct) if exec_pct
+                                       else self._position_ratio_ctor)
             except Exception as e:
                 if self._strategy is None:
                     raise            # 首载且失败 → 无退路, 照抛
@@ -184,32 +200,8 @@ class PaperAccount:
         if ts_key in self.state["screens_done"]:
             return {"candidates": 0, "bought": [], "skipped": [],
                     "env_ok": False, "already_done": True}
-        from prism.engine import run_screen
-        from prism import registry as reg
-        market_ctx = provider.build_market_context()
-        gate_fids = (self.strategy.get("market_gate") or {}).get("factors", [])
-        gate_factors = {}
-        for fid in gate_fids:
-            try:
-                res = reg.get_factor(fid)["func"](market_ctx)
-                if isinstance(res, dict):
-                    gate_factors[fid] = 1 if res.get("score") else 0
-                else:
-                    gate_factors[fid] = 1 if res else 0
-            except Exception:
-                gate_factors[fid] = 0
-        limit_ups = provider.get_limit_ups()
-        stock_contexts = {}
-        for lu in limit_ups:
-            try:
-                stock_contexts[lu["code"]] = provider.build_stock_context(
-                    lu["code"])
-            except Exception:
-                pass
         try:
-            result = run_screen(self.strategy, market_ctx,
-                                gate_factors=gate_factors,
-                                stock_contexts=stock_contexts)
+            result = self._screen_candidates(provider)
         except Exception as e:
             snap = self._snapshot_state()
             self.state["screens_done"].append(ts_key)
@@ -260,6 +252,78 @@ class PaperAccount:
                     "error": "状态保存失败"}
         return {"candidates": len(result.get("candidates", [])),
                 "bought": bought, "skipped": skipped, "env_ok": env_ok}
+
+    def _screen_candidates(self, provider):
+        """门禁求值 + 引擎选股(pick/盘中排队共用编排)。"""
+        from prism.engine import run_screen
+        from prism import registry as reg
+        market_ctx = provider.build_market_context()
+        gate_fids = (self.strategy.get("market_gate") or {}).get("factors", [])
+        gate_factors = {}
+        for fid in gate_fids:
+            try:
+                res = reg.get_factor(fid)["func"](market_ctx)
+                if isinstance(res, dict):
+                    gate_factors[fid] = 1 if res.get("score") else 0
+                else:
+                    gate_factors[fid] = 1 if res else 0
+            except Exception:
+                gate_factors[fid] = 0
+        limit_ups = provider.get_limit_ups()
+        stock_contexts = {}
+        for lu in limit_ups:
+            try:
+                stock_contexts[lu["code"]] = provider.build_stock_context(
+                    lu["code"])
+            except Exception:
+                pass
+        result = run_screen(self.strategy, market_ctx,
+                            gate_factors=gate_factors,
+                            stock_contexts=stock_contexts)
+        return result
+
+    def pick_top5_at_close(self, provider, now=None, slot=None):
+        """收盘选股(spec §5): 门禁→打分→前 top_n 存 planned_buys(整体替换)。
+
+        幂等键 pickT 前缀(slot 优先, 缺省含日期)与盘中 T 键不冲突;
+        门禁不过 → 空计划; 同分按 code 升序决胜; 选股失败 fail-closed。"""
+        now = now or datetime.now()
+        if self.state is None and not self.load():
+            return {"error": "未初始化"}
+        d = now.strftime("%Y-%m-%d")
+        ts_key = "pickT%s" % (slot or "%sT%s" % (d, now.strftime("%H:%M")))
+        if ts_key in self.state["screens_done"]:
+            return {"picked": [], "env_ok": False, "already_done": True}
+        top_n = int(((self.strategy.get("execution") or {}).get("top_n"))
+                    or 5)
+        try:
+            result = self._screen_candidates(provider)
+        except Exception as e:
+            snap = self._snapshot_state()
+            self.state["screens_done"].append(ts_key)
+            try:
+                self.save()
+            except Exception:
+                self._restore_state(snap)
+            return {"error": "选股失败: %r" % e}
+        env_ok = bool(result.get("environment_ok"))
+        cands = sorted(result.get("candidates", []),
+                       key=lambda c: (-float(c.get("scores", {})
+                                             .get("composite", 0)),
+                                      str(c.get("code"))))
+        picked = [{"code": c["code"],
+                   "score": float(c.get("scores", {}).get("composite", 0)),
+                   "date": d, "for_date": _next_weekday(d)}
+                  for c in cands[:top_n if env_ok else 0]]
+        snap = self._snapshot_state()
+        self.state["planned_buys"] = picked
+        self.state["screens_done"].append(ts_key)
+        try:
+            self.save()
+        except Exception:
+            self._restore_state(snap)
+            return {"error": "状态保存失败"}
+        return {"picked": picked, "env_ok": env_ok}
 
     def _buyable(self, code, nav, now):
         """买入前置判定(排板四道+现金/仓位); None=可排。今日判定用注入 now 的
