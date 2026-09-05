@@ -193,6 +193,21 @@ def run_screen(strategy, market_ctx, gate_factors=None, stock_contexts=None):
             for ctx in stock_contexts.values():
                 if not (getattr(ctx, "sector_map", None) or {}):
                     ctx.sector_map = sec_map
+        # 指数K线回填(F6 专用)。此前漏了这一步 —— 个股 ctx 构建时拿不到指数
+        # 数据, 而 build_market_context 抓到的又没下发, 导致 F6 在实盘与回测
+        # 双向恒 0。两个字段语义不同, 必须分开下发:
+        #   index_kline      -> 涨停指数 880368(N1 兜底, 需 >=6 根)
+        #   sh_index_kline   -> 上证指数 000001(F6, 需 >=21 根算 MA20)
+        if market_ctx is not None:
+            idx = getattr(market_ctx, "index_kline", None)
+            sh_idx = market_ctx.get("sh_index_kline")
+            if idx is not None or sh_idx is not None:
+                for ctx in stock_contexts.values():
+                    if idx is not None and getattr(ctx, "index_kline", None) is None:
+                        ctx.index_kline = idx
+                    extra = getattr(ctx, "_extra", None)
+                    if sh_idx is not None and isinstance(extra, dict):
+                        extra.setdefault("sh_index_kline", sh_idx)
         min_model = (strategy.get("filters") or {}).get("candidate_min_model", 3)
         for code, ctx in stock_contexts.items():
             ev = evaluate_stock(code, ctx, strategy)

@@ -13,18 +13,26 @@ import prism.market_data as md
 def _ws_tmp(tmp_path_factory):
     """工作区内临时目录(沙箱拒绝系统 Temp 时用, 保证 CACHE_PATH 可写)。
 
-    目录: <项目根>/pt_ws_tmp/<basename>, 用后清理。"""
+    目录: <项目根>/pt_ws_tmp/<唯一名>, 用后尽力清理。
+
+    **必须用唯一名, 不能用固定名**: 清理在沙箱下会失败(safe-delete 报
+    windows-sandbox-recycle-bin-unavailable), 此时固定名目录会残留上一轮的
+    缓存, 污染下一轮断言 —— 实测出现过 sectors 累积成 3(用例期望 1)、
+    global 多出 UDI/US10Y/VIX、sector_map 被后跑的用例覆盖, 共 4 个用例假失败。
+    清理只能当善后, 不能当作用例正确性的前提。
+    """
+    import shutil
+    import tempfile
     base = Path(__file__).parent.parent.parent / "pt_ws_tmp"
     base.mkdir(exist_ok=True)
-    d = base / "mkt_test"
-    d.mkdir(exist_ok=True)
-    yield d
-    # 测试结束后清理该目录内容(保持工作区干净)
+    d = Path(tempfile.mkdtemp(prefix="mkt_", dir=str(base)))
     try:
-        import shutil
-        shutil.rmtree(d, ignore_errors=True)
-    except Exception:
-        pass
+        yield d
+    finally:
+        try:
+            shutil.rmtree(d, ignore_errors=True)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------- 假响应

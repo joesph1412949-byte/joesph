@@ -184,19 +184,39 @@ class Backtester:
                    limit_ups=None):
         """回测环境的股票上下文(只用回测可得的字段)。
 
-        数据适配层(审查 I1): kline_feed 的元组列表 [(date, close), ...] 组装成
-        DataFrame(close/volume/open/high/low, 日期做行索引), 满足真实因子按
-        kline["close"]/kline["volume"]/len(kline) 访问。回测 feeds 没有
-        volume/open/high/low → 占位: volume 恒 1.0(量比类因子不会误命中),
-        open/high/low 取 close(形态类因子语义不受影响)。
+        kline_feed 元组 → DataFrame(open/high/low/close/volume, 日期做行索引),
+        满足真实因子按 kline["close"]/kline["volume"]/len(kline) 访问。
+
+        **kline_feed 契约(向后兼容三档, 按元组长度自动识别)**:
+          (date, close)                          旧契约 —— 只有收盘价
+          (date, close, volume)                  量能契约
+          (date, open, high, low, close, volume) 全量 OHLCV 契约
+        只有收盘价的旧契约下: volume 占位 1.0(量比类因子不会误命中)、
+        open/high/low 取 close。注意此时 F5/Y3/S2/S3 量能因子与形态因子
+        是"静默失效"而非"不命中", 回测结果不能用来评估这些因子。
         mkt: 市场数据层快照(供 SEC 板块因子), 注入 ctx._extra["mkt"]。
         sector_map: code → 行业板块代码(供 SEC 因子查个股所属板块)。
         """
         rows = []
-        for dt, px in kline or []:
+        for row in kline or []:
+            # 契约三档按长度识别: 2=(date,close) / 3=(date,close,vol) /
+            # 6=(date,open,high,low,close,vol)。异常行直接丢弃, 不让单条脏数据炸整段。
             try:
-                rows.append((str(dt), float(px)))
-            except (TypeError, ValueError):
+                dt = str(row[0])
+                if len(row) >= 6:
+                    o, h, l, c, v = (float(row[1]), float(row[2]),
+                                     float(row[3]), float(row[4]),
+                                     float(row[5]))
+                elif len(row) >= 3:
+                    c = float(row[1])
+                    v = float(row[2])
+                    o = h = l = c
+                else:
+                    c = float(row[1])
+                    o = h = l = c
+                    v = 1.0
+                rows.append((dt, o, h, l, c, v))
+            except (TypeError, ValueError, IndexError):
                 continue
         extra = {}
         if mkt is not None:
@@ -208,12 +228,12 @@ class Backtester:
         if not rows:
             return FactorContext(code=code, kline=None, **extra)
         df = pd.DataFrame({
-            "close": [px for _dt, px in rows],
-            "open": [px for _dt, px in rows],
-            "high": [px for _dt, px in rows],
-            "low": [px for _dt, px in rows],
-            "volume": [1.0] * len(rows),
-        }, index=[dt for dt, _px in rows])
+            "close": [r[4] for r in rows],
+            "open": [r[1] for r in rows],
+            "high": [r[2] for r in rows],
+            "low": [r[3] for r in rows],
+            "volume": [r[5] for r in rows],
+        }, index=[r[0] for r in rows])
         return FactorContext(code=code, kline=df, **extra)
 
     def _pick(self, pool, asof, em=None, ticks=None, mkt=None, sector_map=None,

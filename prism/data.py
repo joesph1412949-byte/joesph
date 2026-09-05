@@ -88,6 +88,24 @@ class DataProvider:
         em = self.get_market_stats()
         ctx = FactorContext(code="__MARKET__", ticks=ticks, limit_ups=limit_ups,
                             em=em or {}, index_kline=index_kline)
+        # F6 大盘配合要的是上证指数日K(>=21 根算 MA20), 与 N1 兜底用的涨停指数
+        # 880368(只要 6 根) 不是同一个东西 —— 不能复用 index_kline 字段,
+        # 否则 F6 要么拿到 8 根不够长, 要么拿涨停指数算上证均线(语义错)。
+        # 因此单独抓一份, 存进 _extra["sh_index_kline"]。QMT 优先, 降级通达信。
+        sh_index = None
+        if self.connected:
+            try:
+                sh_index = self.ds.get_index_kline("000001.SH", days=30)
+            except Exception:
+                sh_index = None
+        if sh_index is None:
+            try:
+                from prism import tdx_source
+                sh_index = tdx_source.get_index_kline("000001.SH", days=30)
+            except Exception:
+                sh_index = None
+        if sh_index is not None and len(sh_index) > 0:
+            ctx._extra["sh_index_kline"] = sh_index
         # v04 接线: mkt 快照 + 行业映射注入 _extra(F8/F9/SEC* 因子用)。
         # 全部读本地缓存, 失败 fail-open(缺数据 → 因子得 0, 不阻塞选股)。
         # sector_map 是 FactorContext 显式字段: get()/engine 优先读字段,
@@ -135,10 +153,21 @@ class DataProvider:
             except Exception:
                 pass
         if kline is None and self.connected:
+            # 260 而非 250: M6/M7 用 closes[-251:-1] 取 250 根算 MA250, 要求
+            # len(kline) >= 251。此前按 250 拉取, 永远差一根 → 实盘恒 0。
             try:
-                kline = self.ds.get_kline(code, days=250)
+                kline = self.ds.get_kline(code, days=260)
             except Exception:
                 kline = None
+        # QMT 拿不到时降级通达信(同样必须 >=251 根, 否则 M6/M7 依旧恒 0)
+        if kline is None or len(kline) < 251:
+            try:
+                from prism import tdx_source
+                tdx_kline = tdx_source.get_kline(code, days=260)
+                if tdx_kline is not None and len(tdx_kline) > 0:
+                    kline = tdx_kline
+            except Exception:
+                pass
         fund = {}
         try:
             fund = self.fund_feed.compute_for_stock(code, float_mv=float_mv)

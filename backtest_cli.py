@@ -66,17 +66,25 @@ def _get_zt_index():
 # ---------------------------------------------------------------- QMT K线源
 
 def qmt_kline_feed(code):
-    """用 QMT 本地 K线(xtdata, 已连接的 miniQMT)拉历史日K → [(date, close), ...]。
+    """用 QMT 本地 K线(xtdata, 已连接的 miniQMT)拉历史日K
+    → [(date, open, high, low, close, volume), ...] 全量 OHLCV 契约。
 
-    优先从 zt_history 缓存读(构建后秒回, 无网络); 缓存无此股 → 单只拉。
-    缓存一次性加载(模块级 _zt_cache), 避免每只股票重读 64MB pickle。
-    失败 → []。
+    优先从 zt_history 缓存读(构建后秒回, 无网络); 老缓存只存了 close →
+    退回 2 元组旧契约(volume 由 backtest 占位, 量能因子失效属预期)。
+    缓存无此股 → 单只实时拉(带完整 OHLCV)。失败 → []。
     """
     # 优先: zt_history 缓存(全市场K线已落盘)
     _cache = _get_zt_cache()
     if _cache:
         rec = _cache.get(str(code).strip().upper())
         if rec and rec.get("dates"):
+            # 新缓存若带 volume 走全量契约; 老缓存只有 close 走旧契约
+            if rec.get("volume"):
+                return list(zip(rec["dates"],
+                                rec.get("open") or rec["close"],
+                                rec.get("high") or rec["close"],
+                                rec.get("low") or rec["close"],
+                                rec["close"], rec["volume"]))
             return list(zip(rec["dates"], rec["close"]))
     # 回退: 单只实时拉
     try:
@@ -101,13 +109,23 @@ def qmt_kline_feed(code):
                      for t in df["time"]]
         else:
             dates = [str(t) for t in df.index]
-        return list(zip(dates, closes))
+        # 全量 OHLCV: 缺列时以 close 兜底, 保证 6 元组结构稳定
+        cols = {}
+        for k in ("open", "high", "low", "volume"):
+            cols[k] = (df[k].tolist() if k in df.columns
+                       else list(closes))
+        return list(zip(dates, cols["open"], cols["high"], cols["low"],
+                        closes, cols["volume"]))
     except Exception:
         return []
 
 
 def kline_feed(code):
-    """K线数据源(优先 QMT 本地, 网络源回退): [(date_str, close), ...] 升序。
+    """K线数据源(优先 QMT 本地, 网络源回退)。
+
+    返回契约: 网络源/QMT 实时源 → [(date, open, high, low, close, volume), ...]
+    全量 OHLCV; QMT 老缓存(只存 close) → 旧 2 元组, 由 backtest 占位。
+    升序。
 
     数据源链(逐级回退, 全部失败 → []):
       1. QMT xtdata 本地K线(需 miniQMT 已连接, 最快最稳)
@@ -182,7 +200,8 @@ def _secid(code):
 
 
 def _kline_tencent(code):
-    """腾讯日K线 → [(date_str, close), ...] 升序。失败 → []。
+    """腾讯日K线 → [(date, open, high, low, close, volume), ...] 升序。
+    全量 OHLCV 契约(带真实成交量), 量能/形态因子在回测中可生效。失败 → []。
     param 格式: 市场代码 + ',' + 6位代码, 如 sz000936 / sh600000。"""
     s = str(code).strip().upper()
     if s.startswith("6"):
@@ -203,19 +222,25 @@ def _kline_tencent(code):
         return []
     out = []
     for line in klines:
-        # 腾讯格式: [date, open, close, high, low, volume, ...] — 索引1=开 2=收
-        if isinstance(line, list) and len(line) >= 3:
+        # 腾讯格式: [date, open, close, high, low, volume, ...]
+        if isinstance(line, list) and len(line) >= 6:
             try:
-                out.append((str(line[0]), float(line[2])))
+                out.append((str(line[0]), float(line[1]), float(line[3]),
+                            float(line[4]), float(line[2]), float(line[5])))
             except (TypeError, ValueError):
                 continue
     return out
 
 
 def _kline_from(url, code, extra=None):
-    """从指定东财K线端点拉数据。成功返回 [(date, close)], 失败 → []。"""
+    """东财K线端点 → [(date, open, high, low, close, volume), ...]。失败 → []。
+
+    fields2 取全量 OHLCV: f51日期 f52开 f53收 f54高 f55低 f56量(手)。
+    此前只请求 f51,f53(日期+收盘), 回测量能因子因此全失效(volume 恒 1.0)。
+    """
     params = {"secid": _secid(code), "klt": 101, "fqt": 1,
-              "fields1": "f1,f2,f3", "fields2": "f51,f53"}
+              "fields1": "f1,f2,f3",
+              "fields2": "f51,f52,f53,f54,f55,f56"}
     if extra:
         params.update(extra)
     try:
@@ -227,9 +252,11 @@ def _kline_from(url, code, extra=None):
     out = []
     for line in klines:
         parts = str(line).split(",")
-        if len(parts) >= 2:
+        if len(parts) >= 6:
             try:
-                out.append((parts[0], float(parts[1])))
+                # 东财顺序: date, open, close, high, low, volume
+                out.append((parts[0], float(parts[1]), float(parts[3]),
+                            float(parts[4]), float(parts[2]), float(parts[5])))
             except (TypeError, ValueError):
                 continue
     return out
@@ -251,8 +278,11 @@ def main():
     ap.add_argument("--hold", type=int, default=None, help="持有天数(覆盖策略配置)")
     ap.add_argument("--oos", action="store_true",
                     help="运行样本外验证(前后半段对比, 防过拟合)")
-    ap.add_argument("--use-market-data", action="store_true",
-                    help="注入市场数据层(申万板块K线/全球指数/个股行业映射), 供SEC等板块因子使用")
+    ap.add_argument("--no-market-data", dest="use_market_data",
+                    action="store_false",
+                    help="不注入市场数据缓存(mkt/sector_map)。默认注入 —— "
+                         "否则 N6-N8/F8/F9/SEC1-4/SEC6 共 10 个因子静默失效, "
+                         "回测结果不能用来评估它们")
     args = ap.parse_args()
 
     start = _parse_date(args.start)
