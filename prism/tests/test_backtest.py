@@ -207,6 +207,49 @@ def test_backtest_stock_ctx_builds_dataframe():
     assert len(ctx3.kline) == 1
 
 
+def test_backtest_fund_feed_asof_no_future_leak():
+    """fund_feed 注入: F7/Y6/Y7 按 asof 取数; 快照类 Y5/Y2 被剔除(防未来)。
+
+    假 feed 无视 asof 返回"今天"的数据, 若 Backtester 不传 asof 或不剔除
+    Y5/Y2, 断言会失败 —— 即未来数据漏进回测。
+    """
+    s = load_strategy(_mk_strategy())
+    calls = []
+
+    class _FakeFeed:
+        def compute_for_stock(self, code, float_mv=None, asof=None):
+            calls.append((code, asof))
+            return {"F7": {"score": 1, "note": "t"},
+                    "Y5": {"score": 1, "note": "snapshot-should-drop"},
+                    "Y2": {"score": 1, "note": "snapshot-should-drop"}}
+
+    bt = backtest.Backtester(s, zt_feed=lambda d: [], kline_feed=lambda c: [],
+                             fund_feed=_FakeFeed())
+    fund = bt._fund_for("600000.SH", date(2026, 9, 3))
+    assert fund == {"F7": {"score": 1, "note": "t"}}
+    assert calls == [("600000.SH", date(2026, 9, 3))]
+    # 未注入 fund_feed → None(旧行为, F7/Y6/Y7 得 0)
+    bt2 = backtest.Backtester(s, zt_feed=lambda d: [], kline_feed=lambda c: [])
+    assert bt2._fund_for("600000.SH", date(2026, 9, 3)) is None
+    # fund 经 _stock_ctx 落到 ctx.fund
+    ctx = bt._stock_ctx("600000.SH", [("2026-07-01", 10.0)],
+                        fund={"F7": {"score": 1, "note": "t"}})
+    assert ctx.fund == {"F7": {"score": 1, "note": "t"}}
+
+
+def test_backtest_fund_feed_fail_open():
+    """fund_feed 抛异常 → _fund_for 返回 None(不阻塞选股)。"""
+    s = load_strategy(_mk_strategy())
+
+    class _BoomFeed:
+        def compute_for_stock(self, code, float_mv=None, asof=None):
+            raise RuntimeError("network down")
+
+    bt = backtest.Backtester(s, zt_feed=lambda d: [], kline_feed=lambda c: [],
+                             fund_feed=_BoomFeed())
+    assert bt._fund_for("600000.SH", date(2026, 9, 3)) is None
+
+
 def test_backtest_run_adopts_strategy_sell_rules():
     """审查 I1: run() 默认采用策略配置 sell_rules(显式参数优先覆盖)。
 

@@ -34,6 +34,11 @@ def _today_key():
     return date.today().strftime("%Y%m%d")
 
 
+def _ref_key(d):
+    """基准日 → 缓存键日期段(YYYYMMDD)。"""
+    return d.strftime("%Y%m%d")
+
+
 def _code6(code):
     """取 6 位证券代码: '000001.SZ' → '000001'; 裸 '000001' → '000001'。"""
     return str(code).strip().split(".")[0][:6]
@@ -52,17 +57,27 @@ def _secid(code):
 
 
 class FundamentalFeed:
-    """东财个股因子。http_get 可注入(测试);cache_path 为 None 时禁用缓存。"""
+    """东财个股因子。http_get 可注入(测试);cache_path 为 None 时禁用缓存。
+
+    asof: 数据基准日(date, 默认 None=今天)。防未来函数的关键:
+      龙虎榜(Y7)/公告(Y6)/涨停池(F7)都按 asof 切窗口, 缓存键也按 asof 分日。
+      实盘(计算今天)不传即用今天, 行为不变; 回测若接入本 feed, 必须传
+      asof=回测选股日, 否则会读到回测日之后的数据(未来函数, 回测虚高)。"""
 
     HEADERS = {"User-Agent": "Mozilla/5.0",
                "Referer": "http://quote.eastmoney.com/"}
 
     def __init__(self, http_get=None, cache_path="fundamental_cache.json",
-                 timeout=5.0):
+                 timeout=5.0, asof=None):
         self.http_get = http_get or _default_http_get
         self.cache_path = cache_path
         self.timeout = timeout
+        self.asof = asof
         self._cache = self._load_cache() if cache_path else {}
+
+    def _ref(self, asof=None):
+        """本次取数的"今天": 调用级 asof > 实例级 asof > date.today()。"""
+        return asof or self.asof or date.today()
 
     # ---------- 缓存 ----------
     def _load_cache(self):
@@ -78,8 +93,9 @@ class FundamentalFeed:
         with open(self.cache_path, "w", encoding="utf-8") as f:
             json.dump(self._cache, f, ensure_ascii=False)
 
-    def _cache_key(self, code):
-        return "%s:%s" % (_today_key(), code)
+    def _cache_key(self, code, asof=None):
+        """按基准日分日缓存: 同一只股在不同 asof 下是不同的数据快照。"""
+        return "%s:%s" % (_ref_key(self._ref(asof)), code)
 
     def _datacenter(self, report_name, filter_str):
         """datacenter-web 通用请求 → result.data 列表; 失败抛异常。"""
@@ -123,18 +139,19 @@ class FundamentalFeed:
             self._save_cache()
         return result
 
-    def _hybk_history(self):
+    def _hybk_history(self, asof=None):
         """近 RECENT_DAYS-1 个交易日的全部涨停池 hybk 集合(按日缓存, 全股票共用)。
-        从昨天起逐日历日回溯, data.pool==null(非交易日)→跳过该日历日继续, 上限 20 日;
-        端点失败(HTTP/超时/解析)→ 直接抛异常(F7 fail-open, 不写缓存)。
+        从 asof 前一天起逐日历日回溯, data.pool==null(非交易日)→跳过该日历日继续,
+        上限 20 日; 端点失败(HTTP/超时/解析)→ 直接抛异常(F7 fail-open, 不写缓存)。
         键 'hybk_history:YYYYMMDD' 与各股票无关, 一天只算一次, 避免每只股各回溯 N 次。"""
-        today_key = _today_key()
+        ref = self._ref(asof)
+        today_key = _ref_key(ref)
         cache_key = "hybk_history:%s" % today_key
         if cache_key in self._cache:
             return set(self._cache[cache_key])
         hist = set()
         days = 0
-        day = date.today() - timedelta(days=1)
+        day = ref - timedelta(days=1)
         for _ in range(20):
             if days >= RECENT_DAYS - 1:  # 已凑够 N-1 个交易日
                 break
@@ -210,11 +227,12 @@ class FundamentalFeed:
                 "note": "概念标签 %d 个 %s %d" % (count, ">=" if hit else "<",
                                               Y5_MIN_CONCEPTS)}
 
-    def _novel_concept(self, code):
-        """F7 题材新颖: 今日涨停池该股 hybk 不在近 RECENT_DAYS-1 个交易日的 hybk 集合 → 1。
-        今日池无该股 / 无 hybk → None(fail-open); 历史集合按日缓存(hybk_history:YYYYMMDD)。"""
+    def _novel_concept(self, code, asof=None):
+        """F7 题材新颖: asof 当日涨停池该股 hybk 不在近 RECENT_DAYS-1 个交易日的
+        hybk 集合 → 1。当日池无该股 / 无 hybk → None(fail-open);
+        历史集合按日缓存(hybk_history:YYYYMMDD)。"""
         code6 = _code6(code)
-        pool = self._ztpool(_today_key())   # 今日涨停池
+        pool = self._ztpool(_ref_key(self._ref(asof)))   # 基准日涨停池
         if pool is None:
             return None
         hybk = None
@@ -226,18 +244,20 @@ class FundamentalFeed:
                 break
         if not hybk:
             return None
-        hist = self._hybk_history()
+        hist = self._hybk_history(asof)
         novel = hybk not in hist
         return {"score": 1 if novel else 0,
                 "note": ("今日题材 %s 为近 %d 日首次出现(新颖)" % (hybk, RECENT_DAYS))
                 if novel else "今日题材 %s 近 %d 日已出现过" % (hybk, RECENT_DAYS)}
 
-    def _dragon_tiger(self, code):
+    def _dragon_tiger(self, code, asof=None):
         """Y7 游资现身: 近 RECENT_DAYS 日龙虎榜有该股且净买入 >0 → 1。返回 {"score","note"}。
-        filter 用 SECURITY_CODE(6 位无后缀, 非 SECUCODE); 日期在 Python 里过滤(更稳)。"""
+        filter 用 SECURITY_CODE(6 位无后缀, 非 SECUCODE); 日期在 Python 里过滤(更稳)。
+        窗口以 asof 为基准(防未来函数: 回测传入选股日, 不看 asof 之后的榜)。"""
         rows = self._datacenter("RPT_DAILYBILLBOARD_DETAILSNEW",
                                 '(SECURITY_CODE="%s")' % _code6(code))
-        cutoff = date.today() - timedelta(days=RECENT_DAYS - 1)
+        ref = self._ref(asof)
+        cutoff = ref - timedelta(days=RECENT_DAYS - 1)
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -252,7 +272,9 @@ class FundamentalFeed:
                 row_date = datetime.strptime(str(td)[:10], "%Y-%m-%d").date()
             except (TypeError, ValueError):
                 continue
-            if row_date >= cutoff:
+            # 双向窗口: 榜单日必须在 [cutoff, ref] 内——ref 之后的记录
+            # 在回测场景就是未来数据, 绝不能计入
+            if cutoff <= row_date <= ref:
                 return {"score": 1,
                         "note": "近 %d 日龙虎榜净买入 %.0f 元" % (RECENT_DAYS, float(amt))}
         return {"score": 0, "note": "近 %d 日无龙虎榜净买入" % RECENT_DAYS}
@@ -279,9 +301,11 @@ class FundamentalFeed:
                     "note": "股东户数环比减少 %.0f 户" % abs(float(chg))}
         return {"score": 0, "note": "股东户数环比未下降"}
 
-    def _event(self, code):
+    def _event(self, code, asof=None):
         """Y6 事件催化: 近 RECENT_DAYS 日公告 title 命中 EVENT_KEYWORDS → 1。
-        日期(notice_date)在 Python 里过滤; 关键词命中即判定。"""
+        日期(notice_date)在 Python 里过滤; 关键词命中即判定。
+        窗口以 asof 为基准(防未来函数); 公告接口只给最近 20 条, asof 距今
+        太远时取不到当日窗口数据(该股得 0, 属数据覆盖问题, 不引入未来数据)。"""
         resp = self.http_get(
             "https://np-anotice-stock.eastmoney.com/api/security/ann",
             params={"sr": "-1", "page_size": "20", "page_index": "1",
@@ -291,7 +315,8 @@ class FundamentalFeed:
         resp.raise_for_status()
         d = resp.json()
         items = (d.get("data") or {}).get("list") or []
-        cutoff = date.today() - timedelta(days=RECENT_DAYS - 1)
+        ref = self._ref(asof)
+        cutoff = ref - timedelta(days=RECENT_DAYS - 1)
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -303,16 +328,22 @@ class FundamentalFeed:
                 nd_date = datetime.strptime(str(nd)[:10], "%Y-%m-%d").date()
             except (TypeError, ValueError):
                 continue
-            if nd_date >= cutoff:
+            # 双向窗口: 公告日必须在 [cutoff, ref] 内——超过 ref 的公告
+            # 在回测场景就是未来数据, 绝不能计入
+            if cutoff <= nd_date <= ref:
                 return {"score": 1,
                         "note": "近 %d 日公告命中事件: %s" % (RECENT_DAYS, title[:20])}
         return {"score": 0, "note": "近 %d 日无事件催化公告" % RECENT_DAYS}
 
     # ---------- 公开入口 ----------
-    def compute_for_stock(self, code, float_mv=None):
+    def compute_for_stock(self, code, float_mv=None, asof=None):
         """返回 {因子名: {"score":0/1, "note":str}}。单因子失败→跳过(不抛)。
-        Y1 纯计算; Y5/F7/Y7/S5/Y6/Y2 逐个调用, 任一异常被捕获并 log。"""
-        key = self._cache_key(code)
+        Y1 纯计算; Y5/F7/Y7/S5/Y6/Y2 逐个调用, 任一异常被捕获并 log。
+        asof: 数据基准日(防未来函数), 实盘不传=今天。
+        注: Y2(股东户数, RPT_HOLDERNUMLATEST)与 Y5(概念标签)是"当前快照"类
+        数据, 接口本身不提供历史时点; 回测接入时这两类天然带未来性, 由
+        调用方决定是否启用(见 Backtester fund_feed 文档)。"""
+        key = self._cache_key(code, asof)
         if key in self._cache:
             return dict(self._cache[key])
         out = {}
@@ -328,11 +359,14 @@ class FundamentalFeed:
                 out["Y8"] = y8
         except Exception as e:
             logger.warning("东财因子 %s(%s) 计算失败, 回落手填: %r", "Y8", code, e)
-        for name, fn in [("Y5", self._concepts), ("F7", self._novel_concept),
-                         ("Y7", self._dragon_tiger), ("S5", self._financing),
-                         ("Y2", self._shareholders), ("Y6", self._event)]:
+        for name, fn, kw in [("Y5", self._concepts, {}),
+                             ("F7", self._novel_concept, {"asof": asof}),
+                             ("Y7", self._dragon_tiger, {"asof": asof}),
+                             ("S5", self._financing, {}),
+                             ("Y2", self._shareholders, {}),
+                             ("Y6", self._event, {"asof": asof})]:
             try:
-                res = fn(code)
+                res = fn(code, **kw)
                 if res is not None:
                     out[name] = res
             except Exception as e:

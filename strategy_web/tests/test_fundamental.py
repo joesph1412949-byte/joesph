@@ -242,6 +242,32 @@ def test_y7_dragon_tiger_miss():
     assert out["Y7"]["score"] == 0
 
 
+def test_y7_asof_excludes_future_rows():
+    """防未来函数: 榜单日 > asof 的记录绝不能计入(回测场景)。
+
+    榜单在 asof 之后 1 天(未来数据), 即使净买入为正也不得命中。
+    """
+    future = (TODAY + timedelta(days=1)).strftime("%Y-%m-%d")
+    lhb = [_lhb_row("000001", future, 5000000)]
+    http = FakeHTTP(_base_routes(lhb=lhb))
+    f = FundamentalFeed(http_get=http, cache_path=None)
+    out = f.compute_for_stock("000001.SZ", asof=TODAY)
+    assert out["Y7"]["score"] == 0
+
+
+def test_compute_for_stock_cache_scoped_by_asof():
+    """缓存按 asof 分日: 同一只股不同基准日是不同快照, 不串数据。"""
+    http = FakeHTTP(_base_routes(lhb=[_lhb_row("000001", d(1), 5000000)]))
+    f = FundamentalFeed(http_get=http, cache_path=None)
+    out_today = f.compute_for_stock("000001.SZ")
+    out_past = f.compute_for_stock("000001.SZ", asof=TODAY - timedelta(days=10))
+    # 今日: 榜在窗口内 → 1; asof=TODAY-10: 榜在未来 → 0(两份快照不同键)
+    assert out_today["Y7"]["score"] == 1
+    assert out_past["Y7"]["score"] == 0
+    keys = [k for k in f._cache if k.endswith("000001.SZ")]
+    assert len(keys) == 2
+
+
 # ---------- Y2 筹码干净(股东户数) ----------
 def test_y2_shareholders_hit():
     gdhs = [_holder_row("000001", -800)]

@@ -143,10 +143,16 @@ class Backtester:
     def __init__(self, strategy, zt_feed, kline_feed,
                  fee_rate=0.00025, slippage=0.001, position_ratio=0.3,
                  stamp_duty=0.0005, transfer_fee=0.00001,
-                 initial_capital=1000000.0, max_positions=5):
+                 initial_capital=1000000.0, max_positions=5, fund_feed=None):
         self.strategy = load_strategy(strategy)
         self.zt_feed = zt_feed
         self.kline_feed = kline_feed
+        # fund_feed: 可选(strategy_web.fundamental.FundamentalFeed)。
+        # 注入后 F7/Y6/Y7 在回测中按选股日 asof 取数(防未来函数, feed 内部
+        # 保证窗口不越 asof)。默认 None → fund 不注入, 这三个因子得 0
+        # (与旧行为一致)。注意 Y5/Y2 是"当前快照"类数据, 回测接入自带
+        # 未来性——默认接入也不启用它们(skip_snapshot_fund)。
+        self.fund_feed = fund_feed
         self.fee_rate = fee_rate            # 佣金(双向, 默认万2.5)
         self.slippage = slippage            # 滑点(买+卖-, 默认0.1%)
         self.stamp_duty = stamp_duty        # 印花税(仅卖出, A股默认0.05%)
@@ -181,7 +187,7 @@ class Backtester:
 
     # ---------------- 选股(复用 engine) ----------------
     def _stock_ctx(self, code, kline, mkt=None, sector_map=None,
-                   limit_ups=None):
+                   limit_ups=None, fund=None):
         """回测环境的股票上下文(只用回测可得的字段)。
 
         kline_feed 元组 → DataFrame(open/high/low/close/volume, 日期做行索引),
@@ -225,6 +231,8 @@ class Backtester:
             extra["sector_map"] = sector_map
         if limit_ups is not None:
             extra["limit_ups"] = limit_ups
+        if fund is not None:
+            extra["fund"] = fund
         if not rows:
             return FactorContext(code=code, kline=None, **extra)
         df = pd.DataFrame({
@@ -300,7 +308,9 @@ class Backtester:
                      if _parse_kline_date(dt) is not None
                      and _parse_kline_date(dt) <= asof]
             ctx = self._stock_ctx(code, kline, mkt_sliced, sector_map,
-                                  limit_ups=pool_ctx)
+                                  limit_ups=pool_ctx,
+                                  fund=self._fund_for(code, asof,
+                                                      s.get("float_mv")))
             scores = compute_model_scores(ctx, self.strategy)
             best = max([scores[m["id"]]
                         for m in self.strategy["scoring_models"]], default=0)
@@ -323,6 +333,26 @@ class Backtester:
         # 每日选股上限: 与净值模拟的 max_positions 一致(每天最多买 N 只,
         # 否则一天 50+ 只候选会把资金抽干, 净值模拟里几乎全部跳过)
         return out[: self.max_positions]
+
+    def _fund_for(self, code, asof, float_mv=None):
+        """个股基本面因子快照(fund_feed 注入时)。
+
+        float_mv: 涨停池条目自带的流通市值(如有), 供 Y1/Y8 纯计算因子。
+        防未来函数: 传 asof=选股日, feed 内部(Y7 龙虎榜/Y6 公告/F7 涨停池)
+        窗口不越 asof。"当前快照"类(Y5 概念/Y2 股东户数)对回测自带未来性,
+        剔除 —— 宁缺勿假(与 fail-closed 原则一致)。
+        fund_feed 未注入 → None(ctx.fund 为空, F7/Y6/Y7 得 0, 旧行为)。
+        """
+        if self.fund_feed is None:
+            return None
+        try:
+            fund = dict(self.fund_feed.compute_for_stock(
+                code, float_mv=float_mv, asof=asof) or {})
+        except Exception:
+            return None
+        for k in ("Y5", "Y2"):   # 快照类: 回测场景剔除, 防未来数据
+            fund.pop(k, None)
+        return fund or None
 
     def _gate_notes(self, em, ticks):
         """诊断(审查 I1): 门槛因子因未注入数据而得 0 的归因, 附在报告 gate_notes。
