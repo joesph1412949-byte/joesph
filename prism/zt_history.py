@@ -33,6 +33,9 @@ KLINE_COUNT = 400
 # 单批 xtdata 调用看门狗超时(秒)。QMT 下载/读取偶发永久挂起(实测同批次
 # 重复卡死), 超时抛 TimeoutError 让 build_cache 跳过该批(增量续建不丢进度)。
 DOWNLOAD_TIMEOUT = 90.0
+# 索引陈旧阈值(自然日): prev_day_pool 里索引最新日期距今超过该天数 →
+# 停供空契约(fail-closed)。10 天覆盖国庆/春节 8 天长假。
+STALE_DAYS = 10
 
 
 def _run_with_timeout(fn, args=(), kwargs=None, timeout=DOWNLOAD_TIMEOUT):
@@ -82,6 +85,49 @@ def _with_suffix(code):
     return s
 
 
+def _df_to_records(df):
+    """xtdata 日K DataFrame → 缓存记录 {dates, close, pre}; 不足2根 → None。
+
+    提取逻辑与原 build_cache 内联段一致(time 毫秒列优先, index 兜底;
+    preClose 列优先, 缺列用 close 前移), build_cache/refresh_cache 共用。
+    """
+    if df is None or len(df) < 2:
+        return None
+    closes = df["close"].tolist()
+    if "preClose" in df.columns:
+        pre = df["preClose"].tolist()
+    else:
+        pre = [closes[0]] + closes[:-1]
+    if "time" in df.columns:
+        dates = [datetime.fromtimestamp(int(t) / 1000.0).strftime("%Y-%m-%d")
+                 for t in df["time"]]
+    else:
+        dates = [str(t) for t in df.index]
+    return {"dates": dates, "close": closes, "pre": pre}
+
+
+def _atomic_pickle(path, obj):
+    """原子写 pickle: 先写 tmp 再 os.replace(中断不留半个文件)。"""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(pickle.dumps(obj, protocol=4))
+    os.replace(str(tmp), str(path))
+
+
+def _merge_tail(old, rec, start_fmt):
+    """尾部合并: 旧缓存 date<START 的头部保留, 新记录整体替换 >=START 尾巴,
+    按日期升序接上(排序稳定, 头部本就升序)。新股 old=None → 纯新尾部。"""
+    if not old:
+        triples = list(zip(rec["dates"], rec["close"], rec["pre"]))
+    else:
+        triples = [(d, c, p) for d, c, p in zip(old["dates"], old["close"],
+                                                old["pre"]) if d < start_fmt]
+        triples += list(zip(rec["dates"], rec["close"], rec["pre"]))
+    triples.sort(key=lambda x: x[0])
+    return {"dates": [t[0] for t in triples],
+            "close": [t[1] for t in triples],
+            "pre": [t[2] for t in triples]}
+
+
 def build_cache(progress=None):
     """下载全市场日K线并构建涨停判断缓存(增量保存, 中断不丢进度)。
 
@@ -90,6 +136,7 @@ def build_cache(progress=None):
     (pre = 前日收盘, 用于涨停判断; 升序, 最后=最新)
 
     增量策略: 每处理 5 批(1000只)写一次缓存; 若中断, 已处理部分保留。
+    注意: 只补缓存里没有的代码, 存量K线尾部更新走 refresh_cache()。
     """
     from xtquant import xtdata
     t0 = time.time()
@@ -126,32 +173,88 @@ def build_cache(progress=None):
                 progress(processed, len(codes))
             continue
         for code, df in (data or {}).items():
-            if df is None or len(df) < 2:
+            rec = _df_to_records(df)
+            if rec is None:
                 continue
-            closes = df["close"].tolist()
-            if "preClose" in df.columns:
-                pre = df["preClose"].tolist()
-            else:
-                pre = [closes[0]] + closes[:-1]
-            if "time" in df.columns:
-                dates = [datetime.fromtimestamp(int(t) / 1000.0).strftime("%Y-%m-%d")
-                         for t in df["time"]]
-            else:
-                dates = [str(t) for t in df.index]
-            cache[code] = {"dates": dates, "close": closes, "pre": pre}
+            cache[code] = rec
         processed += len(chunk)
         # 每 5 批增量保存一次
         if (i // batch) % 5 == 4:
-            CACHE_PATH.write_bytes(pickle.dumps(cache, protocol=4))
+            _atomic_pickle(CACHE_PATH, cache)
             logger.info("增量保存: %d 只 (%.0f秒)", len(cache),
                         time.time() - t0)
         if progress:
             progress(processed, len(codes))
-    CACHE_PATH.write_bytes(pickle.dumps(cache, protocol=4))
+    _atomic_pickle(CACHE_PATH, cache)
     logger.info("缓存构建完成: %d 只, %.1f MB, 耗时 %.0f 秒",
                 len(cache), CACHE_PATH.stat().st_size / 1e6,
                 time.time() - t0)
     return {"codes": len(cache), "cache_size": CACHE_PATH.stat().st_size}
+
+
+def refresh_cache(progress=None, days=90):
+    """增量刷新存量K线尾部: 重拉最近 days 天, 整体替换旧缓存 >=START 的尾巴。
+
+    与 build_cache 的分工: build_cache 只补缓存里没有的代码(存量永不更新,
+    缓存会冻在首次构建日), 本函数反着干 — 复用 build_cache 的批处理骨架
+    (批200/看门狗/批失败跳过/每5批增量保存), 对所有沪深A股从
+    START=今天-days 重拉, 旧记录 date<START 原样保留, >=START 用新拉替换。
+
+    限制: 新股(缓存没有的代码)只有 START 以来的尾部, 缺更早历史 —
+    要全量 KLINE_COUNT 根仍走 build_cache()。
+
+    返回 {"codes": len(cache), "last_date": 全缓存最大日期 or None}。
+    """
+    from xtquant import xtdata
+    t0 = time.time()
+    codes = xtdata.get_stock_list_in_sector("沪深A股")
+    cache = _load_cache()
+    start = (date.today() - timedelta(days=days)).strftime("%Y%m%d")
+    start_fmt = "%s-%s-%s" % (start[:4], start[4:6], start[6:8])
+    logger.info("刷新 %d 只(>= %s 尾部重拉, 已缓存 %d)...",
+                len(codes), start_fmt, len(cache))
+    batch = 200
+    for i in range(0, len(codes), batch):
+        chunk = codes[i:i + batch]
+        try:
+            _run_with_timeout(xtdata.download_history_data2,
+                              (chunk, "1d"),
+                              {"start_time": start, "end_time": ""})
+        except Exception as e:
+            logger.warning("第 %d 批下载失败/超时: %r (跳过该批)", i // batch, e)
+            if progress:
+                progress(min(i + batch, len(codes)), len(codes))
+            continue
+        try:
+            data = _run_with_timeout(
+                xtdata.get_market_data_ex,
+                ([], chunk),
+                {"period": "1d", "start_time": start, "end_time": "",
+                 "count": 0})
+        except Exception as e:
+            logger.warning("第 %d 批读取失败/超时: %r (跳过该批)", i // batch, e)
+            if progress:
+                progress(min(i + batch, len(codes)), len(codes))
+            continue
+        for code, df in (data or {}).items():
+            rec = _df_to_records(df)
+            if rec is None:
+                continue
+            # ponytail: 新股也进但只有尾部(缺更早历史), 全量走 build_cache
+            cache[code] = _merge_tail(cache.get(code), rec, start_fmt)
+        # 每 5 批增量保存一次
+        if (i // batch) % 5 == 4:
+            _atomic_pickle(CACHE_PATH, cache)
+            logger.info("增量保存: %d 只 (%.0f秒)", len(cache),
+                        time.time() - t0)
+        if progress:
+            progress(min(i + batch, len(codes)), len(codes))
+    _atomic_pickle(CACHE_PATH, cache)
+    last_date = max((d for rec in cache.values() for d in rec["dates"]),
+                    default=None)
+    logger.info("缓存刷新完成: %d 只, 最新 %s, 耗时 %.0f 秒",
+                len(cache), last_date, time.time() - t0)
+    return {"codes": len(cache), "last_date": last_date}
 
 
 def _load_cache():
@@ -246,7 +349,7 @@ def build_index(cache=None):
                         break
                 by_day.setdefault(dates[i], []).append(
                     {"code": code, "boards": boards})
-    INDEX_PATH.write_bytes(pickle.dumps(by_day, protocol=4))
+    _atomic_pickle(INDEX_PATH, by_day)
     return by_day
 
 
@@ -326,6 +429,10 @@ def prev_day_pool(today=None):
     条目 code 直接透传(zt_history 缓存本就是 QMT 带后缀格式, 如
     "600051.SH") — 与 sector_map 键(带 .SH/.SZ 后缀)同格式契约, 见
     factor_f9_sector_expansion docstring。
+
+    陈旧保护: 索引最大日期距 today 超过 STALE_DAYS(10) 自然日 →
+    返回空契约 + warning(索引停更时 F9 会拿旧池当"昨日"——静默错数据;
+    10 天口径覆盖国庆/春节长假)。修复: python -m prism.zt_history --refresh。
     """
     index = _load_index() or {}
     if not index:
@@ -339,6 +446,24 @@ def prev_day_pool(today=None):
     def _n8(s):
         return str(s).replace("-", "")
 
+    try:
+        today_d = datetime.strptime(t, "%Y%m%d").date()
+    except ValueError:
+        return {"date": None, "codes": []}
+    latest = None
+    for d in index:
+        try:
+            dd = datetime.strptime(_n8(d), "%Y%m%d").date()
+        except ValueError:
+            continue
+        if latest is None or dd > latest:
+            latest = dd
+    if latest is None or (today_d - latest).days > STALE_DAYS:
+        logger.warning("涨停池索引陈旧(最新 %s, 距今>%d 自然日) → "
+                       "F9 昨日池停供(fail-closed); "
+                       "跑 python -m prism.zt_history --refresh 修复",
+                       latest, STALE_DAYS)
+        return {"date": None, "codes": []}
     days = sorted((d for d in index if _n8(d) < t), key=_n8)
     if not days:
         return {"date": None, "codes": []}
@@ -353,6 +478,8 @@ def build_cli():
     import argparse
     ap = argparse.ArgumentParser(description="历史涨停池缓存构建")
     ap.add_argument("--build", action="store_true", help="构建/重建K线缓存")
+    ap.add_argument("--refresh", action="store_true",
+                    help="增量刷新存量K线尾部(近90天)并重建索引")
     ap.add_argument("--build-index", action="store_true",
                     help="从K线缓存构建按日索引(查询加速)")
     ap.add_argument("--date", default="", help="查询某日涨停池 YYYYMMDD")
@@ -364,6 +491,15 @@ def build_cli():
             sys.stdout.flush()
         r = build_cache(progress=prog)
         print("\n构建完成:", r)
+        idx = build_index()
+        print("按日索引: %d 天" % len(idx))
+        return
+    if args.refresh:
+        def prog(done, total):
+            sys.stdout.write("\r刷新 %d/%d" % (done, total))
+            sys.stdout.flush()
+        r = refresh_cache(progress=prog)
+        print("\n刷新完成:", r)
         idx = build_index()
         print("按日索引: %d 天" % len(idx))
         return

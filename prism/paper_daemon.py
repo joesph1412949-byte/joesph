@@ -5,6 +5,7 @@
 安全(设计 §8): 本进程绝不写 D:\\QMT_SIGNALS、不调用任何下单接口——纯记账;
 实盘进程零影响; 行情/K线只读; 单轮异常不影响下一轮。"""
 import logging
+import threading
 import time
 from datetime import datetime
 
@@ -16,18 +17,29 @@ OPEN_WINDOW = ("09:26", "09:35")  # 次日开盘买入窗口(spec §5)
 SETTLE_AFTER = "15:00"
 POLL_SECONDS = 5
 INDEX_CODE = "000001.SH"          # 上证指数: 交易日历来源
+ZT_REFRESH_INTERVAL = 6 * 3600    # 涨停池缓存刷新节流(秒)
 
 
 class PaperDaemon:
     """调度器: 每 POLL_SECONDS 一轮; 15:05选股/开盘买入窗口/收盘结算由
     tick_once 触发。"""
 
-    def __init__(self, account, ticks_fn=None, sleep_fn=None, now_fn=None):
+    def __init__(self, account, ticks_fn=None, sleep_fn=None, now_fn=None,
+                 zt_refresh_fn=None):
         self.account = account
         self.provider = None
         self.ticks_fn = ticks_fn
         self.sleep_fn = sleep_fn
         self.now_fn = now_fn
+        if zt_refresh_fn is None:
+            # 真实路径: lambda 里懒 import, 刷新存量尾部 + 重建按日索引
+            def zt_refresh_fn():
+                from prism import zt_history
+                r = zt_history.refresh_cache()
+                r["index_days"] = len(zt_history.build_index())
+                return r
+        self.zt_refresh_fn = zt_refresh_fn
+        self._zt_refresh_at = 0.0    # 上次刷新触发时刻(epoch秒, 0=未刷过)
 
     # ---------- 时段 ----------
     def in_session(self, now):
@@ -92,6 +104,29 @@ class PaperDaemon:
                 t["downStopPrice"] = det["DownStopPrice"]
         return ticks
 
+    # ---------- 涨停池缓存自动刷新(6h 节流, daemon 线程) ----------
+    def _maybe_refresh_zt(self):
+        """到点(距上次触发 >=6h)在 daemon 线程跑 zt_refresh_fn
+        (refresh_cache+build_index), 启动自愈 + 收盘后保鲜。
+
+        节流检查与时间戳置位在调用线程做(tick 单线程, 先置位再孵化,
+        防重复孵化); 整体 try/except 落日志 — 绝不阻塞/炸掉 tick 主循环。
+        """
+        now = time.time()
+        if now - self._zt_refresh_at < ZT_REFRESH_INTERVAL:
+            return
+        self._zt_refresh_at = now
+
+        def _worker():
+            try:
+                r = self.zt_refresh_fn()
+                LOG.info("涨停池缓存刷新完成: %r", r)
+            except Exception as e:
+                LOG.warning("涨停池缓存刷新失败(忽略, 下个节流窗口重试): %r", e)
+
+        threading.Thread(target=_worker, daemon=True,
+                         name="zt-refresh").start()
+
     # ---------- 单轮 ----------
     def tick_once(self, now=None):
         """一轮: 15:00后未结算→结算(幂等)+15:05收盘选股; 09:26-09:35 开盘
@@ -136,6 +171,8 @@ class PaperDaemon:
                 LOG.info("收盘选股: env_ok=%s picked=%s",
                          out["pick"].get("env_ok"),
                          [p["code"] for p in out["pick"].get("picked", [])])
+                # 涨停池缓存保鲜(6h 节流, daemon 线程, 不阻塞)
+                self._maybe_refresh_zt()
             return out
         # 开盘买入窗口(spec §5): 09:26-09:35, 消费 for_date==今日 的计划;
         # 触发轮直接返回(买优先于盯盘), 计划被消费后下轮恢复正常盯盘
@@ -247,6 +284,8 @@ class PaperDaemon:
         if not self.connect_provider():
             log.error("QMT 连接失败(重试上限), 退出")
             return
+        # 启动自愈: 守护停了几天再开 → 先补涨停池缓存(6h 节流内跳过)
+        self._maybe_refresh_zt()
         filled = self.backfill()
         if filled:
             log.info("缺口日补算 %d 天", filled)

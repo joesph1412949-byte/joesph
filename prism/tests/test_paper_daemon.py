@@ -2,6 +2,8 @@
 """模拟盘守护调度测试 — mock 时钟/行情/选股, 全离线。"""
 import logging
 import sys
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -57,7 +59,8 @@ def _daemon(tmp_path, monkeypatch, now_fn=None, ticks=None):
     acc = PaperAccount(state_path=tmp_path / "paper.json")
     acc.init_account(created="2026-09-01")
     d = PaperDaemon(acc, ticks_fn=(lambda: ticks) if ticks else None,
-                    now_fn=now_fn)
+                    now_fn=now_fn,
+                    zt_refresh_fn=lambda: {"injected_noop": True})
     d.provider = _FakeProvider()
     return d, acc
 
@@ -531,3 +534,110 @@ def test_startup_purges_stale_plans(tmp_path, monkeypatch, caplog):
             d.run_forever()
     assert [p["code"] for p in acc.state["planned_buys"]] == ["600001"]
     assert "计划清理" in caplog.text
+
+
+# ---------- Task A: 涨停池缓存自动刷新挂钩(6h 节流, daemon 线程) ----------
+def test_maybe_refresh_zt_calls_fn_then_throttles(tmp_path):
+    """到点 → 注入的 zt_refresh_fn 被调(daemon 线程); 6h 内第二次不调。"""
+    acc = PaperAccount(state_path=tmp_path / "zt1.json")
+    acc.init_account(created="2026-09-01")
+    calls = []
+    done = threading.Event()
+
+    def fake_zt():
+        calls.append(1)
+        done.set()
+        return {"codes": 1}
+    d = PaperDaemon(acc, zt_refresh_fn=fake_zt)
+    d._maybe_refresh_zt()
+    assert done.wait(5)
+    assert calls == [1]
+    d._maybe_refresh_zt()                    # 刚刷过(<6h) → 节流跳过
+    assert calls == [1]
+
+
+def test_maybe_refresh_zt_throttle_window_is_6h(tmp_path):
+    """节流窗口: 6h 前刷过 → 再调; 6h 内 → 不调(时间戳语义钉死)。"""
+    acc = PaperAccount(state_path=tmp_path / "zt2.json")
+    acc.init_account(created="2026-09-01")
+    calls = []
+    done = threading.Event()
+
+    def fake_zt():
+        calls.append(1)
+        done.set()
+        return {}
+    d = PaperDaemon(acc, zt_refresh_fn=fake_zt)
+    d._zt_refresh_at = time.time() - (6 * 3600) - 1     # 6h+1s 前 → 到点
+    d._maybe_refresh_zt()
+    assert done.wait(5)
+    assert calls == [1]
+    # 5h59m 前刷过 → 不调(不需要等线程, 节流在主线程同步判定)
+    done.clear()
+    d._zt_refresh_at = time.time() - (6 * 3600) + 60
+    d._maybe_refresh_zt()
+    assert calls == [1]
+
+
+def test_maybe_refresh_zt_swallows_exception(tmp_path, caplog):
+    """refresh 抛异常 → worker 内吞掉落 warning, 绝不外溢; 后续 tick 正常。"""
+    acc = PaperAccount(state_path=tmp_path / "zt3.json")
+    acc.init_account(created="2026-09-01")
+    entered = threading.Event()
+
+    def boom():
+        entered.set()
+        raise RuntimeError("refresh 炸")
+    d = PaperDaemon(acc, zt_refresh_fn=boom)
+    with caplog.at_level(logging.WARNING, logger="paper_daemon"):
+        d._maybe_refresh_zt()
+        assert entered.wait(5)
+        for _ in range(100):                 # 等 worker 落日志(有界轮询)
+            if "涨停池缓存刷新失败" in caplog.text:
+                break
+            time.sleep(0.05)
+    assert "涨停池缓存刷新失败" in caplog.text
+    # 后续 tick 不受影响(不炸主循环)
+    out = d.tick_once(now=datetime(2026, 9, 2, 12, 0))
+    assert out["action"] == "idle"
+
+
+def test_tick_once_pick_triggers_refresh_zt(tmp_path, monkeypatch):
+    """收盘选股分支: pick 落定后触发 _maybe_refresh_zt(保鲜挂钩)。"""
+    d, acc = _daemon(tmp_path, monkeypatch)
+    monkeypatch.setattr(acc, "pick_top5_at_close",
+                        lambda provider, now=None, slot=None:
+                        {"picked": [], "env_ok": True})
+    zt_calls = []
+    monkeypatch.setattr(PaperDaemon, "_maybe_refresh_zt",
+                        lambda self: zt_calls.append(1))
+    out = d.tick_once(now=datetime(2026, 9, 4, 15, 6))
+    assert out["action"] == "pick"
+    assert zt_calls == [1]
+
+
+def test_run_forever_refresh_zt_after_connect(tmp_path, monkeypatch):
+    """启动自愈: connect_provider 成功后触发 _maybe_refresh_zt
+    (守护停了几天再开也能补), 早于 backfill/tick。"""
+    d, _ = _daemon(tmp_path, monkeypatch)
+    order = []
+    monkeypatch.setattr(PaperDaemon, "connect_provider",
+                        lambda self, **kw: order.append("connect") or True)
+    monkeypatch.setattr(PaperDaemon, "_maybe_refresh_zt",
+                        lambda self: order.append("zt"))
+    monkeypatch.setattr(PaperDaemon, "backfill",
+                        lambda self: order.append("backfill") or 0)
+    monkeypatch.setattr(
+        PaperDaemon, "tick_once",
+        lambda self, now=None: order.append("tick") or
+        {"action": "idle", "sells": [], "buys": [], "settle": None})
+
+    class _Stop(BaseException):
+        pass
+
+    def _sleep(sec):
+        raise _Stop()
+    d.sleep_fn = _sleep
+    with pytest.raises(_Stop):
+        d.run_forever()
+    assert order == ["connect", "zt", "backfill", "tick"]
