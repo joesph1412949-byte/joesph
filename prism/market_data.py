@@ -229,6 +229,43 @@ class EastMoneyProbe:
                 out.append({"date": parts[0], "close": _f(parts[1])})
         return out
 
+    # ---------------- 板块资金惯性(当日快照, 前向累积) ----------------
+    def fetch_flow_rank(self, page_size=100):
+        """全行业板块当日主力净流入(f62) → [{code, name, net_in}] 降序。
+        f62 非数值(如'-')的行跳过。失败 → 抛出。"""
+        items = []
+        seen = 0
+        pn = 1
+        while True:
+            data = self._get_json(self.CLIST_URL, {
+                "pn": pn, "pz": page_size, "po": 1, "np": 1,
+                "fltt": 2, "invt": 2, "fid": "f62",
+                "fs": SECTOR_FS, "fields": "f12,f14,f62"})
+            diff = ((data or {}).get("data") or {}).get("diff") or []
+            seen += len(diff)
+            for it in diff:
+                if not isinstance(it, dict):
+                    continue
+                try:
+                    net = float(it.get("f62"))
+                except (TypeError, ValueError):
+                    continue    # '-' 等无数据行
+                items.append({"code": str(it.get("f12") or ""),
+                              "name": str(it.get("f14") or ""),
+                              "net_in": net})
+            total = ((data or {}).get("data") or {}).get("total") or 0
+            # ponytail: 断路按 diff 行数(seen)而非 items 数——'-'行被过滤后
+            # items < total, 按 items 断路会多翻页把同一批行重复拉一遍
+            if not diff or seen >= int(total):
+                break
+            pn += 1
+        items.sort(key=lambda r: r["net_in"], reverse=True)
+        return items
+
+    def fetch_benchmark_kline(self, beg, end):
+        """上证指数日K(secid=1.000001) → [{date, close, amount}]。失败 → 抛出。"""
+        return self.fetch_kline("1.000001", beg, end, fields2="f51,f53,f57")
+
 
 def _f(v):
     try:
@@ -735,17 +772,25 @@ def futures_snapshot():
 def mkt_snapshot():
     """组装引擎/实盘用的市场数据快照(run_screen 下发 ctx._extra["mkt"])。
 
-    结构与回测 CLI 注入一致: sector/global/sector_flow + futures(F8)
-    + zt_prev(F9)。全部读本地缓存(fetch_futures force=False 走缓存,
-    缓存完整时不重写文件), 单段失败降级缺键(fail-open), 不抛。
+    结构与回测 CLI 注入一致: sector/global/sector_flow + benchmark/flow_rank
+    (板块感知层) + futures(F8) + zt_prev(F9)。全部读本地缓存(fetch_futures
+    force=False 走缓存, 缓存完整时不重写文件), 单段失败降级缺键(fail-open),
+    不抛。
     """
     cache = _load_cache()
     snap = {}
-    for key, ck in (("sector", "kline"), ("global", "global"),
-                    ("sector_flow", "flow")):
+    for key, ck in (("global", "global"), ("sector_flow", "flow"),
+                    ("benchmark", "benchmark"), ("flow_rank", "flow_rank")):
         v = cache.get(ck)
         if v:
             snap[key] = v
+    kline = cache.get("kline") or {}
+    if kline:
+        # sector 段附加板块名(GUI 阶段面板显示名称; 因子只读 close/amount 不受影响)
+        names = {c: (i or {}).get("name") or ""
+                 for c, i in (cache.get("sectors") or {}).items()}
+        snap["sector"] = {c: dict((rec or {}), name=names.get(c, ""))
+                          for c, rec in kline.items()}
     try:
         snap["futures"] = futures_snapshot()
     except Exception as e:
@@ -756,6 +801,50 @@ def mkt_snapshot():
     except Exception as e:
         logger.warning("zt_prev 快照失败: %r", e)
     return snap
+
+
+# ------------------------------------------------- 资金惯性/基准(板块感知层)
+
+def build_flow_rank(probe=None):
+    """当日行业板块主力净流入快照 → 前向累积落盘 cache["flow_rank"]。
+    东财 BK 细分行业口径, 自洽使用(不回填 SEC3 申万 flow 段)。
+    当日已在 dates → 覆盖当日行, 幂等, 盘后重跑取终值。
+    返回 {"dates": n, "sectors_today": n}。失败 → 抛 MarketDataError。"""
+    probe = probe or EastMoneyProbe()
+    rows = probe.fetch_flow_rank()
+    cache = _load_cache()
+    fr = cache.get("flow_rank") or {}
+    dates = list(fr.get("dates") or [])
+    rmap = dict(fr.get("rows") or {})
+    today = date.today().strftime("%Y-%m-%d")
+    # ponytail: 只前向累积, 不回补历史(fflow 历史端点实测被封)
+    if today not in dates:
+        dates.append(today)
+    rmap[today] = rows
+    _save_cache({"flow_rank": {"dates": dates, "rows": rmap}})
+    return {"dates": len(dates), "sectors_today": len(rows)}
+
+
+def build_benchmark(probe=None, beg=BACKFILL_BEG, end=None):
+    """上证指数日K → cache["benchmark"] 全量替换(单指数成本低, 自愈)。
+    拉取失败/为空 → 保留旧缓存(fail-open)。
+    返回 {"days": n, "kept_old": bool}。"""
+    probe = probe or EastMoneyProbe()
+    end = end or date.today().strftime("%Y%m%d")
+    old = _load_cache().get("benchmark") or {}
+    old_days = len(old.get("dates") or [])
+    try:
+        kl = probe.fetch_benchmark_kline(beg, end)
+    except MarketDataError as e:
+        logger.warning("上证基准拉取失败, 保留旧缓存 %d日: %r", old_days, e)
+        return {"days": old_days, "kept_old": True}
+    if not kl:
+        logger.warning("上证基准拉取为空, 保留旧缓存 %d日", old_days)
+        return {"days": old_days, "kept_old": True}
+    _save_cache({"benchmark": {"dates": [r["date"] for r in kl],
+                               "close": [r["close"] for r in kl],
+                               "amount": [r.get("amount") for r in kl]}})
+    return {"days": len(kl), "kept_old": False}
 
 
 # ---------------------------------------------------------------- 查询
@@ -932,6 +1021,10 @@ def build_cli():
                     help="从缓存构建按日索引(查询加速)")
     ap.add_argument("--build-sector-map", action="store_true",
                     help="构建个股→申万行业映射(成分股采集)")
+    ap.add_argument("--build-flow-rank", action="store_true",
+                    help="当日板块主力净流入快照(前向累积, 幂等)")
+    ap.add_argument("--build-benchmark", action="store_true",
+                    help="上证指数日K基准(全量替换, 失败保留旧缓存)")
     ap.add_argument("--beg", default=BACKFILL_BEG,
                     help="回填起点 YYYYMMDD(默认 %s)" % BACKFILL_BEG)
     ap.add_argument("--source", default="eastmoney",
@@ -970,6 +1063,14 @@ def build_cli():
         r = build_sector_map(progress=prog)
         print("\n个股→行业映射完成: %d 只" % r["stocks"])
         print("示例查询: 600519 →", stock_sector("600519"))
+        return
+    if args.build_flow_rank:
+        r = build_flow_rank()
+        print("资金惯性快照:", r)
+        return
+    if args.build_benchmark:
+        r = build_benchmark(beg=args.beg)
+        print("上证基准:", r)
         return
     cache = _load_cache()
     if args.stats or not args.day:

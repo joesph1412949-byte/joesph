@@ -504,3 +504,80 @@ def test_build_global_cache_fred_source(_ws_tmp, monkeypatch):
     assert set(out.keys()) == {"US10Y", "VIX"}
     assert md.index_close_on("US10Y", "2026-07-01") == 4.25
     assert md.index_close_on("VIX", "2026-07-02") == 4.28
+
+
+# ---------------------------------------------------------------- 资金惯性/基准
+
+def test_fetch_flow_rank_parses():
+    data = _resp({"total": 3, "diff": [
+        {"f12": "BK0486", "f14": "传媒", "f62": 6.174e9},
+        {"f12": "BK0433", "f14": "农林牧渔", "f62": 3.016e9},
+        {"f12": "BK0000", "f14": "无数据", "f62": "-"}]})
+    p, _ = _fake_probe({md.EastMoneyProbe.CLIST_URL: data})
+    rows = p.fetch_flow_rank()
+    assert [r["code"] for r in rows] == ["BK0486", "BK0433"]
+    assert rows[0]["net_in"] == 6.174e9
+    assert rows[0]["name"] == "传媒"
+
+
+def test_build_flow_rank_idempotent(_ws_tmp, monkeypatch):
+    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
+    monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "mkt_idx.pkl")
+    d1 = _resp({"total": 2, "diff": [
+        {"f12": "BK0486", "f14": "传媒", "f62": 1e9},
+        {"f12": "BK0433", "f14": "农林牧渔", "f62": 5e8}]})
+    p1 = md.EastMoneyProbe(http_get=FakeGetter({md.EastMoneyProbe.CLIST_URL: d1}))
+    r1 = md.build_flow_rank(probe=p1)
+    assert r1 == {"dates": 1, "sectors_today": 2}
+    # 盘后重跑: 当日覆盖, 不累积重复日期
+    d2 = _resp({"total": 2, "diff": [
+        {"f12": "BK0486", "f14": "传媒", "f62": 9e8},
+        {"f12": "BK0433", "f14": "农林牧渔", "f62": 7e8}]})
+    p2 = md.EastMoneyProbe(http_get=FakeGetter({md.EastMoneyProbe.CLIST_URL: d2}))
+    r2 = md.build_flow_rank(probe=p2)
+    assert r2["dates"] == 1
+    fr = md._load_cache()["flow_rank"]
+    assert len(fr["dates"]) == 1
+    assert fr["rows"][fr["dates"][0]][0]["net_in"] == 9e8
+
+
+def test_build_benchmark(_ws_tmp, monkeypatch):
+    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
+    monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "mkt_idx.pkl")
+    data = _resp({"klines": ["2026-07-01,4147.72,30064854350.00",
+                             "2026-07-02,4160.67,32598801572.00"]})
+    p, _ = _fake_probe({md.EastMoneyProbe.KLINE_URL: data})
+    r = md.build_benchmark(probe=p)
+    assert r == {"days": 2, "kept_old": False}
+    assert md._load_cache()["benchmark"]["close"][0] == 4147.72
+
+
+def test_build_benchmark_keeps_old_on_failure(_ws_tmp, monkeypatch):
+    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
+    monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "mkt_idx.pkl")
+    md._save_cache({"benchmark": {"dates": ["2026-07-01"], "close": [4000.0],
+                                  "amount": [1e10]}})
+    p, _ = _fake_probe({}, fail_urls=[md.EastMoneyProbe.KLINE_URL])
+    r = md.build_benchmark(probe=p)
+    assert r["kept_old"] is True
+    assert md._load_cache()["benchmark"]["close"] == [4000.0]
+
+
+def test_mkt_snapshot_new_segments(_ws_tmp, monkeypatch):
+    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
+    monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "mkt_idx.pkl")
+    monkeypatch.setattr(md, "futures_snapshot", lambda: {})
+    md._save_cache({
+        "kline": {"801010": {"dates": ["2026-09-05"], "close": [100.0],
+                             "amount": [1e8]}},
+        "sectors": {"801010": {"name": "农林牧渔"}},
+        "benchmark": {"dates": ["2026-09-05"], "close": [4000.0],
+                      "amount": [1e10]},
+        "flow_rank": {"dates": ["2026-09-05"],
+                      "rows": {"2026-09-05": [{"code": "BK0486",
+                                               "name": "传媒",
+                                               "net_in": 1e9}]}}})
+    snap = md.mkt_snapshot()
+    assert snap["benchmark"]["close"] == [4000.0]
+    assert snap["flow_rank"]["dates"] == ["2026-09-05"]
+    assert snap["sector"]["801010"]["name"] == "农林牧渔"
