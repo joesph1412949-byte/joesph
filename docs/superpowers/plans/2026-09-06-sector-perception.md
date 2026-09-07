@@ -36,7 +36,7 @@
   - `build_flow_rank(probe=None) -> {"dates": n, "sectors_today": n}`
   - `build_benchmark(probe=None, beg=BACKFILL_BEG, end=None) -> {"days": n, "kept_old": bool}`
 
-- [ ] **Step 1: 写失败测试**（追加到 test_market_data.py 末尾）
+- [x] **Step 1: 写失败测试**（追加到 test_market_data.py 末尾）
 
 ```python
 # ---------------------------------------------------------------- 惯性/基准
@@ -116,12 +116,12 @@ def test_mkt_snapshot_new_segments(_ws_tmp, monkeypatch):
     assert snap["sector"]["801010"]["name"] == "农林牧渔"
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_market_data.py -q -k "flow_rank or benchmark or snapshot_new" --import-mode=importlib`
 Expected: FAIL（`fetch_flow_rank`/`build_flow_rank`/`build_benchmark` 属性不存在）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 3a. `EastMoneyProbe` 内（fetch_global_kline 之后）追加两个方法：
 
@@ -245,12 +245,12 @@ def build_benchmark(probe=None, beg=BACKFILL_BEG, end=None):
         return
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_market_data.py -q --import-mode=importlib`
 Expected: 全 PASS（含原有用例）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add prism/market_data.py prism/tests/test_market_data.py
@@ -272,7 +272,7 @@ git commit -m "feat: 资金惯性快照前向累积+上证基准段(CLIST f62 �
   - `flow_inertia(flow_rank, top_n=FLOW_TOP_N, need=FLOW_STREAK_MIN) -> list[dict]`，行: `{code, name, streak, last_net_in, systematic}`
   - 常量: `GEST_MAX_R5=8.0, REL_DAYS=3, REL_MIN=2, SHARE_MIN_DAYS=20, STAGE_R5_MAIN=5.0, STAGE_R3_START=4.0, STAGE_R10_START_MAX=5.0, STAGE_R5_PEAK=10.0, STAGE_SHARE_PCT=0.90, FLOW_TOP_N=3, FLOW_STREAK_MIN=5`
 
-- [ ] **Step 1: 写失败测试**（新建 test_sector_stage.py）
+- [x] **Step 1: 写失败测试**（新建 test_sector_stage.py）
 
 ```python
 # -*- coding: utf-8 -*-
@@ -463,12 +463,12 @@ def test_flow_inertia_empty():
     assert ss.flow_inertia({"dates": [], "rows": {}}) == []
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_sector_stage.py -q --import-mode=importlib`
 Expected: FAIL（No module named prism.sector_stage）
 
-- [ ] **Step 3: 实现 sector_stage.py**
+- [x] **Step 3: 实现 sector_stage.py**
 
 ```python
 # -*- coding: utf-8 -*-
@@ -684,17 +684,17 @@ def flow_inertia(flow_rank, top_n=FLOW_TOP_N, need=FLOW_STREAK_MIN):
     return out
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests/test_sector_stage.py -q --import-mode=importlib`
 Expected: 14 PASS
 
-- [ ] **Step 5: 全量回归（确保未破坏其他模块）**
+- [x] **Step 5: 全量回归（确保未破坏其他模块）**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt162`
 Expected: 基线绿（440 绿 + 1 环境失败量级 + 本任务新增）
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add prism/sector_stage.py prism/tests/test_sector_stage.py
@@ -716,7 +716,7 @@ git commit -m "feat: sector_stage 纯计算层(孕育信号/五阶段判定/资�
 - Consumes: Task 1 `market_data.mkt_snapshot()`、Task 2 `sector_stage.sector_table/flow_inertia`
 - Produces: `GET /api/sector_stage` → `{"ok": bool, "date": "YYYY-MM-DD", "sectors": [行...], "inertia": [行...], "flow_days": int}`（fail-open 永不 500）
 
-- [ ] **Step 1: 写失败测试**（追加到 test_app.py 末尾）
+- [x] **Step 1: 写失败测试**（追加到 test_app.py 末尾）
 
 ```python
 # ---------------- 板块观察 ----------------
@@ -775,12 +775,12 @@ def test_sector_stage_endpoint_error_failopen(client, monkeypatch):
     assert r.get_json()["ok"] is False
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism_web/tests/test_app.py -q -k sector --import-mode=importlib`
 Expected: FAIL（404）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 3a. app.py 顶部 import 区（`from prism.strategies import STRATEGIES_DIR` 之后）追加：
 
@@ -895,12 +895,12 @@ async function loadSectorStage() {
 .badge.stage-ebb { background: #444; color: #ccc; }
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism_web/tests/test_app.py -q --import-mode=importlib`
 Expected: 全 PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add prism_web/app.py prism_web/templates/index.html prism_web/static/app.js prism_web/static/style.css prism_web/tests/test_app.py
@@ -911,9 +911,9 @@ git commit -m "feat: 板块观察面板(孕育期/阶段定位/资金惯性, 只
 
 ### 收尾（主会话执行, 非子代理任务）
 
-- [ ] 全量回归: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests prism_web/tests -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt163` → 全绿
-- [ ] 实跑采集: `python -m prism.market_data --build-benchmark --build-flow-rank` → 落盘核对
-- [ ] 实跑冒烟: `python -c "from prism import market_data, sector_stage; snap=market_data.mkt_snapshot(); print(sector_stage.sector_table(snap)[:3]); print(sector_stage.flow_inertia(snap.get('flow_rank')))"` → 出数
-- [ ] GUI 生效说明: 5000 端口 Flask 需重启后浏览器验收（守护/网页由用户 PRISM.bat 管理, agent 不擅自重启）
-- [ ] 沉淀 skill: `.claude/skills/prism-upgrade-triage/SKILL.md`（对话→数据层评估→保留/降级/去掉→确认→实现工作流）
-- [ ] 台账 `.superpowers/sdd/progress.md` + MEMORY.md 更新
+- [x] 全量回归: `$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests prism_web/tests -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_bt163` → 全绿
+- [x] 实跑采集: `python -m prism.market_data --build-benchmark --build-flow-rank` → 落盘核对
+- [x] 实跑冒烟: `python -c "from prism import market_data, sector_stage; snap=market_data.mkt_snapshot(); print(sector_stage.sector_table(snap)[:3]); print(sector_stage.flow_inertia(snap.get('flow_rank')))"` → 出数
+- [x] GUI 生效说明: 5000 端口 Flask 需重启后浏览器验收（守护/网页由用户 PRISM.bat 管理, agent 不擅自重启）
+- [x] 沉淀 skill: `.claude/skills/prism-upgrade-triage/SKILL.md`（对话→数据层评估→保留/降级/去掉→确认→实现工作流）
+- [x] 台账 `.superpowers/sdd/progress.md` + MEMORY.md 更新
