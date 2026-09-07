@@ -20,6 +20,11 @@ STAGE_SHARE_PCT = 0.90    # 高潮期: 最新日占比处自身历史≥90分位
 FLOW_TOP_N = 3            # 惯性表: 每日净流入前3
 FLOW_STREAK_MIN = 5       # 系统性增配: 连续上榜≥5天
 
+# 纸面仓位上限(板块周度跟踪 W1, spec 2026-09-07 §3 六阶段值照抄)。
+# **纸面参考, 无回测背书, 未接入资金管理** — 只读展示, 严禁进买入/仓位路径。
+POS_CAP = {"孕育期": 30, "启动期": 50, "主升期": 75,
+           "高潮期": 50, "退潮期": 10, "休整期": 30}
+
 
 def _ret_series(dates, closes):
     """日涨幅(%)序列 → {date: ret%}。前收缺失/非正的日期不计。"""
@@ -139,11 +144,22 @@ def _stage_of(closes, share_col, r3, r5, r10, signals, hits):
     return "休整", "无阶段特征"
 
 
-def sector_table(mkt):
+def sector_table(mkt, new_high=None, etf_quotes=None, etf_map=None):
     """mkt 切片 → 全板块感知表(孕育/阶段, 观察模式)。
 
     行: {code, name, stage, note, r3, r5, r10, share5, share20,
-         share_chg(share5-share20), hits, signals}。mkt 空 → []。"""
+         share_chg(share5-share20), hits, signals,
+         new_high, etf, pos_cap, week_rank}。mkt 空 → []。
+
+    可选注入(板块周度跟踪 W1, 缺省 None → 对应列 None, 纯函数零破坏):
+    - new_high: new_high_counts() 产物 {行业名: {"nh","base"}}, 按行名称对齐。
+    - etf_map:  sector_etf_map.SECTOR_ETF_MAP {行业名: {"code","name"}/{}}。
+    - etf_quotes: market_data.fetch_etf_quotes() 产物
+      {etf_code: {"amount","pct_chg"}}; 映射有锚点但行情缺 → 数值 None
+      (fail-open); 映射留空 {} → etf 列 None。
+    - week_rank: 恒输出 — 按 r5 降序名次(1 起), r5 缺失 → None 不参与。
+    - pos_cap: POS_CAP 纸面上限; 阶段"休整"(无"期"字)归一到"休整期"取值,
+      "数据不足" → None。"""
     if not isinstance(mkt, dict) or not mkt:
         return []
     bench = mkt.get("benchmark") or {}
@@ -164,14 +180,59 @@ def sector_table(mkt):
         else:
             stage, note = _stage_of(closes, share_col, r3, r5, r10,
                                     signals, hits)
-        out.append({"code": str(code), "name": rec.get("name") or "",
+        name = rec.get("name") or ""
+        if etf_map is None:
+            etf = None
+        else:
+            anchor = etf_map.get(name) or None
+            if not anchor:
+                etf = None
+            else:
+                q = (etf_quotes or {}).get(anchor.get("code")) or {}
+                etf = {"code": anchor.get("code"), "name": anchor.get("name"),
+                       "amount": q.get("amount"), "pct_chg": q.get("pct_chg")}
+        pos_cap = POS_CAP.get(stage)
+        if pos_cap is None:
+            pos_cap = POS_CAP.get(stage + "期")   # "休整" → "休整期"
+        out.append({"code": str(code), "name": name,
                     "stage": stage, "note": note,
                     "r3": r3, "r5": r5, "r10": r10,
                     "share5": share5, "share20": share20,
                     "share_chg": (share5 - share20
                                   if share5 is not None
                                   and share20 is not None else None),
-                    "hits": hits, "signals": signals})
+                    "hits": hits, "signals": signals,
+                    "new_high": (new_high.get(name)
+                                 if new_high is not None else None),
+                    "etf": etf, "pos_cap": pos_cap, "week_rank": None})
+    # 周排名: 按 r5 降序(1 起); r5 缺失的行保持 None 不参与
+    ranked = sorted((r for r in out if r["r5"] is not None),
+                    key=lambda r: -r["r5"])
+    for i, r in enumerate(ranked, 1):
+        r["week_rank"] = i
+    return out
+
+
+def new_high_counts(sector_map, zt_cache, window=60):
+    """60日新高家数(纯计算): {行业名: {"nh": 创新高家数, "base": 有效基数}}。
+
+    sector_map: {带后缀代码: 行业名} — 与 F9 同款带后缀契约
+    (data.py 注入的 sector_map 键即 '600051.SH' 格式), 值作为分组标签原样聚合。
+    zt_cache: {code: {"dates": [...], "close": [...]}}(zt_history 缓存形态)。
+    口径: 个股 len(close) < window 不计入 base; 最新收盘 ≥ 近 window 日
+    (含当日)最高 → 计入 nh。全离线纯函数, 不碰网络/缓存。"""
+    out = {}
+    for code, label in (sector_map or {}).items():
+        rec = (zt_cache or {}).get(code)
+        g = out.setdefault(label, {"nh": 0, "base": 0})
+        if not rec:
+            continue
+        closes = [c for c in (rec.get("close") or []) if c]
+        if len(closes) < window:
+            continue
+        g["base"] += 1
+        if closes[-1] >= max(closes[-window:]):
+            g["nh"] += 1
     return out
 
 

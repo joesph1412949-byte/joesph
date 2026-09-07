@@ -649,3 +649,109 @@ def test_cli_single_flag_failure_exits_nonzero(_ws_tmp, monkeypatch):
     with pytest.raises(SystemExit) as ei:
         md.build_cli()
     assert "flow_rank" in str(ei.value)
+
+
+# ---------------------------------------------------------------- ETF 行情(W1)
+
+class FakeDF:
+    """get_market_data_ex 单码返回值: 仅支持 df["col"] 取列(实现只用这个)。"""
+
+    def __init__(self, cols):
+        self._cols = cols
+
+    def __getitem__(self, k):
+        return list(self._cols[k])
+
+    def __len__(self):
+        return len(self._cols.get("close") or [])
+
+
+class FakeXt:
+    """假 xtdata: local=已有本地日K; pending=需 download 后才可见; 故障注入。"""
+
+    def __init__(self, local=None, pending=None, fail_read=(), fail_dl=()):
+        self.local = {k: FakeDF(v) for k, v in (local or {}).items()}
+        self.pending = {k: FakeDF(v) for k, v in (pending or {}).items()}
+        self.fail_read = set(fail_read)
+        self.fail_dl = set(fail_dl)
+        self.downloads = []
+
+    def get_market_data_ex(self, empty, codes, period=None, count=None):
+        out = {}
+        for c in codes:
+            if c in self.fail_read:
+                raise RuntimeError("read boom: %s" % c)
+            df = self.local.get(c)   # pending 只能 download 后才可见
+            if df is not None:
+                out[c] = df
+        return out
+
+    def download_history_data2(self, codes, period, start_time="", end_time=""):
+        for c in codes:
+            self.downloads.append(c)
+            if c in self.fail_dl:
+                raise RuntimeError("dl boom: %s" % c)
+        self.local.update({c: self.pending.pop(c)
+                           for c in codes if c in self.pending})
+
+
+TWO_BARS = {"close": [1.00, 1.05], "amount": [9e8, 1.1e9]}
+
+
+def test_fetch_etf_quotes_local_hit_no_download():
+    xt = FakeXt(local={"512800.SH": TWO_BARS})
+    out = md.fetch_etf_quotes(["512800.SH"], xtdata_mod=xt)
+    assert out == {"512800.SH": {"amount": 1.1e9,
+                                 "pct_chg": (1.05 / 1.00 - 1) * 100}}
+    assert xt.downloads == []
+
+
+def test_fetch_etf_quotes_downloads_when_missing():
+    xt = FakeXt(pending={"159997.SZ": TWO_BARS})
+    monkey_memo = {}
+    orig = md._ETF_DL_MEMO
+    md._ETF_DL_MEMO = monkey_memo
+    try:
+        out = md.fetch_etf_quotes(["159997.SZ"], xtdata_mod=xt)
+    finally:
+        md._ETF_DL_MEMO = orig
+    assert xt.downloads == ["159997.SZ"]
+    assert out["159997.SZ"]["amount"] == 1.1e9
+    assert monkey_memo.get("159997.SZ")   # 记了 memo(当日不再下载)
+
+
+def test_fetch_etf_quotes_memo_skips_second_download_same_day():
+    xt = FakeXt(pending={"159997.SZ": TWO_BARS})
+    orig = md._ETF_DL_MEMO
+    md._ETF_DL_MEMO = {}
+    try:
+        md.fetch_etf_quotes(["159997.SZ"], xtdata_mod=xt)
+        n1 = len(xt.downloads)
+        md.fetch_etf_quotes(["159997.SZ"], xtdata_mod=xt)
+        assert len(xt.downloads) == n1 == 1   # 第二次当日不再下载
+    finally:
+        md._ETF_DL_MEMO = orig
+
+
+def test_fetch_etf_quotes_fail_open_per_code():
+    """坏码(读炸/下载炸/始终无数据)跳过, 好码照常返回。"""
+    xt = FakeXt(local={"512800.SH": TWO_BARS},
+                pending={"512000.BAD": TWO_BARS},
+                fail_read={"111111.SH"}, fail_dl={"222222.SZ"})
+    orig = md._ETF_DL_MEMO
+    md._ETF_DL_MEMO = {}
+    try:
+        out = md.fetch_etf_quotes(
+            ["512800.SH", "111111.SH", "222222.SZ", "512000.BAD",
+             "333333.NONE"], xtdata_mod=xt)
+    finally:
+        md._ETF_DL_MEMO = orig
+    # 222222.SZ 下载失败且无本地数据 → 跳过
+    assert set(out) == {"512800.SH", "512000.BAD"}
+    assert out["512800.SH"]["pct_chg"] > 0
+
+
+def test_fetch_etf_quotes_single_bar_skipped():
+    """只有 1 根K线算不出涨跌幅 → 跳过(fail-open)。"""
+    xt = FakeXt(local={"512800.SH": {"close": [1.05], "amount": [1e9]}})
+    assert md.fetch_etf_quotes(["512800.SH"], xtdata_mod=xt) == {}

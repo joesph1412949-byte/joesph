@@ -153,8 +153,11 @@ def test_sector_table_metrics():
     assert abs(a["r10"] - 3.0) < 1e-9
     assert abs(a["r3"] - (103.0 / 101.0 - 1) * 100) < 1e-9
     assert a["name"] == "SA"
+    # W1 扩展: 行结构恒含新四列(缺省参时 new_high/etf 为 None, pos_cap/
+    # week_rank 为内在列恒输出)
     assert set(a) == {"code", "name", "stage", "note", "r3", "r5", "r10",
-                      "share5", "share20", "share_chg", "hits", "signals"}
+                      "share5", "share20", "share_chg", "hits", "signals",
+                      "new_high", "etf", "pos_cap", "week_rank"}
 
 
 def test_dirty_close_with_benchmark_no_crash():
@@ -196,3 +199,145 @@ def test_flow_inertia_empty():
     assert ss.flow_inertia(None) == []
     assert ss.flow_inertia({}) == []
     assert ss.flow_inertia({"dates": [], "rows": {}}) == []
+
+
+# ---------------- 60日新高家数(W1) ----------------
+
+def _zt(code, closes):
+    """zt 缓存条目形态: {"dates": [...], "close": [...]}. 键带后缀(F9 契约)."""
+    return {code: {"dates": _dates(len(closes)), "close": closes}}
+
+
+def test_new_high_counts_basic():
+    """A 最新收盘创 60 日新高 → nh=1; B 没创 → 0; 各行业 base 独立。"""
+    smap = {"600001.SH": "银行", "000002.SZ": "银行", "300003.SZ": "传媒"}
+    zt = {}
+    zt.update(_zt("600001.SH", [float(100 + i) for i in range(60)]))   # 创新高
+    zt.update(_zt("000002.SZ", [float(200 - i) for i in range(60)]))   # 单边跌
+    zt.update(_zt("300003.SZ", [100.0] * 60))                          # 平盘=新高
+    out = ss.new_high_counts(smap, zt, window=60)
+    assert out["银行"] == {"nh": 1, "base": 2}
+    assert out["传媒"] == {"nh": 1, "base": 1}
+
+
+def test_new_high_counts_short_history_excluded():
+    """len(close)<60 不计入 base(也不计 nh)。单边跌序列 → nh=0 严格可判。"""
+    smap = {"600001.SH": "银行", "000002.SZ": "银行"}
+    zt = {}
+    zt.update(_zt("600001.SH", [100.0] * 59))                # 不足 60 → 剔除
+    zt.update(_zt("000002.SZ", [float(200 - i) for i in range(60)]))  # 跌
+    out = ss.new_high_counts(smap, zt, window=60)
+    assert out == {"银行": {"nh": 0, "base": 1}}
+
+
+def test_new_high_counts_window_param():
+    """window=5: 近5日(含当日)最高即算。"""
+    smap = {"600001.SH": "银行"}
+    closes = [100.0] * 60
+    closes[-2] = 105.0   # 昨日高点, 今收 104 未破昨日但破前58日
+    zt = _zt("600001.SH", closes)
+    assert ss.new_high_counts(smap, zt, window=5)["银行"] == {"nh": 0, "base": 1}
+    closes[-1] = 106.0   # 破近5日高点 → 新高
+    zt = _zt("600001.SH", closes)
+    assert ss.new_high_counts(smap, zt, window=5)["银行"] == {"nh": 1, "base": 1}
+
+
+def test_new_high_counts_empty_and_missing():
+    """空映射/缓存缺该股/行业无 base → 不崩, 无股行业不输出或输出 0。"""
+    assert ss.new_high_counts({}, {}) == {}
+    # 映射里的股在缓存缺失 → 行业 base=0, 输出 0(不崩)
+    out = ss.new_high_counts({"600001.SH": "银行"}, {}, window=60)
+    assert out["银行"] == {"nh": 0, "base": 0}
+
+
+# ---------------- POS_CAP 常量(W1) ----------------
+
+def test_pos_cap_values():
+    """六阶段纸面仓位上限按 spec 照抄。"""
+    assert ss.POS_CAP == {"孕育期": 30, "启动期": 50, "主升期": 75,
+                          "高潮期": 50, "退潮期": 10, "休整期": 30}
+
+
+# ---------------- sector_table 可选参扩展(W1) ----------------
+
+def test_sector_table_extension_defaults_none():
+    """缺省(不传新参) → new_high/etf 列 None; pos_cap/week_rank 为内在列
+    恒输出(flat 行 → 休整/上限30); 存量字段不变(向后兼容)。"""
+    n = 30
+    mkt = _mk({"A": ([100.0] * n, [1e8] * n)}, n=n)
+    a = _row(ss.sector_table(mkt), "A")
+    assert a["new_high"] is None
+    assert a["etf"] is None
+    assert a["pos_cap"] == 30          # 休整 → 休整期 30
+    assert isinstance(a["week_rank"], int)
+    assert set(a) == {"code", "name", "stage", "note", "r3", "r5", "r10",
+                      "share5", "share20", "share_chg", "hits", "signals",
+                      "new_high", "etf", "pos_cap", "week_rank"}
+
+
+def test_sector_table_week_rank():
+    """按 r5 降序名次; r5 缺失(K线≤window 根)不参与(rank=None)。"""
+    n = 30
+    up = [100.0] * 24 + [100.0, 102.0, 104.0, 106.0, 108.0, 112.0]
+    mid = [100.0] * 24 + [100.0, 100.5, 101.0, 101.5, 102.0, 103.0]
+    mkt = _mk({"UP": (up, [1e8] * n), "MID": (mid, [1e8] * n)}, n=n)
+    mkt["sector"]["BAD"] = {"dates": _dates(5), "close": [100.0] * 5,
+                            "amount": [1e8] * 5, "name": "BAD"}
+    rows = {r["code"]: r for r in ss.sector_table(mkt)}
+    assert rows["UP"]["week_rank"] == 1
+    assert rows["MID"]["week_rank"] == 2
+    assert rows["BAD"]["r5"] is None          # 5 根 → r5 不可算
+    assert rows["BAD"]["week_rank"] is None   # r5 缺失不参与
+
+
+def _named_mkt(named, n=30):
+    """{行业名: (closes, amounts)} → mkt 切片(名称与行业同名, 便于对齐断言)。"""
+    ds = _dates(n)
+    return {"sector": {name: {"dates": ds, "close": cl, "amount": am,
+                              "name": name}
+                       for name, (cl, am) in named.items()}}
+
+
+def test_sector_table_new_high_and_etf_injected():
+    """注入 new_high/etf_map/etf_quotes → 行按名称对齐; 无 ETF 行业 etf=None。"""
+    n = 30
+    flat = ([100.0] * n, [1e8] * n)
+    mkt = _named_mkt({"银行": flat, "传媒": flat})
+    nh = {"银行": {"nh": 3, "base": 40}}
+    etf_map = {"银行": {"code": "512800.SH", "name": "银行ETF"},
+               "传媒": {}}   # 留空 = 无锚点
+    quotes = {"512800.SH": {"amount": 2.5e9, "pct_chg": 1.2}}
+    rows = {r["code"]: r for r in ss.sector_table(
+        mkt, new_high=nh, etf_map=etf_map, etf_quotes=quotes)}
+    assert rows["银行"]["new_high"] == {"nh": 3, "base": 40}
+    assert rows["银行"]["etf"] == {"code": "512800.SH", "name": "银行ETF",
+                                   "amount": 2.5e9, "pct_chg": 1.2}
+    assert rows["传媒"]["new_high"] is None      # 名字不在 nh 表 → None
+    assert rows["传媒"]["etf"] is None           # 映射留空 → None
+
+
+def test_sector_table_etf_quote_missing_fails_open():
+    """映射有锚点但 quotes 缺该码 → code/name 保留, 数值 None(fail-open)。"""
+    n = 30
+    mkt = _named_mkt({"银行": ([100.0] * n, [1e8] * n)})
+    etf_map = {"银行": {"code": "512800.SH", "name": "银行ETF"}}
+    rows = {r["code"]: r for r in ss.sector_table(
+        mkt, etf_map=etf_map, etf_quotes={})}
+    assert rows["银行"]["etf"] == {"code": "512800.SH", "name": "银行ETF",
+                                   "amount": None, "pct_chg": None}
+
+
+def test_sector_table_pos_cap_by_stage():
+    """阶段 → 纸面上限; "休整"标签归一到"休整期"; 数据不足 → None。"""
+    n = 30
+    up = [100.0] * 24 + [100.0, 102.0, 104.0, 106.0, 108.0, 112.0]
+    mkt = _mk({"UP": (up, [1e8] * 20 + [4e8] * 10),
+               "FLAT": ([100.0] * n, [1e8] * n),
+               "BAD": ([100.0] * 10, [1e8] * 10)}, n=n)
+    rows = {r["code"]: r for r in ss.sector_table(mkt)}
+    assert rows["UP"]["stage"] == "高潮期"
+    assert rows["UP"]["pos_cap"] == 50
+    assert rows["FLAT"]["stage"] == "休整"
+    assert rows["FLAT"]["pos_cap"] == 30
+    assert rows["BAD"]["stage"] == "数据不足"
+    assert rows["BAD"]["pos_cap"] is None

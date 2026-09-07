@@ -852,6 +852,59 @@ def build_benchmark(probe=None, beg=BACKFILL_BEG, end=None):
     return {"days": len(kl), "kept_old": False}
 
 
+# ------------------------------------------------- ETF 锚点行情(周度跟踪 W1)
+
+# 下载 memo: {code: "YYYYMMDD"} — 每代码每日至多下载一次(测试可整体替换)
+_ETF_DL_MEMO = {}
+
+
+def _etf_quote_one(xt, code):
+    """单码最新日K(count=2) → {"amount": 元, "pct_chg": %}; 数据不足 → None。"""
+    data = xt.get_market_data_ex([], [code], period="1d", count=2) or {}
+    df = data.get(code)
+    if df is None or len(df) < 2:
+        return None
+    closes = list(df["close"])
+    amounts = list(df["amount"])
+    prev, last = closes[-2], closes[-1]
+    if not prev or prev <= 0 or not last:
+        return None
+    return {"amount": float(amounts[-1] or 0.0),
+            "pct_chg": (float(last) / float(prev) - 1.0) * 100.0}
+
+
+def fetch_etf_quotes(codes, xtdata_mod=None):
+    """ETF 锚点行情: {code: {"amount": 元, "pct_chg": %}}(周度跟踪 W1)。
+
+    xtdata get_market_data_ex count=2 日K → 最新成交额 + 涨跌幅;
+    本地无数据 → download_history_data2 后重读(每代码每日至多一次,
+    memo _ETF_DL_MEMO)。单代码失败/始终无数据 → 跳过(fail-open), 不抛。
+    amount 单位与 data.py 既有口径一致(元, 面板自行折亿)。
+    xtdata_mod 供测试注入假模块; 缺省 import xtquant(不可用 → {})。"""
+    xt = xtdata_mod
+    if xt is None:
+        try:
+            from xtquant import xtdata as xt
+        except Exception:
+            return {}
+    today = date.today().strftime("%Y%m%d")
+    out = {}
+    for code in codes or []:
+        try:
+            q = _etf_quote_one(xt, code)
+            if q is None and _ETF_DL_MEMO.get(code) != today:
+                _ETF_DL_MEMO[code] = today
+                xt.download_history_data2([code], "1d",
+                                          start_time="", end_time="")
+                q = _etf_quote_one(xt, code)
+        except Exception as e:
+            logger.warning("ETF %s 行情失败(跳过): %r", code, e)
+            q = None
+        if q:
+            out[code] = q
+    return out
+
+
 # ---------------------------------------------------------------- 查询
 
 def build_sector_map(feed=None, progress=None):
