@@ -25,6 +25,7 @@
 
   <nav id="tabs">
     <button class="tab active" data-tab="market" onclick="switchTab('market')">市场环境</button>
+    <button class="tab" data-tab="sector" onclick="switchTab('sector')">板块观察</button>
     <button class="tab" data-tab="candidates" onclick="switchTab('candidates')">候选列表</button>
     <button class="tab" data-tab="compare" onclick="switchTab('compare')">模型对比</button>
     <button class="tab" data-tab="detail" onclick="switchTab('detail')">单股详情</button>
@@ -39,6 +40,22 @@
       <div id="market-banner"></div>
       <div id="node-cards" class="cards"></div>
       <div id="market-stats"></div>
+    </section>
+
+    <section id="tab-sector" class="tab-panel">
+      <h2>板块观察 <span id="sector-date" class="hint"></span></h2>
+      <p class="hint">孕育期=启动前夜(量价结构改善的观察信号, 非买入信号);
+        阶段由板块量价+成交额占比推导。资金惯性为东财行业口径、自启用日起
+        前向累积(<span id="sector-flow-days">0</span>天)。</p>
+      <h3>资金惯性(每日净流入前3连续上榜)</h3>
+      <table id="sector-inertia"><thead><tr>
+        <th>板块</th><th>连续天数</th><th>今日净流入(亿)</th><th>标记</th>
+      </tr></thead><tbody></tbody></table>
+      <h3>阶段定位(申万一级行业)</h3>
+      <table id="sector-stage"><thead><tr>
+        <th>板块</th><th>阶段</th><th>依据</th><th>近5日涨幅%</th>
+        <th>占比变化</th><th>孕育信号</th>
+      </tr></thead><tbody></tbody></table>
     </section>
 
     <section id="tab-candidates" class="tab-panel">

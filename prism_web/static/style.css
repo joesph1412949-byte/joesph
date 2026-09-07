@@ -399,3 +399,10 @@ tr.grade-D td { background: rgba(155,107,255,.06); }
 ::-webkit-scrollbar-track { background: var(--bg-0); }
 ::-webkit-scrollbar-thumb { background: var(--bg-3); border-radius: 5px; }
 ::-webkit-scrollbar-thumb:hover { background: #31406e; }
+
+/* 板块观察: 阶段徽标 */
+.badge.stage-gestation { background: #1c4d8f; color: #cfe4ff; }
+.badge.stage-start { background: #0e6b6b; color: #c9f7f7; }
+.badge.stage-main { background: #8f1c1c; color: #ffd9d9; }
+.badge.stage-peak { background: #b45309; color: #ffe9c7; }
+.badge.stage-ebb { background: #444; color: #ccc; }

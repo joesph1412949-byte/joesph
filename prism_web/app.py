@@ -52,6 +52,8 @@ from prism.engine import load_strategy, run_screen
 from prism.data import DataProvider
 from prism import trader
 from prism.strategies import STRATEGIES_DIR
+from prism import market_data as _md
+from prism import sector_stage as _ss
 
 # 因子库注册(装饰器触发): /api/factors、策略校验、选股都要用。幂等。
 reg.scan_factors()
@@ -472,6 +474,27 @@ def manual(code):
 
 
 # ================= 新路由: 因子库/策略/回测/自动化 =================
+
+@app.route("/api/sector_stage")
+def api_sector_stage():
+    """板块感知观察(孕育期/阶段定位/资金惯性), 只读 fail-open 不 500。"""
+    try:
+        snap = _md.mkt_snapshot()
+        table = _ss.sector_table(snap)
+        inertia = _ss.flow_inertia(snap.get("flow_rank"))
+        last_date = ""
+        for rec in (snap.get("sector") or {}).values():
+            ds = (rec or {}).get("dates") or []
+            if ds and str(ds[-1]) > last_date:
+                last_date = str(ds[-1])
+        flow_days = len(((snap.get("flow_rank") or {}).get("dates") or []))
+        return jsonify({"ok": True, "date": last_date, "sectors": table,
+                        "inertia": inertia, "flow_days": flow_days})
+    except Exception as e:  # noqa: BLE001 - 观察面板 fail-open
+        logger.warning("sector_stage 快照失败: %r", e)
+        return jsonify({"ok": False, "date": "", "sectors": [],
+                        "inertia": [], "flow_days": 0, "error": str(e)})
+
 
 @app.route("/api/factors")
 def api_factors():

@@ -654,3 +654,59 @@ def test_strategy_editor_dom(client):
     for mark in ("btn-new-strategy", "strategy-editor", "ed-name",
                  "ed-models", "ed-gate", "ed-tp", "ed-sl", "ed-hold"):
         assert mark in html, "模板缺 %s" % mark
+
+
+# ---------------- 板块观察 ----------------
+
+def _sector_stage_snap():
+    """罐头 mkt 快照: A 平淡(休整) + 惯性 1 条。"""
+    from datetime import date, timedelta
+    ds = [(date(2026, 9, 1) + timedelta(days=i)).isoformat() for i in range(30)]
+    return {
+        "sector": {"801010": {"name": "农林牧渔", "dates": ds,
+                              "close": [100.0] * 30,
+                              "amount": [1e8] * 30}},
+        "benchmark": {"dates": ds, "close": [1000.0] * 30,
+                      "amount": [1e8] * 30},
+        "flow_rank": {"dates": ds[-2:],
+                      "rows": {ds[-2]: [{"code": "BK0433",
+                                         "name": "农林牧渔",
+                                         "net_in": 1e9}],
+                               ds[-1]: [{"code": "BK0433",
+                                         "name": "农林牧渔",
+                                         "net_in": 2e9}]}},
+    }
+
+
+def test_sector_stage_endpoint(client, monkeypatch):
+    import prism.market_data as md
+    monkeypatch.setattr(md, "mkt_snapshot", _sector_stage_snap)
+    r = client.get("/api/sector_stage")
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["ok"] is True
+    assert data["date"] == "2026-09-30"
+    assert data["flow_days"] == 2
+    assert data["sectors"][0]["code"] == "801010"
+    assert data["sectors"][0]["name"] == "农林牧渔"
+    assert data["inertia"][0]["streak"] == 2
+
+
+def test_sector_stage_endpoint_empty(client, monkeypatch):
+    import prism.market_data as md
+    monkeypatch.setattr(md, "mkt_snapshot", lambda: {})
+    r = client.get("/api/sector_stage")
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["ok"] is True
+    assert data["sectors"] == [] and data["inertia"] == []
+
+
+def test_sector_stage_endpoint_error_failopen(client, monkeypatch):
+    import prism.market_data as md
+    def boom():
+        raise RuntimeError("x")
+    monkeypatch.setattr(md, "mkt_snapshot", boom)
+    r = client.get("/api/sector_stage")
+    assert r.status_code == 200
+    assert r.get_json()["ok"] is False

@@ -20,6 +20,7 @@ function switchTab(name) {
   document.querySelectorAll(".tab-panel").forEach(p =>
     p.classList.toggle("active", p.id === "tab-" + name));
   if (name === "compare") renderComparison(state.screenResult);
+  if (name === "sector") loadSectorStage();
 }
 
 // ---------- API ----------
@@ -737,3 +738,38 @@ async function activateStrategy(sid) {
   if (res.ok) await loadStrategies();
 }
 // # ponytail: 不做拖拽排序/因子搜索框/模板预置库(YAGNI, 复制底稿够用); 编辑已有策略 = 新建+复制底稿(spec §8)
+
+// ---------- 板块观察 ----------
+const STAGE_BADGE = {
+  "孕育期": "stage-gestation", "启动期": "stage-start",
+  "主升期": "stage-main", "高潮期": "stage-peak",
+  "退潮期": "stage-ebb", "休整": "", "数据不足": ""
+};
+const STAGE_ORDER = {"孕育期": 0, "启动期": 1, "主升期": 2, "高潮期": 3,
+  "退潮期": 4, "休整": 5, "数据不足": 6};
+
+async function loadSectorStage() {
+  try {
+    const data = await api("/api/sector_stage");
+    document.getElementById("sector-date").textContent = data.date || "";
+    document.getElementById("sector-flow-days").textContent = data.flow_days ?? 0;
+    const tb1 = document.querySelector("#sector-inertia tbody");
+    tb1.innerHTML = (data.inertia || []).map(r =>
+      `<tr><td>${escHtml(r.name || r.code)}</td><td>${r.streak}</td>` +
+      `<td>${r.last_net_in == null ? "-" : (r.last_net_in / 1e8).toFixed(2)}</td>` +
+      `<td>${r.systematic ? '<span class="badge stage-main">系统性增配</span>' : ""}</td></tr>`
+    ).join("") || `<tr><td colspan="4" class="hint">暂无数据(盘后跑 python -m prism.market_data --build-flow-rank 积累)</td></tr>`;
+    const rows = (data.sectors || [])
+      .slice()
+      .sort((a, b) => (STAGE_ORDER[a.stage] ?? 9) - (STAGE_ORDER[b.stage] ?? 9));
+    const tb2 = document.querySelector("#sector-stage tbody");
+    tb2.innerHTML = rows.map(r =>
+      `<tr><td>${escHtml(r.name || r.code)}</td>` +
+      `<td><span class="badge ${STAGE_BADGE[r.stage] || ""}">${escHtml(r.stage)}</span></td>` +
+      `<td class="hint">${escHtml(r.note || "")}</td>` +
+      `<td>${r.r5 == null ? "-" : r.r5.toFixed(1)}</td>` +
+      `<td>${r.share_chg == null ? "-" : r.share_chg.toFixed(4)}</td>` +
+      `<td>${r.hits ?? 0}</td></tr>`
+    ).join("");
+  } catch (e) { /* fail-open: 面板留空 */ }
+}
