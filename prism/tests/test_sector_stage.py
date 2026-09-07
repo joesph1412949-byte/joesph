@@ -118,7 +118,7 @@ def test_stage_main():
 
 
 def test_stage_start():
-    """3日涨4.3%>4% 且 10日涨4.5%≤5% → 启动期(先于孕育判定)。"""
+    """3日涨4.5%>4% 且 10日涨4.5%≤5% → 启动期(先于孕育判定)。"""
     n = 30
     closes = [100.0] * 24 + [100.0, 100.0, 100.0, 100.2, 102.0, 104.5]
     mkt = _mk({"A": (closes, [1e8] * n),
@@ -155,6 +155,18 @@ def test_sector_table_metrics():
     assert a["name"] == "SA"
     assert set(a) == {"code", "name", "stage", "note", "r3", "r5", "r10",
                       "share5", "share20", "share_chg", "hits", "signals"}
+
+
+def test_dirty_close_with_benchmark_no_crash():
+    """收盘序列含 None(脏数据) + benchmark 存在 → 不崩溃且日期对齐不错位。"""
+    n = 30
+    closes = [100.0] * 24 + [None, 100.5, 101.0, 101.5, 102.0, 103.0]
+    am = [1e8] * n
+    mkt = _mk({"A": (closes, am),
+               "B": ([100.0] * n, am)}, bench=[1000.0] * n, n=n)
+    a = _row(ss.sector_table(mkt), "A")
+    assert a["stage"] == "孕育期"
+    assert "rel" in a["signals"]
 
 
 # ---------------- 资金惯性 ----------------

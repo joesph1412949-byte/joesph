@@ -66,8 +66,11 @@ def _mean(vals):
 def _signals(rec, bench_ret, share_col):
     """孕育期三信号(命中名列表): rel(跑赢上证) / share(占比MA5>MA20) /
     struct(站上5日线且近5日收阳≥3)。不可判的信号不计数(fail-open)。"""
-    dates = rec.get("dates") or []
-    closes = [c for c in (rec.get("close") or []) if c]
+    # 日期与收盘按对同步过滤(脏数据下保持索引对齐, 避免 _ret_series 错位/越界)
+    pairs = [(d, c) for d, c in zip(rec.get("dates") or [],
+                                    rec.get("close") or []) if c]
+    dates = [d for d, _ in pairs]
+    closes = [c for _, c in pairs]
     out = []
     # rel: 近 REL_DAYS 日中≥REL_MIN 日板块日涨幅 > 上证日涨幅(交易日对齐)
     if bench_ret:
