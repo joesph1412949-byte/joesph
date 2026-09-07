@@ -279,3 +279,78 @@ def test_build_stock_context_fail_open_when_ds_raises():
     assert ctx.code == "600000.SH"
     assert ctx.kline is None
     assert ctx.fund == {}
+
+
+# ---------------------------------------------------- Y1/Y8 float_mv 通达信兜底
+def test_build_stock_context_float_mv_tdx_fallback(monkeypatch):
+    """Y1/Y8 兜底: QMT FloatVolume 缺失时降级通达信流通股本(单位=股, 同量纲)。
+
+    float_mv/float_vol 均应来自 tdx 兜底值 × 实时价(600519 实测 ≈ 12.5 亿股)。
+    """
+    from prism import tdx_source
+
+    class NoFloatDS(FakeDS):
+        def get_instrument(self, code):
+            return {"UpStopPrice": 11.0}          # 无 FloatVolume
+
+    monkeypatch.setattr(tdx_source, "float_shares", lambda code: 1.25e9)
+    p = FakeProvider()
+    p.ds = NoFloatDS()
+    ctx = p.build_stock_context("600000.SH")
+    assert ctx.get("float_vol") == 1.25e9
+    assert ctx.float_mv == 1.25e9 * 10.5
+
+
+def test_build_stock_context_qmt_float_present_skips_tdx(monkeypatch):
+    """QMT FloatVolume 正常时行为不变且不发起 tdx 调用。
+
+    patch 成"被调即 raise"并另记调用列表 —— fail-open 会吞掉异常,
+    只靠"不炸"断不住误调用, 必须显式断言 calls 为空(测试确定性)。
+    """
+    from prism import tdx_source
+    calls = []
+
+    def _no_tdx(code):
+        calls.append(code)
+        raise AssertionError("FloatVolume 正常时不应调用 tdx float_shares")
+
+    monkeypatch.setattr(tdx_source, "float_shares", _no_tdx)
+    p = FakeProvider()                            # FakeDS: FloatVolume=2e8
+    ctx = p.build_stock_context("600000.SH")
+    assert calls == []
+    assert ctx.get("float_vol") == 2e8
+    assert ctx.float_mv == 2e8 * 10.5
+
+
+def test_build_stock_context_tdx_boom_fail_open(monkeypatch):
+    """tdx 兜底抛异常 → 优雅降级: float_mv/float_vol 为 None, 上下文照常返回。"""
+    from prism import tdx_source
+
+    def _boom(code):
+        raise RuntimeError("tdx boom")
+
+    monkeypatch.setattr(tdx_source, "float_shares", _boom)
+
+    class NoFloatDS(FakeDS):
+        def get_instrument(self, code):
+            return {}
+
+    p = FakeProvider()
+    p.ds = NoFloatDS()
+    ctx = p.build_stock_context("600000.SH")      # 不抛即优雅
+    assert ctx.float_mv is None
+    assert ctx.get("float_vol") is None
+
+
+def test_build_stock_context_float_mv_none_without_price():
+    """价格 fail-open: 有股本无 lastPrice → float_mv None(现状算出 0, 不拿 0 凑)。"""
+    class NoPriceDS(FakeDS):
+        def get_full_market_ticks(self, codes=None):
+            return {"600000.SH": {"lastClose": 10.0,
+                                  "askPrice": [0, 0, 0, 0, 0]}}
+
+    p = FakeProvider()
+    p.ds = NoPriceDS()
+    ctx = p.build_stock_context("600000.SH")
+    assert ctx.get("float_vol") == 2e8            # QMT 股本仍在, 无 tdx 介入
+    assert ctx.float_mv is None

@@ -147,11 +147,29 @@ class DataProvider:
             sealed = bool((ask or [0])[0] == 0) if ask is not None else None
             try:
                 det = self.ds.get_instrument(code)
-                float_mv = (det.get("FloatVolume") or 0) * (tick.get("lastPrice") or 0)
                 float_vol = det.get("FloatVolume")
                 up_price = det.get("UpStopPrice")
             except Exception:
                 pass
+            # Y1/Y8 兜底: QMT FloatVolume 缺失/为 0 时降级通达信流通股本
+            # (pytdx get_finance_info liutongguben, 单位=股, 与 FloatVolume
+            # 同量纲, 实测 600519 ≈ 12.5 亿股)。仅在 QMT 股本不可用时才发起
+            # tdx 调用; 全包 try/except 失败静默(fail-open)。
+            if not float_vol:
+                try:
+                    from prism import tdx_source
+                    v = tdx_source.float_shares(code)
+                    if v and v > 0:
+                        float_vol = v
+                except Exception:
+                    pass
+            # float_mv 统一口径: 股本×现价, 两者都为正才算, 否则 None。
+            # 价格侧 fail-open: tick 死不给价就用不了, 不拿 0/陈旧价凑。
+            last = tick.get("lastPrice")
+            if (float_vol or 0) > 0 and (last or 0) > 0:
+                float_mv = float_vol * last
+            else:
+                float_mv = None
         if kline is None and self.connected:
             # 260 而非 250: M6/M7 用 closes[-251:-1] 取 250 根算 MA250, 要求
             # len(kline) >= 251。此前按 250 拉取, 永远差一根 → 实盘恒 0。
