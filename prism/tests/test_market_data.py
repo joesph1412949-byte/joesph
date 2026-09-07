@@ -541,6 +541,19 @@ def test_build_flow_rank_idempotent(_ws_tmp, monkeypatch):
     assert fr["rows"][fr["dates"][0]][0]["net_in"] == 9e8
 
 
+def test_build_flow_rank_skips_empty_snapshot(_ws_tmp, monkeypatch):
+    """全 '-' 快照(盘前/非交易日) → 不落盘, dates 不增长。"""
+    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
+    monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "mkt_idx.pkl")
+    data = _resp({"total": 2, "diff": [
+        {"f12": "BK0001", "f14": "甲", "f62": "-"},
+        {"f12": "BK0002", "f14": "乙", "f62": "-"}]})
+    p = md.EastMoneyProbe(http_get=FakeGetter({md.EastMoneyProbe.CLIST_URL: data}))
+    r = md.build_flow_rank(probe=p)
+    assert r == {"dates": 0, "sectors_today": 0}
+    assert (md._load_cache().get("flow_rank") or {}) == {}
+
+
 def test_build_benchmark(_ws_tmp, monkeypatch):
     monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
     monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "mkt_idx.pkl")
@@ -581,3 +594,21 @@ def test_mkt_snapshot_new_segments(_ws_tmp, monkeypatch):
     assert snap["benchmark"]["close"] == [4000.0]
     assert snap["flow_rank"]["dates"] == ["2026-09-05"]
     assert snap["sector"]["801010"]["name"] == "农林牧渔"
+
+
+def test_cli_build_flags_run_both(_ws_tmp, monkeypatch):
+    """--build-benchmark --build-flow-rank 组合: 两个都执行(终审 I-1 回归锁)。"""
+    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
+    monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "mkt_idx.pkl")
+    monkeypatch.setattr("sys.argv", ["market_data.py", "--build-benchmark",
+                                     "--build-flow-rank"])
+    calls = []
+    monkeypatch.setattr(md, "build_flow_rank",
+                        lambda probe=None: calls.append("fr")
+                        or {"dates": 1, "sectors_today": 2})
+    monkeypatch.setattr(md, "build_benchmark",
+                        lambda probe=None, beg=None, end=None:
+                        calls.append("bm") or {"days": 1, "kept_old": False})
+    md.build_cli()
+    assert calls == ["fr", "bm"]
+    assert (md._load_cache().get("benchmark")) is None  # 假实现不落盘, 只验证调用序

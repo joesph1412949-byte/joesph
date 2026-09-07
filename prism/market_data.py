@@ -812,6 +812,11 @@ def build_flow_rank(probe=None):
     返回 {"dates": n, "sectors_today": n}。失败 → 抛 MarketDataError。"""
     probe = probe or EastMoneyProbe()
     rows = probe.fetch_flow_rank()
+    if not rows:
+        # 全 '-'/空快照(盘前/非交易日): 不落盘, 避免空断点日截断 streak 链
+        cache = _load_cache()
+        return {"dates": len((cache.get("flow_rank") or {}).get("dates") or []),
+                "sectors_today": 0}
     cache = _load_cache()
     fr = cache.get("flow_rank") or {}
     dates = list(fr.get("dates") or [])
@@ -1067,7 +1072,6 @@ def build_cli():
     if args.build_flow_rank:
         r = build_flow_rank()
         print("资金惯性快照:", r)
-        return
     if args.build_benchmark:
         r = build_benchmark(beg=args.beg)
         print("上证基准:", r)
@@ -1079,6 +1083,10 @@ def build_cli():
         print("资金流板块数:", len(cache.get("flow") or {}))
         print("全球指数:", {k: len(v.get("dates") or [])
                             for k, v in (cache.get("global") or {}).items()})
+        bench = cache.get("benchmark") or {}
+        fr = cache.get("flow_rank") or {}
+        print("上证基准:", len(bench.get("dates") or []), "日")
+        print("资金惯性:", len(fr.get("dates") or []), "日快照")
         return
     snap = day_snapshot(args.day)
     print("%s 快照: 板块收盘 %d, 板块资金 %d, 全球 %d" % (
