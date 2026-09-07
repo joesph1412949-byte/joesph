@@ -1069,13 +1069,27 @@ def build_cli():
         print("\n个股→行业映射完成: %d 只" % r["stocks"])
         print("示例查询: 600519 →", stock_sector("600519"))
         return
+    failures = []
     if args.build_flow_rank:
-        r = build_flow_rank()
-        print("资金惯性快照:", r)
+        try:
+            r = build_flow_rank()
+            print("资金惯性快照:", r)
+        except MarketDataError as e:
+            # 容错: 一段被封不连累另一段(push2/push2his 封禁常不同步)
+            failures.append("flow_rank")
+            print("资金惯性快照失败: %r" % e)
     if args.build_benchmark:
-        r = build_benchmark(beg=args.beg)
-        print("上证基准:", r)
+        try:
+            r = build_benchmark(beg=args.beg)
+            print("上证基准:", r)
+        except MarketDataError as e:
+            failures.append("benchmark")
+            print("上证基准失败: %r" % e)
         return
+    if failures:
+        # 点名的采集有失败 → 非零退出(自动化可感知), 不静默吞
+        raise SystemExit("market_data: %s 采集失败(东财可能封禁), 稍后重试"
+                         % "+".join(failures))
     cache = _load_cache()
     if args.stats or not args.day:
         print("板块数:", len(cache.get("sectors") or {}))

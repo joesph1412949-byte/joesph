@@ -612,3 +612,40 @@ def test_cli_build_flags_run_both(_ws_tmp, monkeypatch):
     md.build_cli()
     assert calls == ["fr", "bm"]
     assert (md._load_cache().get("benchmark")) is None  # 假实现不落盘, 只验证调用序
+
+
+def test_cli_flow_rank_failure_does_not_block_benchmark(_ws_tmp, monkeypatch,
+                                                        capsys):
+    """flow_rank 被封(抛 MarketDataError) → benchmark 照常执行(终审 I-1 补强)。"""
+    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
+    monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "mkt_idx.pkl")
+    monkeypatch.setattr("sys.argv", ["market_data.py", "--build-benchmark",
+                                     "--build-flow-rank"])
+
+    def boom(probe=None):
+        raise md.MarketDataError("push2 banned")
+
+    ran = []
+    monkeypatch.setattr(md, "build_flow_rank", boom)
+    monkeypatch.setattr(md, "build_benchmark",
+                        lambda probe=None, beg=None, end=None:
+                        ran.append("bm") or {"days": 1, "kept_old": False})
+    md.build_cli()
+    assert ran == ["bm"]           # benchmark 不被连累
+    out = capsys.readouterr().out
+    assert "资金惯性快照失败" in out
+
+
+def test_cli_single_flag_failure_exits_nonzero(_ws_tmp, monkeypatch):
+    """只点名 flow_rank 且失败 → 非零退出(不静默吞, 自动化可感知)。"""
+    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
+    monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "mkt_idx.pkl")
+    monkeypatch.setattr("sys.argv", ["market_data.py", "--build-flow-rank"])
+
+    def boom(probe=None):
+        raise md.MarketDataError("push2 banned")
+
+    monkeypatch.setattr(md, "build_flow_rank", boom)
+    with pytest.raises(SystemExit) as ei:
+        md.build_cli()
+    assert "flow_rank" in str(ei.value)
