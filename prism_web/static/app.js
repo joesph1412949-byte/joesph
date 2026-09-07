@@ -745,8 +745,6 @@ const STAGE_BADGE = {
   "主升期": "stage-main", "高潮期": "stage-peak",
   "退潮期": "stage-ebb", "休整": "", "数据不足": ""
 };
-const STAGE_ORDER = {"孕育期": 0, "启动期": 1, "主升期": 2, "高潮期": 3,
-  "退潮期": 4, "休整": 5, "数据不足": 6};
 
 async function loadSectorStage() {
   try {
@@ -759,17 +757,30 @@ async function loadSectorStage() {
       `<td>${r.last_net_in == null ? "-" : (r.last_net_in / 1e8).toFixed(2)}</td>` +
       `<td>${r.systematic ? '<span class="badge stage-main">系统性增配</span>' : ""}</td></tr>`
     ).join("") || `<tr><td colspan="4" class="hint">暂无数据(盘后跑 python -m prism.market_data --build-flow-rank 积累)</td></tr>`;
+    // 周报视图: 默认按周排名升序(无排名的行垫底)
     const rows = (data.sectors || [])
       .slice()
-      .sort((a, b) => (STAGE_ORDER[a.stage] ?? 9) - (STAGE_ORDER[b.stage] ?? 9));
+      .sort((a, b) => (a.week_rank ?? 1e9) - (b.week_rank ?? 1e9));
     const tb2 = document.querySelector("#sector-stage tbody");
-    tb2.innerHTML = rows.map(r =>
-      `<tr><td>${escHtml(r.name || r.code)}</td>` +
+    tb2.innerHTML = rows.map(r => {
+      const etf = (r.etf && r.etf.code) ? r.etf : null;
+      // title=锚点行情明细(成交额折亿 + 当日涨幅); 数值列均非插值注入
+      const etfTitle = etf
+        ? `${escHtml(etf.code)} ${escHtml(etf.name || "")} ` +
+          `成交额${etf.amount == null ? "-" : (etf.amount / 1e8).toFixed(2)}亿 ` +
+          `涨跌${etf.pct_chg == null ? "-" : etf.pct_chg.toFixed(2)}%`
+        : "";
+      return `<tr><td>${r.week_rank ?? "-"}</td>` +
+      `<td>${escHtml(r.name || r.code)}</td>` +
       `<td><span class="badge ${STAGE_BADGE[r.stage] || ""}">${escHtml(r.stage)}</span></td>` +
       `<td class="hint">${escHtml(r.note || "")}</td>` +
       `<td>${r.r5 == null ? "-" : r.r5.toFixed(1)}</td>` +
       `<td>${r.share_chg == null ? "-" : r.share_chg.toFixed(4)}</td>` +
-      `<td>${r.hits ?? 0}</td></tr>`
-    ).join("");
+      `<td>${r.hits ?? 0}</td>` +
+      (etf ? `<td><span title="${etfTitle}">${escHtml(etf.code)} ${escHtml(etf.name || "")}</span></td>`
+           : "<td>—</td>") +
+      `<td>${r.new_high ? `${r.new_high.nh}/${r.new_high.base}` : "-"}</td>` +
+      `<td>${r.pos_cap ?? "-"}</td></tr>`;
+    }).join("");
   } catch (e) { /* fail-open: 面板留空 */ }
 }

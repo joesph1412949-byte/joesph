@@ -678,6 +678,7 @@ def _sector_stage_snap():
     }
 
 
+@pytest.mark.usefixtures("_weekly_stub")
 def test_sector_stage_endpoint(client, monkeypatch):
     import prism.market_data as md
     monkeypatch.setattr(md, "mkt_snapshot", _sector_stage_snap)
@@ -692,6 +693,7 @@ def test_sector_stage_endpoint(client, monkeypatch):
     assert data["inertia"][0]["streak"] == 2
 
 
+@pytest.mark.usefixtures("_weekly_stub")
 def test_sector_stage_endpoint_empty(client, monkeypatch):
     import prism.market_data as md
     monkeypatch.setattr(md, "mkt_snapshot", lambda: {})
@@ -702,6 +704,7 @@ def test_sector_stage_endpoint_empty(client, monkeypatch):
     assert data["sectors"] == [] and data["inertia"] == []
 
 
+@pytest.mark.usefixtures("_weekly_stub")
 def test_sector_stage_endpoint_error_failopen(client, monkeypatch):
     import prism.market_data as md
     def boom():
@@ -710,3 +713,186 @@ def test_sector_stage_endpoint_error_failopen(client, monkeypatch):
     r = client.get("/api/sector_stage")
     assert r.status_code == 200
     assert r.get_json()["ok"] is False
+
+
+# ---------------- 板块周度跟踪(W2): API 组装 + DOM ----------------
+
+@pytest.fixture()
+def _weekly_stub(monkeypatch):
+    """周度组装件离线桩: 端点测试不触碰真实缓存/xtquant(离线确定性)。
+
+    raising=False: 组装件尚未实现时本桩不炸(存量端点测试保持原语义)。"""
+    monkeypatch.setattr(app_module, "_sector_new_high", lambda: None,
+                        raising=False)
+    monkeypatch.setattr(app_module, "_sector_etf_quotes", lambda: {},
+                        raising=False)
+
+
+def _sector_weekly_snap():
+    """罐头快照: 申万 801780"银行" 与东财 BK1283"银行" 同名并存(W1 交接坑)。"""
+    from datetime import date, timedelta
+    ds = [(date(2026, 9, 1) + timedelta(days=i)).isoformat() for i in range(30)]
+    rec = {"dates": ds, "close": [100.0] * 30, "amount": [1e8] * 30}
+    return {
+        "sector": {"801780": dict(rec, name="银行"),
+                   "BK1283": dict(rec, name="银行")},
+        "benchmark": {"dates": ds, "close": [1000.0] * 30,
+                      "amount": [1e8] * 30},
+        "flow_rank": {"dates": [], "rows": {}},
+    }
+
+
+@pytest.mark.usefixtures("_weekly_stub")
+def test_sector_stage_weekly_columns_injected(client, monkeypatch):
+    """注入 new_high/etf_quotes 后四列透出, 且 BK 同名行被过滤(只留 801)。"""
+    import prism.market_data as md
+    from prism.sector_etf_map import SECTOR_ETF_MAP
+    monkeypatch.setattr(md, "mkt_snapshot", _sector_weekly_snap)
+    monkeypatch.setattr(app_module, "_sector_new_high",
+                        lambda: {"银行": {"nh": 3, "base": 100}})
+    monkeypatch.setattr(app_module, "_sector_etf_quotes",
+                        lambda: {"512800.SH": {"amount": 2.5e8,
+                                               "pct_chg": 1.2}})
+    r = client.get("/api/sector_stage")
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["ok"] is True
+    rows = data["sectors"]
+    assert [x["code"] for x in rows] == ["801780"]     # BK1283 同名行被滤掉
+    row = rows[0]
+    assert row["new_high"] == {"nh": 3, "base": 100}
+    assert row["etf"]["code"] == SECTOR_ETF_MAP["银行"]["code"]
+    assert row["etf"]["amount"] == 2.5e8 and row["etf"]["pct_chg"] == 1.2
+    assert row["pos_cap"] == 30                        # 休整 → 纸面上限 30
+    assert row["week_rank"] == 1
+
+
+@pytest.mark.usefixtures("_weekly_stub")
+def test_sector_stage_weekly_missing_degrades_none(client, monkeypatch):
+    """组装件缺供(None/{}) → new_high/etf 列退化 None, 其余列不受牵连。"""
+    import prism.market_data as md
+    called = []
+    monkeypatch.setattr(md, "mkt_snapshot", _sector_weekly_snap)
+
+    def nh():
+        called.append("nh")
+        return None
+
+    def quotes():
+        called.append("q")
+        return {}
+
+    monkeypatch.setattr(app_module, "_sector_new_high", nh)
+    monkeypatch.setattr(app_module, "_sector_etf_quotes", quotes)
+    r = client.get("/api/sector_stage")
+    data = r.get_json()
+    assert data["ok"] is True
+    assert called == ["nh", "q"]                       # 组装件确被接线
+    row = data["sectors"][0]
+    assert row["new_high"] is None
+    # etf_map 注入下行情缺供 → 锚点仍在、数值退化 None(W1 sector_table 契约)
+    from prism.sector_etf_map import SECTOR_ETF_MAP
+    assert row["etf"]["code"] == SECTOR_ETF_MAP["银行"]["code"]
+    assert row["etf"]["amount"] is None and row["etf"]["pct_chg"] is None
+    assert row["pos_cap"] == 30 and row["week_rank"] == 1
+
+
+def _fake_caches(monkeypatch, tmp_path, md_cache, zt_cache, calls):
+    """注入假缓存加载器(离线): calls 复盘 _load_cache 真实调用次数。"""
+    import prism.market_data as md
+    import prism.zt_history as zt
+    zt_file = tmp_path / "zt.pkl"
+    md_file = tmp_path / "md.pkl"
+    zt_file.write_bytes(b"x")
+    md_file.write_bytes(b"x")
+    monkeypatch.setattr(zt, "CACHE_PATH", zt_file)
+    monkeypatch.setattr(md, "CACHE_PATH", md_file)
+
+    def zt_load():
+        calls.append("zt")
+        return zt_cache
+
+    def md_load():
+        calls.append("md")
+        return md_cache
+
+    monkeypatch.setattr(zt, "_load_cache", zt_load)
+    monkeypatch.setattr(md, "_load_cache", md_load)
+
+
+def test_sector_new_high_translation_and_memo(monkeypatch, tmp_path):
+    """双重翻译(6位码→带后缀→801→行业名) + 按 mtime+当日 memo 只算一次。"""
+    import os
+    import time
+    md_cache = {"sectors": {"801010": {"name": "农林牧渔"},
+                            "BK1283": {"name": "银行"}},
+                "sector_map": {"600051": {"sector": "801010"},
+                               "300750": {"sector": "801010"},
+                               "000002": {"sector": "801010"}}}
+    zt_cache = {"600051.SH": {"close": [10.0] * 59 + [11.0]},   # 创新高
+                "300750.SZ": {"close": [20.0] * 60},            # 持平=新高
+                "000002.SZ": {"close": [5.0] * 10}}             # 历史不足
+    calls = []
+    _fake_caches(monkeypatch, tmp_path, md_cache, zt_cache, calls)
+    monkeypatch.setattr(app_module, "_WEEKLY_NH_MEMO",
+                        {"key": None, "val": None})
+    out = app_module._sector_new_high()
+    assert out == {"农林牧渔": {"nh": 2, "base": 2}}
+    app_module._sector_new_high()
+    assert calls == ["md", "zt"]                       # memo 命中, 不重算
+    os.utime(tmp_path / "zt.pkl", (time.time() + 10,) * 2)      # 缓存变了
+    app_module._sector_new_high()
+    assert calls.count("zt") == 2
+
+
+def test_sector_new_high_failopen(monkeypatch, tmp_path):
+    """zt 缓存炸/缓存文件缺失 → 返回 None 不抛(fail-open)。"""
+    import prism.zt_history as zt
+    monkeypatch.setattr(app_module, "_WEEKLY_NH_MEMO",
+                        {"key": None, "val": None})
+    _fake_caches(monkeypatch, tmp_path, {"sectors": {}, "sector_map": {}},
+                 {}, [])
+    monkeypatch.setattr(zt, "_load_cache",
+                        lambda: (_ for _ in ()).throw(RuntimeError("x")))
+    assert app_module._sector_new_high() is None
+    monkeypatch.setattr(zt, "CACHE_PATH", tmp_path / "missing.pkl")
+    assert app_module._sector_new_high() is None
+
+
+def test_sector_etf_quotes_assembly(monkeypatch):
+    """codes = SECTOR_ETF_MAP 全部非空锚点; fetch 炸 → {} (fail-open)。"""
+    import prism.market_data as md
+    from prism.sector_etf_map import SECTOR_ETF_MAP
+    seen = {}
+
+    def fake_fetch(codes):
+        seen["codes"] = codes
+        return {"512800.SH": {"amount": 1.0, "pct_chg": 0.5}}
+
+    monkeypatch.setattr(md, "fetch_etf_quotes", fake_fetch)
+    out = app_module._sector_etf_quotes()
+    assert out["512800.SH"] == {"amount": 1.0, "pct_chg": 0.5}
+    want = sorted({a["code"] for a in SECTOR_ETF_MAP.values() if a})
+    assert seen["codes"] == want
+    monkeypatch.setattr(md, "fetch_etf_quotes",
+                        lambda codes: (_ for _ in ()).throw(RuntimeError("x")))
+    assert app_module._sector_etf_quotes() == {}
+
+
+def test_sector_tab_weekly_dom(client):
+    """板块观察 tab: 新列表头 + 纸面参考/锚点口径注明。"""
+    html = client.get("/").get_data(as_text=True)
+    for mark in ("周排名", "ETF锚点", "60日新高", "建议上限",
+                 "建议上限为纸面参考，未接入交易", "流动性最好的代表品种"):
+        assert mark in html, "板块观察模板缺 %s" % mark
+
+
+def test_sector_tab_weekly_js_contract():
+    """前端契约(结构性): 默认按 week_rank 升序 + 新列走既有契约。"""
+    js = (Path(__file__).parent.parent / "static" / "app.js").read_text(
+        encoding="utf-8")
+    assert "week_rank" in js                                # 排序键
+    assert "new_high" in js and "pos_cap" in js             # 数值列
+    assert "escHtml(etf" in js                              # XSS 契约
+    assert "1e8" in js                                      # 成交额折亿
+    assert "<td>—</td>" in js                               # 留空锚点显示—

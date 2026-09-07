@@ -54,6 +54,8 @@ from prism import trader
 from prism.strategies import STRATEGIES_DIR
 from prism import market_data as _md
 from prism import sector_stage as _ss
+from prism import sector_etf_map as _etfmap
+from prism import zt_history as _zt
 
 # 因子库注册(装饰器触发): /api/factors、策略校验、选股都要用。幂等。
 reg.scan_factors()
@@ -475,12 +477,76 @@ def manual(code):
 
 # ================= 新路由: 因子库/策略/回测/自动化 =================
 
+# ================= 板块周度跟踪(W2): 观察面板组装件(纯只读, 红线: 不进打分/交易) =================
+
+# 60日新高 memo: {(zt缓存mtime, 行情缓存mtime, 当日): 结果} — 缓存未变且当日
+# 内不重算(spec §3: zt 缓存 63MB 加载 ~0.3s, 避免每次 API 重复加载)
+_WEEKLY_NH_MEMO = {"key": None, "val": None}
+
+
+def _sector_new_high():
+    """60日新高家数 {行业名: {"nh","base"}}(缓存驱动, fail-open → None)。
+
+    双重翻译(W1 交接): sector_map 段(6位码→801码) 按 data.py 同款后缀规则
+    (6开头→.SH 否则→.SZ) 翻成带后缀码(zt 缓存键格式), 再经 sectors 段
+    (801码→行业名) 得 {带后缀码: 行业名}。任一环节失败/缺段 → None。"""
+    try:
+        key = (_zt.CACHE_PATH.stat().st_mtime,
+               _md.CACHE_PATH.stat().st_mtime,
+               _dt.date.today().strftime("%Y%m%d"))
+    except OSError:
+        return None
+    if _WEEKLY_NH_MEMO["key"] == key:
+        return _WEEKLY_NH_MEMO["val"]
+    val = None
+    try:
+        cache = _md._load_cache()
+        names = {c: (i or {}).get("name") or ""
+                 for c, i in (cache.get("sectors") or {}).items()}
+        smap = {}
+        for c6, rec in (cache.get("sector_map") or {}).items():
+            name = names.get((rec or {}).get("sector") or "")
+            if not (c6 and name):
+                continue
+            smap[c6 + (".SH" if c6.startswith("6") else ".SZ")] = name
+        if smap:
+            zt = _zt._load_cache()
+            if zt:
+                val = _ss.new_high_counts(smap, zt)
+    except Exception as e:  # noqa: BLE001 - 观察面板 fail-open
+        logger.warning("60日新高计算失败(此列退化 None): %r", e)
+        val = None
+    _WEEKLY_NH_MEMO["key"] = key
+    _WEEKLY_NH_MEMO["val"] = val
+    return val
+
+
+def _sector_etf_quotes():
+    """ETF 锚点行情 {code: {"amount","pct_chg"}}(fail-open → {})。
+
+    codes = SECTOR_ETF_MAP 全部非空锚点; fetch_etf_quotes 单码已 fail-open。"""
+    try:
+        codes = sorted({a["code"] for a in _etfmap.SECTOR_ETF_MAP.values()
+                        if a})
+        return _md.fetch_etf_quotes(codes) if codes else {}
+    except Exception as e:  # noqa: BLE001 - 观察面板 fail-open
+        logger.warning("ETF 锚点行情失败(退化): %r", e)
+        return {}
+
+
 @app.route("/api/sector_stage")
 def api_sector_stage():
-    """板块感知观察(孕育期/阶段定位/资金惯性), 只读 fail-open 不 500。"""
+    """板块感知观察(孕育期/阶段定位/资金惯性/周度跟踪), 只读 fail-open 不 500。"""
     try:
         snap = _md.mkt_snapshot()
-        table = _ss.sector_table(snap)
+        # 面板只展示申万一级(801 前缀): 缓存 sectors 段 801 与东财 BK 同名行
+        # 并存(如两个"银行"), 不过滤会重复命中同名 new_high/etf(W1 交接§6);
+        # week_rank 同样只在申万一级内排名(周度排名视图口径)
+        snap["sector"] = {c: r for c, r in (snap.get("sector") or {}).items()
+                          if str(c).startswith("801")}
+        table = _ss.sector_table(snap, new_high=_sector_new_high(),
+                                 etf_quotes=_sector_etf_quotes(),
+                                 etf_map=_etfmap.SECTOR_ETF_MAP)
         inertia = _ss.flow_inertia(snap.get("flow_rank"))
         last_date = ""
         for rec in (snap.get("sector") or {}).values():
