@@ -15,6 +15,7 @@
 
 **prism**：A股量化系统。选股引擎（36 因子 / 3 策略 / JSON 策略文件）+ 回测 + Flask 网页 GUI（5000 端口）+ 模拟盘守护。Windows + Python 3.12 + QMT miniQMT（xtquant：`C:\Users\28037\AppData\Local\Programs\Python\Python312\Lib\site-packages`）+ **通达信 pytdx 1.72（同目录，09-05 装）**。
 
+- **板块周度跟踪**（09-07/08，commit d0adcbc..68b3195，**纯观察面板**）：`prism/sector_etf_map.py`（31 行业 ETF 锚点映射，24 锚点+7 留空，QMT 逐码验证）+ `sector_stage.new_high_counts()`（60 日新高家数，zt 缓存直算）+ `sector_table()` 扩展四列（week_rank/etf/new_high/pos_cap 纸面上限）+ app.py 组装（**801 前置过滤=纯申万宇宙**[占比分母与旧面板有出入，已记录]、双重翻译 6位码→801→行业名、memo 双 mtime）+ 板块观察 tab 新四列（**建议上限=纸面参考未接入交易**）。周排名/新高/占比拥挤等 triage：C3 机构共识去掉、C1 惯性/C2 拥挤查重已有、状态调制暂缓（红线）。ETF 行情**按日刷新**（本地末根<今日才批量下载，memo 失败也占当日槽；09-08 终审 I-1 修冻结病）。`build_sector_cache` 尾部过期重采修复（原"已有即跳过"日期永久冻结 09-02；变短守卫防静默截断）。全量 **518 绿**
 - **板块感知层**（09-06/07，commit 3b368c0..361956c，**观察模式不进打分**——用户拍板）：`prism/sector_stage.py` 纯计算（孕育期三信号：近3日≥2日跑赢上证/成交额占比MA5>MA20/站上5日线且近5日阳≥3，未启动 r5<8%；五阶段判定 退潮>高潮>主升>启动>孕育>休整；资金惯性 streak=每日净流入前3连续上榜，≥5日=系统性增配）+ market_data 新段 `flow_rank`（**东财 BK 细分行业口径自洽，勿回填 SEC3 申万体系**；CLIST f62 当日快照**前向累积**幂等、空快照不落盘）+ `benchmark`（上证日K全量替换，09-07 已落 165 日）+ CLI `--build-flow-rank`/`--build-benchmark`（**容错：一段被封不连累另一段，点名失败非零退出**）+ GUI `/api/sector_stage` +「板块观察」tab（**需重启 5000 Flask 生效**）。**升级对话 triage 沉淀为 skill `.claude/skills/prism-upgrade-triage/SKILL.md`**（三问门：数据层可办到/取数容易/实测有效 → 保留/降级/去掉 + 用户拍板；已过 RED/GREEN 子代理测试）
 
 - **通达信数据层**（09-05，commit 2f46e51）：`prism/tdx_source.py` —— pytdx 直连，**补充源定位**（QMT 优先，取不到时降级顶上；板块成分股/证券列表仍走 QMT）。服务器白名单 4 台（123.125.108.14 是残废已剔除）；**板块/指数 K 线必须走 get_index_bars**（get_security_bars 返回乱码内存）；连接会被巨量请求污染 → 每调用前健康检查+换机重连；`tdx_source.set_enabled(False)` 全局开关（测试 conftest 已默认禁用）。自检：`python -m prism.tdx_source`。pytdx 无美股/宏观——NDX/US10Y/VIX 仍走 akshare/FRED
@@ -29,15 +30,16 @@
 - **排板队列状态机**（09-03 完成，089ea9d）：买入排队制（成交=新增成交量穿越前方封单+本单且仍封板；开板撤单当日禁排；收盘作废；资金冻结；跌停卖出顺延）。423 测试全绿。**待下一交易日真实验收**（13:30 时点排队第一现场/T+1/hold_expire 对照）
 
 - **F3 封单强度 ×100 修复**（09-03，ded9e1a）：bidVol/lastVolume 均为手（xtdata 官方示例 L1492 实证）；回测对比零影响（回测无实时盘口，F3 在回测恒 0——v04 九因子回测实际 8 个生效）；修复意义在实盘/模拟盘真实盘口
-- **未推 GitHub**：**有，ahead 11**（09-06/07 板块感知层 9 个 + 09-07 数据层批次 2 个；此前 MEMORY 记"未推=无"有误）——push 前先问
-- **守护重启待办**：现跑的守护是 09-07 12:28 启动的旧代码，**无自动刷新钩子**；建议当日收盘后重启 PRISM.bat——激活钩子，且启动即补 09-07 真实收盘涨停池（13:13 盘中回补那条是临时值，不重启则次日 F9 拿盘中临时池，陈旧保护抓不到这种"1 天旧"）
+- **未推 GitHub**：**有，ahead 18**（09-06/07 板块感知层 9 个 + 09-07 数据层批次 2 个 + 09-07/08 板块周度跟踪 7 个）——push 前先问
+- **守护重启待办**：现跑的守护是 09-07 12:28 启动的旧代码，**无自动刷新钩子**；且 app.py/静态资源 09-07/08 有改动（板块观察 tab 四新列）——**重启 PRISM.bat 一次**同时激活两件事；启动即补当日真实收盘涨停池（旧盘中临时值由陈旧保护兜底，但重启更干净）
 
 ## 环境备忘
 
-- 测试：`$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests prism_web/tests -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_btNN`（NN 递增，下一个 **167**；当前基线 **486 绿**——09-07 数据层批次后；前值勘误：板块感知层后真实基线是 470，MEMORY 曾记 468 偏旧）。09-05 起 conftest 全局禁用通达信取数（离线确定性）；test_market_data 的 _ws_tmp 用唯一临时目录（固定目录+沙箱清理失败=跨轮缓存污染假失败）；git-bash 下 basetemp 用正斜杠（反斜杠被吞会在仓库根生成垃圾目录）
+- 测试：`$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests prism_web/tests -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_btNN`（NN 递增，下一个 **172**；当前基线 **518 绿**——09-08 周度跟踪收尾后；历史环境失败 test_automation_pause_roundtrip 近几轮未复现）。09-05 起 conftest 全局禁用通达信取数（离线确定性）；test_market_data 的 _ws_tmp 用唯一临时目录（固定目录+沙箱清理失败=跨轮缓存污染假失败）；git-bash 下 basetemp 用正斜杠（反斜杠被吞会在仓库根生成垃圾目录）
 - xtquant 直连探测：`from xtquant import xtdata; xtdata.connect()`（系统 python 即可）
 - tdx 自检：`python -m prism.tdx_source`（6 项：连接/个股日K/大盘指数/板块指数/快照/流通股本）
 - QMT 数据/守护可并发读；守护日志看 job_output
+- **DSH × OpenCode Go（09-08）**：opencode.ai/zen/go 网关 09-05 起强制 `x-opencode-session` 头，缺失返 400 MissingSessionID（"Console Go"）；DSH 官方已知问题（discussion 5495 未修）。本机已修：`C:\Users\28037\.dsh\settings.yaml` → `llm-pi-ai.providers` 6 个 opencode 供应商补 `headers: { 'x-opencode-session': 'dsh-opencode-go-joesph' }`（备份 .bak-20260908；llm-pi-ai 适配器逐请求读配置，通常免重启）。**09-08 当天实测生效**（下一条消息即不再 400）。若 aux 路径仍 400 需动 deepseek-harness 仓库 llm-pi-ai 代码（重建 profile）
 
 ## 因子管理惯例（2026-09-03 起）
 
