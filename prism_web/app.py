@@ -280,6 +280,25 @@ def _ensure_qmt():
         _qmt_reconnect_lock.release()
 
 
+# ================= 私享分享(2026-09-09): 远程只读护栏 =================
+# spec: docs/superpowers/specs/2026-09-09-tailscale-share-design.md
+# 白名单=空(spec 拍板): 写方法仅限本机 loopback; Tailscale(100.64.0.0/10)
+# 与局域网 IP 一律视为远程。将来白名单路由只改 _READONLY_EXEMPT。
+_READONLY_EXEMPT = frozenset()      # 路由函数名集合, 现为空
+_WRITE_METHODS = frozenset(("POST", "PUT", "DELETE", "PATCH"))
+
+
+@app.before_request
+def _remote_readonly_guard():
+    if request.method not in _WRITE_METHODS:
+        return None
+    if (request.remote_addr or "") in ("127.0.0.1", "::1"):
+        return None
+    logger.warning("远程只读拦截: %s %s from %s",
+                   request.method, request.path, request.remote_addr)
+    return jsonify({"error": "远程访问为只读模式, 写操作仅限本机"}), 403
+
+
 @app.route("/")
 def index():
     return render_template("index.html")
