@@ -220,6 +220,50 @@ def test_build_sector_cache_skips_existing(_ws_tmp, monkeypatch):
     assert r2["sectors"] == 1
 
 
+def test_build_sector_cache_refreshes_stale_tail(_ws_tmp, monkeypatch):
+    """存量K线/资金流尾部过期(最后日期<end) → 重采替换; 已追平 → 不重复请求。
+
+    (09-07 实证: 缓存冻在 09-02 而源头已有 09-03/04, 根因=已有即跳过,
+    与 zt_history ④ 同类病。)
+    """
+    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
+    monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "mkt_idx.pkl")
+    clist = _resp({"total": 1, "diff": [{"f12": "BK0475", "f14": "银行"}]})
+    p, g = _fake_probe({
+        md.EastMoneyProbe.CLIST_URL: clist,
+        md.EastMoneyProbe.KLINE_URL: _resp(
+            {"klines": ["2026-07-01,100.0,1000.0"]}),
+        md.EastMoneyProbe.FFLOW_URL: _resp(
+            {"klines": ["2026-07-01,50.0,1.0,2.0,3.0,4.0"]})})
+
+    def _kline_hits():
+        return len([1 for u, _ in g.calls
+                    if md.EastMoneyProbe.KLINE_URL in u])
+
+    md.build_sector_cache(probe=p, beg="20260101", end="20260701")
+    assert md._load_cache()["kline"]["BK0475"]["dates"] == ["2026-07-01"]
+    hits_1 = _kline_hits()
+    # 源头长出新交易日: 存量尾部过期 → 重采替换
+    g.url_data[md.EastMoneyProbe.KLINE_URL] = _resp({"klines": [
+        "2026-07-01,100.0,1000.0", "2026-07-02,101.0,1100.0",
+        "2026-07-03,103.0,1200.0"]})
+    g.url_data[md.EastMoneyProbe.FFLOW_URL] = _resp({"klines": [
+        "2026-07-01,50.0,1.0,2.0,3.0,4.0",
+        "2026-07-02,60.0,1.0,2.0,3.0,4.0",
+        "2026-07-03,70.0,1.0,2.0,3.0,4.0"]})
+    r = md.build_sector_cache(probe=p, beg="20260101", end="20260703")
+    assert r["kline_codes"] == 1
+    rec = md._load_cache()["kline"]["BK0475"]
+    assert rec["dates"] == ["2026-07-01", "2026-07-02", "2026-07-03"]
+    assert md._load_cache()["flow"]["BK0475"]["dates"][-1] == "2026-07-03"
+    assert _kline_hits() > hits_1            # 确实重新请求了
+    # 已追平(最后日期==end) → 不再重复请求
+    hits_2 = _kline_hits()
+    md.build_sector_cache(probe=p, beg="20260101", end="20260703")
+    assert _kline_hits() == hits_2
+    assert md._load_cache()["kline"]["BK0475"]["dates"][-1] == "2026-07-03"
+
+
 def test_build_global_cache(_ws_tmp, monkeypatch):
     monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
     kline = _resp({"klines": ["2026-07-01,18000.0", "2026-07-02,18100.0"]})

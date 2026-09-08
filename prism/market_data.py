@@ -7,7 +7,8 @@
   * 美股映射(纳指/标普/道指/美元指数)  → 需全球指数历史K线
 
 设计对齐 prism/zt_history.py:
-  * 采集结果落盘 pickle(.market_data_cache.pkl), 增量续传(已缓存板块跳过);
+  * 采集结果落盘 pickle(.market_data_cache.pkl), 增量续传(已追平的板块跳过,
+    尾部过期的重采——09-07 修复日期冻结);
   * 按日索引(INDEX_PATH)供回测 O(1) 查询, 与 _pick(asof=) 防未来函数同机制;
   * 网络实现可注入(http_get), 离线测试用罐装 resp.
 
@@ -555,6 +556,14 @@ def _save_index(index):
 
 # ---------------------------------------------------------------- 采集
 
+def _tail_stale(rec, end):
+    """存量段最后日期早于目标日 → 过期(需重采)。空段视为过期。"""
+    ds = (rec or {}).get("dates") or []
+    last = str(ds[-1]) if ds else ""
+    tgt = _norm_day(end) or ""
+    return last < tgt
+
+
 def build_sector_cache(probe=None, beg=BACKFILL_BEG, end=None,
                        progress=None, source="eastmoney", rebuild=False):
     """采集行业板块列表 + 历史K线 + 资金流历史, 增量落盘。
@@ -563,6 +572,10 @@ def build_sector_cache(probe=None, beg=BACKFILL_BEG, end=None,
     东财封禁时的备用; 申万无资金流, flow 段留空)。
     rebuild: True 时清空已有 kline/flow 段后全量重采(用于切换数据源:
     申万体系 → 东财体系, 避免两套板块代码混在同一缓存)。
+
+    增量口径: 无缓存的板块新采; 已有缓存但最后日期早于 end(尾部过期)
+    的重采替换(09-07 修复: 原先"已有即跳过"导致日期永久冻结, 与
+    zt_history ④ 同类病); 已追平的不重复请求。
 
     返回 {"sectors": n, "kline_codes": n, "flow_codes": n}。
     缓存结构: {
@@ -608,8 +621,8 @@ def build_sector_cache(probe=None, beg=BACKFILL_BEG, end=None,
     has_fetch_kline = hasattr(feed, "fetch_kline")
     has_fetch_sector_kline = hasattr(feed, "fetch_sector_kline")
     for code, info in sectors.items():
-        need_kline = code not in kline
-        need_flow = flow_enabled and code not in flow
+        need_kline = _tail_stale(kline.get(code), end)
+        need_flow = flow_enabled and _tail_stale(flow.get(code), end)
         if need_kline or need_flow:
             try:
                 if source == "sw" and has_fetch_sector_kline:
