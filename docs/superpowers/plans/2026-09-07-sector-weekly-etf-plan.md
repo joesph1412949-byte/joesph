@@ -13,10 +13,10 @@ Spec: docs/superpowers/specs/2026-09-07-sector-weekly-etf-design.md
 ## Task W1: 数据计算层（etf_map + ETF 行情 + 60日新高 + sector_table 扩展）
 
 - `prism/sector_etf_map.py`：SECTOR_ETF_MAP 31 行业，WebSearch 补全候选 + **逐码 QMT 验证**（存在性+名称一致，验证脚本运行记录写报告）；无专属 ETF 行业留空 `{}`；锚点口径 docstring
-- `prism/market_data.py`：`fetch_etf_quotes(codes)`（读日K，缺则下载+每日 memo，单码失败跳过）
+- `prism/market_data.py`：`fetch_etf_quotes(codes)`（读日K，本地无数据**或末根早于今日**则批量下载[每码每日 memo]+单码失败跳过；09-08 终审 I-1 修正触发条件）
 - `prism/sector_stage.py`：`new_high_counts()` 纯计算 + `POS_CAP` 常量 + `sector_table()` 可选参扩展（new_high/etf/pos_cap/week_rank 四字段，缺省 None 输出 None）
 - TDD；测试全离线（构造 fake 缓存/映射/quotes）
-- 验证: `PYTHONIOENCODING=utf-8 python -m pytest prism/tests/test_sector_stage.py prism/tests/test_market_data.py -q --import-mode=importlib --basetemp=D:/cc-joesph/pt_bt167` + 全量
+- 验证: `PYTHONIOENCODING=utf-8 python -m pytest prism/tests/test_sector_stage.py prism/tests/test_sector_etf_map.py prism/tests/test_market_data.py -q --import-mode=importlib --basetemp=D:/cc-joesph/pt_bt167`（子集命令；**基线 486 为全量口径**，子集数不含其他文件，最终以全量回归为准）
 
 ## Task W2: API + GUI（组装透出 + 板块观察 tab 新列）
 

@@ -26,7 +26,7 @@
 ## 2. ETF 行情（prism/market_data.py）
 
 - `fetch_etf_quotes(codes) -> dict[code, {"amount": float, "pct_chg": float}]`：
-  - xtdata `get_market_data_ex` count=2（日K）取最新成交额与涨跌幅；本地无数据 → 先 `download_history_data2` 该代码（每代码每日至多一次，模块级 memo）再读。
+  - xtdata `get_market_data_ex` count=2（日K）取最新成交额与涨跌幅；**本地无数据或末根日期早于今日** → `download_history_data2`（每代码每日至多一次，模块级 memo；下载失败也占当日槽，次日自愈）再读。（09-08 终审 I-1 修正：原措辞"本地无数据→下载"会使首下载后行情永久冻结）
   - 单代码失败 → 跳过该条（fail-open），不影响其余。
   - 单位与 data.py 既有口径一致（amount 元；面板自行折亿显示）。
 
