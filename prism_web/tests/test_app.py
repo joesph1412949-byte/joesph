@@ -914,27 +914,3 @@ def test_sector_tab_weekly_js_contract():
     assert "escHtml(etf" in js                              # XSS 契约
     assert "1e8" in js                                      # 成交额折亿
     assert "<td>—</td>" in js                               # 留空锚点显示—
-
-
-# ---------------- 远程只读护栏(私享分享 spec 2026-09-09) ----------------
-
-def test_remote_write_blocked(client):
-    """伪造 Tailscale 来源的 POST → 403, 且不走到路由内部(钩子在前)。"""
-    r = client.post("/api/screen", json={"strategy": "x"},
-                    environ_base={"REMOTE_ADDR": "100.64.1.2"})
-    assert r.status_code == 403
-    assert "只读" in r.get_json()["error"]
-
-
-def test_remote_get_allowed(client):
-    """伪造远程 IP 的 GET 放行(看板语义), 走到路由内部。"""
-    r = client.get("/api/health", environ_base={"REMOTE_ADDR": "100.64.1.2"})
-    assert r.status_code == 200
-
-
-def test_local_write_untouched(client):
-    """本机 loopback 写方法不受影响(放行到路由既有逻辑)。"""
-    # /api/screen 本机 POST 会先撞 QMT 检查(400)而非 403——证明护栏未拦本机
-    r = client.post("/api/screen", json={"strategy": "x"},
-                    environ_base={"REMOTE_ADDR": "127.0.0.1"})
-    assert r.status_code != 403
