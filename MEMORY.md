@@ -39,6 +39,7 @@
 - xtquant 直连探测：`from xtquant import xtdata; xtdata.connect()`（系统 python 即可）
 - tdx 自检：`python -m prism.tdx_source`（6 项：连接/个股日K/大盘指数/板块指数/快照/流通股本）
 - QMT 数据/守护可并发读；守护日志看 job_output
+- **Tailscale 私享分享**（09-09）：朋友经 tailnet 只读访问 5000 看板（装客户端+邀请+ACL 限朋友→本机 5000；免费档 3 用户/100 设备）；远程只读护栏=app.py `before_request`（非 loopback 的 POST/PUT/DELETE/PATCH → 403，GET 全放，白名单空，白名单将来改 `_READONLY_EXEMPT`）；你关机=朋友不可用（已接受）；验收=朋友点"选股"按钮报"仅本机"、看板可浏览
 - **DSH × OpenCode Go（09-08）**：opencode.ai/zen/go 网关 09-05 起强制 `x-opencode-session` 头，缺失返 400 MissingSessionID（"Console Go"）；DSH 官方已知问题（discussion 5495 未修）。本机已修：`C:\Users\28037\.dsh\settings.yaml` → `llm-pi-ai.providers` 6 个 opencode 供应商补 `headers: { 'x-opencode-session': 'dsh-opencode-go-joesph' }`（备份 .bak-20260908；llm-pi-ai 适配器逐请求读配置，通常免重启）。**09-08 当天实测生效**（下一条消息即不再 400）。若 aux 路径仍 400 需动 deepseek-harness 仓库 llm-pi-ai 代码（重建 profile）
 
 ## 因子管理惯例（2026-09-03 起）
