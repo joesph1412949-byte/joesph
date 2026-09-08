@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """market_data 单元测试 — 采集解析/缓存/查询/索引, 全离线(注入假 http_get)。"""
 import sys
+from datetime import date as _date, timedelta as _timedelta
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -261,6 +262,37 @@ def test_build_sector_cache_refreshes_stale_tail(_ws_tmp, monkeypatch):
     hits_2 = _kline_hits()
     md.build_sector_cache(probe=p, beg="20260101", end="20260703")
     assert _kline_hits() == hits_2
+    assert md._load_cache()["kline"]["BK0475"]["dates"][-1] == "2026-07-03"
+
+
+def test_build_sector_cache_keeps_old_on_shorter_refetch(_ws_tmp, monkeypatch):
+    """重采结果变短但末日期未回退 → 可疑截断, 保留旧段(M-1 守卫)。"""
+    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
+    monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "mkt_idx.pkl")
+    clist = _resp({"total": 1, "diff": [{"f12": "BK0475", "f14": "银行"}]})
+    k3 = _resp({"klines": ["2026-07-01,100.0,1000.0",
+                           "2026-07-02,101.0,1100.0",
+                           "2026-07-03,103.0,1200.0"]})
+    p, g = _fake_probe({
+        md.EastMoneyProbe.CLIST_URL: clist,
+        md.EastMoneyProbe.KLINE_URL: k3,
+        md.EastMoneyProbe.FFLOW_URL: _resp(
+            {"klines": ["2026-07-01,50.0,1.0,2.0,3.0,4.0",
+                        "2026-07-02,60.0,1.0,2.0,3.0,4.0",
+                        "2026-07-03,70.0,1.0,2.0,3.0,4.0"]})})
+    md.build_sector_cache(probe=p, beg="20260101", end="20260703")
+    assert len(md._load_cache()["kline"]["BK0475"]["dates"]) == 3
+    # 次日(end=07-04)尾部过期 → 重采; 源头却返回截短的 2 根(07-03..07-04)
+    # → 可疑截断: 保留旧 3 根段, 不静默缩短
+    g.url_data[md.EastMoneyProbe.KLINE_URL] = _resp({"klines": [
+        "2026-07-03,103.0,1200.0", "2026-07-04,104.0,1300.0"]})
+    g.url_data[md.EastMoneyProbe.FFLOW_URL] = _resp({"klines": [
+        "2026-07-01,50.0,1.0,2.0,3.0,4.0",
+        "2026-07-02,60.0,1.0,2.0,3.0,4.0",
+        "2026-07-03,70.0,1.0,2.0,3.0,4.0",
+        "2026-07-04,80.0,1.0,2.0,3.0,4.0"]})
+    md.build_sector_cache(probe=p, beg="20260101", end="20260704")
+    assert len(md._load_cache()["kline"]["BK0475"]["dates"]) == 3
     assert md._load_cache()["kline"]["BK0475"]["dates"][-1] == "2026-07-03"
 
 
@@ -698,10 +730,11 @@ def test_cli_single_flag_failure_exits_nonzero(_ws_tmp, monkeypatch):
 # ---------------------------------------------------------------- ETF 行情(W1)
 
 class FakeDF:
-    """get_market_data_ex 单码返回值: 仅支持 df["col"] 取列(实现只用这个)。"""
+    """get_market_data_ex 单码返回值: 支持 df["col"] 取列 + df.index 日期。"""
 
     def __init__(self, cols):
         self._cols = cols
+        self.index = list(cols.get("index") or [])
 
     def __getitem__(self, k):
         return list(self._cols[k])
@@ -719,6 +752,7 @@ class FakeXt:
         self.fail_read = set(fail_read)
         self.fail_dl = set(fail_dl)
         self.downloads = []
+        self.dl_calls = 0
 
     def get_market_data_ex(self, empty, codes, period=None, count=None):
         out = {}
@@ -731,6 +765,7 @@ class FakeXt:
         return out
 
     def download_history_data2(self, codes, period, start_time="", end_time=""):
+        self.dl_calls += 1
         for c in codes:
             self.downloads.append(c)
             if c in self.fail_dl:
@@ -739,7 +774,11 @@ class FakeXt:
                            for c in codes if c in self.pending})
 
 
-TWO_BARS = {"close": [1.00, 1.05], "amount": [9e8, 1.1e9]}
+_TODAY = _date.today().strftime("%Y%m%d")
+TWO_BARS = {"close": [1.00, 1.05], "amount": [9e8, 1.1e9],
+            "index": ["20260105", _TODAY]}          # 末根=今天 → 新鲜
+STALE_BARS = {"close": [2.00, 2.02], "amount": [5e8, 5.5e8],
+              "index": ["20260101", "20260102"]}    # 末根<今天 → 过期
 
 
 def test_fetch_etf_quotes_local_hit_no_download():
@@ -762,6 +801,34 @@ def test_fetch_etf_quotes_downloads_when_missing():
     assert xt.downloads == ["159997.SZ"]
     assert out["159997.SZ"]["amount"] == 1.1e9
     assert monkey_memo.get("159997.SZ")   # 记了 memo(当日不再下载)
+
+
+def test_fetch_etf_quotes_redownloads_stale_local():
+    """本地有数据但末根早于今日 → 重下载换新(I-1: 首下载后不得永久冻结)。"""
+    xt = FakeXt(local={"512800.SH": STALE_BARS},
+                pending={"512800.SH": TWO_BARS})
+    orig = md._ETF_DL_MEMO
+    md._ETF_DL_MEMO = {}
+    try:
+        out = md.fetch_etf_quotes(["512800.SH"], xtdata_mod=xt)
+    finally:
+        md._ETF_DL_MEMO = orig
+    assert xt.dl_calls == 1               # 触发了重下载
+    assert out["512800.SH"]["amount"] == 1.1e9   # 取到新末根, 非冻结旧值
+
+
+def test_fetch_etf_quotes_batch_single_call():
+    """多个过期码 → 一次批量下载(I-1: 不再逐码 24 连打)。"""
+    xt = FakeXt(pending={"512800.SH": TWO_BARS, "159997.SZ": TWO_BARS})
+    orig = md._ETF_DL_MEMO
+    md._ETF_DL_MEMO = {}
+    try:
+        out = md.fetch_etf_quotes(["512800.SH", "159997.SZ"],
+                                  xtdata_mod=xt)
+    finally:
+        md._ETF_DL_MEMO = orig
+    assert xt.dl_calls == 1               # 一批, 不是两 calls
+    assert set(out) == {"512800.SH", "159997.SZ"}
 
 
 def test_fetch_etf_quotes_memo_skips_second_download_same_day():

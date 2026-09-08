@@ -542,8 +542,12 @@ def api_sector_stage():
         # 面板只展示申万一级(801 前缀): 缓存 sectors 段 801 与东财 BK 同名行
         # 并存(如两个"银行"), 不过滤会重复命中同名 new_high/etf(W1 交接§6);
         # week_rank 同样只在申万一级内排名(周度排名视图口径)
-        snap["sector"] = {c: r for c, r in (snap.get("sector") or {}).items()
+        _all_sec = snap.get("sector") or {}
+        snap["sector"] = {c: r for c, r in _all_sec.items()
                           if str(c).startswith("801")}
+        if not snap["sector"] and _all_sec:
+            logger.warning("板块观察: 801 过滤后 0 行(缓存疑似东财 BK 体系, "
+                           "如需切换请 --rebuild --source sw)")
         table = _ss.sector_table(snap, new_high=_sector_new_high(),
                                  etf_quotes=_sector_etf_quotes(),
                                  etf_map=_etfmap.SECTOR_ETF_MAP)

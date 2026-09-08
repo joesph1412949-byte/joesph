@@ -564,6 +564,15 @@ def _tail_stale(rec, end):
     return last < tgt
 
 
+def _shrink_suspicious(old_rec, new_items):
+    """重采结果比旧段短且末日期未回退 → 可疑截断(M-1 守卫, True=保留旧段)。"""
+    old_dates = (old_rec or {}).get("dates") or []
+    if not old_dates or not new_items:
+        return False
+    new_dates = [r["date"] for r in new_items]
+    return len(new_dates) < len(old_dates) and new_dates[-1] >= old_dates[-1]
+
+
 def build_sector_cache(probe=None, beg=BACKFILL_BEG, end=None,
                        progress=None, source="eastmoney", rebuild=False):
     """采集行业板块列表 + 历史K线 + 资金流历史, 增量落盘。
@@ -644,12 +653,21 @@ def build_sector_cache(probe=None, beg=BACKFILL_BEG, end=None,
                     progress(done, total)
                 continue
             if kl and need_kline:
-                kline[code] = {"dates": [r["date"] for r in kl],
-                               "close": [r["close"] for r in kl],
-                               "amount": [r.get("amount") for r in kl]}
+                if _shrink_suspicious(kline.get(code), kl):
+                    logger.warning("板块 %s K线重采变短且末日期未回退, "
+                                   "保留旧段(收窄回补窗口请用 --rebuild)",
+                                   code)
+                else:
+                    kline[code] = {"dates": [r["date"] for r in kl],
+                                   "close": [r["close"] for r in kl],
+                                   "amount": [r.get("amount") for r in kl]}
             if fl and need_flow:
-                flow[code] = {"dates": [r["date"] for r in fl],
-                              "main_net_in": [r["main_net_in"] for r in fl]}
+                if _shrink_suspicious(flow.get(code), fl):
+                    logger.warning("板块 %s 资金流重采变短且末日期未回退, "
+                                   "保留旧段", code)
+                else:
+                    flow[code] = {"dates": [r["date"] for r in fl],
+                                  "main_net_in": [r["main_net_in"] for r in fl]}
         done += 1
         # 每 20 个板块增量保存一次(中断不丢进度)
         if done % 20 == 0:
@@ -871,11 +889,25 @@ def build_benchmark(probe=None, beg=BACKFILL_BEG, end=None):
 _ETF_DL_MEMO = {}
 
 
-def _etf_quote_one(xt, code):
-    """单码最新日K(count=2) → {"amount": 元, "pct_chg": %}; 数据不足 → None。"""
+def _etf_df(xt, code):
+    """单码本地日K(count=2) → df; 不足 2 根 → None。"""
     data = xt.get_market_data_ex([], [code], period="1d", count=2) or {}
     df = data.get(code)
-    if df is None or len(df) < 2:
+    return df if df is not None and len(df) >= 2 else None
+
+
+def _df_last_day(df):
+    """df 末根K线日期('YYYYMMDD'; QMT 索引可能带时分秒, 截前 8 位)。"""
+    try:
+        return str(df.index[-1])[:8]
+    except Exception:
+        return ""
+
+
+def _etf_quote_one(xt, code):
+    """单码最新日K(count=2) → {"amount": 元, "pct_chg": %}; 数据不足 → None。"""
+    df = _etf_df(xt, code)
+    if df is None:
         return None
     closes = list(df["close"])
     amounts = list(df["amount"])
@@ -889,10 +921,13 @@ def _etf_quote_one(xt, code):
 def fetch_etf_quotes(codes, xtdata_mod=None):
     """ETF 锚点行情: {code: {"amount": 元, "pct_chg": %}}(周度跟踪 W1)。
 
-    xtdata get_market_data_ex count=2 日K → 最新成交额 + 涨跌幅;
-    本地无数据 → download_history_data2 后重读(每代码每日至多一次,
-    memo _ETF_DL_MEMO)。单代码失败/始终无数据 → 跳过(fail-open), 不抛。
-    amount 单位与 data.py 既有口径一致(元, 面板自行折亿)。
+    xtdata get_market_data_ex count=2 日K → 最新成交额 + 涨跌幅。
+    下载触发(09-08 修 I-1): 本地无数据**或末根日期早于今日** → 下载——
+    否则首下载后本地永远有数据, 行情冻结在下载日被当"当日"展示。
+    批量一次 download_history_data2(该 API 本就收列表), 每码每日至多一次
+    (memo _ETF_DL_MEMO; **下载失败也占当日槽**——防 QMT 停机日每请求
+    24 连打, 次日自愈); 批量炸 → 逐码兜底。单代码失败/始终无数据 →
+    跳过(fail-open), 不抛。amount 单位与 data.py 既有口径一致(元)。
     xtdata_mod 供测试注入假模块; 缺省 import xtquant(不可用 → {})。"""
     xt = xtdata_mod
     if xt is None:
@@ -901,15 +936,37 @@ def fetch_etf_quotes(codes, xtdata_mod=None):
         except Exception:
             return {}
     today = date.today().strftime("%Y%m%d")
+    codes = list(codes or [])
+    # 1. 逐码读本地, 标出缺数据/末根早于今日的码
+    stale = []
+    for code in codes:
+        try:
+            df = _etf_df(xt, code)
+        except Exception as e:
+            logger.warning("ETF %s 行情失败(跳过): %r", code, e)
+            continue
+        if df is None or _df_last_day(df) < today:
+            stale.append(code)
+    # 2. 批量下载(memo 日记帐在前: 失败也占当日槽)
+    todo = [c for c in stale if _ETF_DL_MEMO.get(c) != today]
+    for c in todo:
+        _ETF_DL_MEMO[c] = today
+    if todo:
+        try:
+            xt.download_history_data2(todo, "1d", start_time="", end_time="")
+        except Exception as e:
+            logger.warning("ETF 批量下载失败, 逐码兜底: %r", e)
+            for c in todo:
+                try:
+                    xt.download_history_data2([c], "1d",
+                                              start_time="", end_time="")
+                except Exception as ee:
+                    logger.warning("ETF %s 下载失败(跳过): %r", c, ee)
+    # 3. 逐码出数(单码失败跳过, 不牵连)
     out = {}
-    for code in codes or []:
+    for code in codes:
         try:
             q = _etf_quote_one(xt, code)
-            if q is None and _ETF_DL_MEMO.get(code) != today:
-                _ETF_DL_MEMO[code] = today
-                xt.download_history_data2([code], "1d",
-                                          start_time="", end_time="")
-                q = _etf_quote_one(xt, code)
         except Exception as e:
             logger.warning("ETF %s 行情失败(跳过): %r", code, e)
             q = None

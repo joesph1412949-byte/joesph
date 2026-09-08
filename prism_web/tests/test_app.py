@@ -768,6 +768,24 @@ def test_sector_stage_weekly_columns_injected(client, monkeypatch):
 
 
 @pytest.mark.usefixtures("_weekly_stub")
+def test_sector_stage_endpoint_bk_only_universe_warns(client, monkeypatch,
+                                                     caplog):
+    """缓存全是 BK 码 → 801 过滤后 0 行: ok 不炸 + warning 提示(M-4)。"""
+    import logging
+    import prism.market_data as md
+    snap = _sector_weekly_snap()
+    snap["sector"] = {"BK0486": snap["sector"]["801780"]}   # 全 BK, 无 801
+    monkeypatch.setattr(md, "mkt_snapshot", lambda: snap)
+    with caplog.at_level(logging.WARNING, logger="prism_web"):
+        r = client.get("/api/sector_stage")
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["ok"] is True
+    assert data["sectors"] == []
+    assert any("801" in rec.message for rec in caplog.records)
+
+
+@pytest.mark.usefixtures("_weekly_stub")
 def test_sector_stage_weekly_missing_degrades_none(client, monkeypatch):
     """组装件缺供(None/{}) → new_high/etf 列退化 None, 其余列不受牵连。"""
     import prism.market_data as md
