@@ -34,6 +34,10 @@ BRIDGE = os.path.join(REPO, "qmt_signal_bridge_real.py")
 STRATEGY_POINTER = os.path.join(REPO, "prism", "strategies", ".active.json")
 MKT_CACHE = os.path.join(REPO, ".market_data_cache.pkl")
 ZT_CACHE = os.path.join(REPO, ".zt_history_cache.pkl")
+LIVE_DAEMON = os.path.join(REPO, "prism", "live_daemon.py")
+LIVE_ACCOUNT = os.path.join(REPO, "prism", "live_account.py")
+LIVE_STATE = os.path.join(REPO, "live_state.json")
+POSITIONS = os.path.join(REPO, "positions.json")
 
 OK, WARN, FAIL = "OK", "WARN", "FAIL"
 _rows = []
@@ -225,6 +229,61 @@ def check_config():
         rec(WARN, "配置", "激活策略", "指针缺失: %s" % STRATEGY_POINTER)
 
 
+# ---------------------------------------------------------------- 实盘出口
+def check_live_exit():
+    """prism 引擎 → 实盘出口是否就位(P0 补齐项)。
+
+    检查: 模块在位且可导入 / live_state.json 与 positions.json / 策略
+    execution 与 sell_rules 参数。注意本项**不检查守护进程是否在跑**
+    (无法可靠探测), 是否已启动以 live_state.json 的 mtime 为旁证。"""
+    for label, path in (("live_daemon.py", LIVE_DAEMON),
+                        ("live_account.py", LIVE_ACCOUNT)):
+        rec(OK if os.path.isfile(path) else FAIL, "实盘出口", label,
+            path if os.path.isfile(path) else "缺失: %s" % path)
+    try:
+        import importlib
+        for mod in ("exit_rules", "prism.live_account", "prism.live_daemon"):
+            importlib.import_module(mod)
+        rec(OK, "实盘出口", "模块可导入",
+            "exit_rules / prism.live_account / prism.live_daemon")
+    except Exception as e:
+        rec(FAIL, "实盘出口", "模块可导入", "失败: %r" % (e,))
+
+    for label, path in (("live_state.json", LIVE_STATE),
+                        ("positions.json", POSITIONS)):
+        if os.path.isfile(path):
+            try:
+                json.load(open(path, encoding="utf-8"))
+                rec(OK, "实盘出口", label, "在位可解析 (%s)" % path)
+            except Exception as e:
+                rec(FAIL, "实盘出口", label, "解析失败: %r" % (e,))
+        else:
+            rec(WARN, "实盘出口", label,
+                "不存在(守护尚未跑过): %s" % path)
+
+    try:
+        p = json.load(open(STRATEGY_POINTER, encoding="utf-8"))
+        f = os.path.join(REPO, "prism", "strategies", "%s.json" % p.get("id"))
+        if os.path.isfile(f):
+            s = json.load(open(f, encoding="utf-8"))
+            ex = s.get("execution") or {}
+            miss = [k for k in ("pct", "top_n", "open_window", "pick_slot")
+                    if not ex.get(k)]
+            rec(OK if not miss else WARN, "实盘出口", "策略 execution 参数",
+                "pct=%s top_n=%s 窗口=%s" % (ex.get("pct"), ex.get("top_n"),
+                                             ex.get("open_window"))
+                if not miss else "缺 %s(守护将回落默认值)" % miss)
+            sr = s.get("sell_rules") or {}
+            rec(OK if sr else WARN, "实盘出口", "策略 sell_rules",
+                "止盈 %s / 止损 %s / 持有 %s 日"
+                % (sr.get("take_profit_pct"), sr.get("stop_loss_pct"),
+                   sr.get("max_hold_days")))
+        else:
+            rec(WARN, "实盘出口", "策略 execution 参数", "策略文件缺失: %s" % f)
+    except Exception as e:
+        rec(WARN, "实盘出口", "策略 execution 参数", "读取失败: %r" % (e,))
+
+
 # ---------------------------------------------------------------- 数据
 def check_data():
     # 市场数据缓存
@@ -307,7 +366,8 @@ def check_runtime(ifaces=None):
             try:
                 r = subprocess.run(
                     ["tasklist", "/FI", "IMAGENAME eq %s" % image, "/FO", "CSV"],
-                    capture_output=True, text=True, timeout=10)
+                    capture_output=True, text=True, timeout=10,
+                    encoding="utf-8", errors="replace")
                 out = r.stdout
                 if not out or not out.strip():
                     return False, ""
@@ -338,6 +398,7 @@ def main():
 
     ifaces = check_interfaces()
     check_config()
+    check_live_exit()
     check_data()
     check_runtime(ifaces)
 

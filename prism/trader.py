@@ -26,12 +26,41 @@ def check_paused():
     return Path(PAUSE_FILE).exists()
 
 
-def generate_signals(result, strategy, env="sim", volume=100):
+def build_signal(code, action, price, volume, order_id, account_id="",
+                 strategy_id="unknown", composite=None, sector_score=None,
+                 created_at=None):
+    """构造一条与桥 pending JSON 同构的信号(单一 schema 出口)。
+
+    桥端消费字段: order_id / action / stock_code / price / volume /
+    account_id。price=0 → 桥按对手价市价单(pr_type=2); price>0 → 限价单。
+    """
+    return {
+        "order_id": order_id,
+        "action": action,
+        "stock_code": code,
+        "order_type": action,
+        "price": price or 0,
+        "volume": int(volume or 0),
+        "account_id": account_id,
+        "created_at": created_at or datetime.now().isoformat(),
+        "status": "pending",
+        "strategy_id": strategy_id,
+        "composite": composite,
+        # 协议兼容: 旧版 QMT 信号消费端忽略未知键, 新增键须可缺省(None)
+        "sector_score": sector_score,
+    }
+
+
+def generate_signals(result, strategy, env="sim", volume=100, id_fn=None):
     """把选股结果转成买入信号列表(与桥 pending JSON 同构)。
 
     result: run_screen 的输出 {environment_ok, candidates, ...}。
     每只候选股生成一条 BUY 信号; 环境不达标返回空列表。
     信号额外携带 strategy_id / composite, 便于盘后追溯。
+
+    id_fn: 可选 order_id 生成器 f(candidate) -> str。默认 None=随机
+    (兼容旧行为); 实盘路径传入确定性 id(如 BUY_<日期>_<代码>)以保证
+    重启后重复生成不产生新的信号文件(幂等, 体检报告 §3.2 #6)。
 
     价格语义: price 取候选的 up_stop_price, 缺失时为 0 —— 桥端收到
     price=0 会按对手价市价单处理(pr_type=2); 若策略要求涨停价限价
@@ -43,33 +72,27 @@ def generate_signals(result, strategy, env="sim", volume=100):
         return []
     out = []
     for c in result.get("candidates", []):
-        order_id = "BUY_%s" % uuid.uuid4().hex[:8]
-        out.append({
-            "order_id": order_id,
-            "action": "BUY",
-            "stock_code": c["code"],
-            "order_type": "BUY",
-            "price": c.get("up_stop_price") or 0,
-            "volume": volume,
-            "account_id": "",
-            "created_at": datetime.now().isoformat(),
-            "status": "pending",
-            "strategy_id": strategy.get("id", "unknown"),
-            "composite": c.get("scores", {}).get("composite"),
-            # 协议兼容: 旧版 QMT 信号消费端忽略未知键, 新增键须可缺省(None)
-            "sector_score": c.get("sector_score"),
-        })
+        order_id = (id_fn(c) if id_fn
+                    else "BUY_%s" % uuid.uuid4().hex[:8])
+        out.append(build_signal(
+            code=c["code"], action="BUY", price=c.get("up_stop_price"),
+            volume=volume, order_id=order_id,
+            strategy_id=strategy.get("id", "unknown"),
+            composite=c.get("scores", {}).get("composite"),
+            sector_score=c.get("sector_score"),
+        ))
     return out
 
 
-def write_signals(signals, env="sim"):
-    """写信号文件到 SIGNAL_ROOT/<env>/pending/。返回写入数量。
+def write_signals(signals, env="sim", root=None):
+    """写信号文件到 <root>/<env>/pending/。返回写入数量。
 
     每信号一个 JSON 文件(文件名 = order_id), 桥端扫描该目录消费。
+    root 缺省用模块级 SIGNAL_ROOT(测试可 monkeypatch 或显式传目录)。
     """
     if not signals:
         return 0
-    pending_dir = Path(SIGNAL_ROOT) / env / "pending"
+    pending_dir = Path(root or SIGNAL_ROOT) / env / "pending"
     pending_dir.mkdir(parents=True, exist_ok=True)
     n = 0
     for s in signals:
@@ -80,19 +103,24 @@ def write_signals(signals, env="sim"):
     return n
 
 
-def run_daily(strategy, provider, env="sim", volume=100, archive=None):
-    """盘后完整流程: 选股 → (可选绩效存档) → 生成并写入信号。
+def run_daily(strategy, provider, env="sim", volume=100, archive=None,
+              write=True, id_fn=None):
+    """盘后完整流程: 选股 → (可选绩效存档) → 生成并(可选)写入信号。
 
     步骤: 暂停检查 → load_strategy → build_market_context → 门槛因子
     (gate) 预计算 → 涨停池 → 逐股上下文 → run_screen → archive 回调 →
     generate_signals → write_signals。
 
-    返回 {"environment_ok", "candidates", "signals_written", "paused",
-    "skipped_no_price"}; env="real" 时逐候选跳过缺 up_stop_price 的候选,
-    全部缺价则返回 "error" 字段并拒单。
+    write=False 时只选股并返回 signals 列表, 不落 pending 目录 —— 供
+    live_daemon 的"收盘选股 → 次日开盘再发单"两段式使用(收盘后立即
+    写信号会被桥端在非交易时段拒单并丢进 failed)。
+
+    返回 {"environment_ok", "candidates", "signals", "signals_written",
+    "paused", "skipped_no_price"}; env="real" 时逐候选跳过缺
+    up_stop_price 的候选, 全部缺价则返回 "error" 字段并拒单。
     """
     if check_paused():
-        return {"environment_ok": False, "candidates": [],
+        return {"environment_ok": False, "candidates": [], "signals": [],
                 "signals_written": 0, "paused": True}
     from prism.engine import load_strategy, run_screen
     strat = load_strategy(strategy)
@@ -134,7 +162,7 @@ def run_daily(strategy, provider, env="sim", volume=100, archive=None):
         skipped_no_price = len(candidates) - len(priced)
         if not priced:
             return {"environment_ok": result["environment_ok"],
-                    "candidates": candidates,
+                    "candidates": candidates, "signals": [],
                     "signals_written": 0, "paused": False,
                     "skipped_no_price": skipped_no_price,
                     "error": ("real盘候选缺 up_stop_price, 已拒绝生成信号: "
@@ -144,9 +172,11 @@ def run_daily(strategy, provider, env="sim", volume=100, archive=None):
         sub = dict(result)
         sub["candidates"] = signal_candidates
         result = sub
-    signals = generate_signals(result, strat, env=env, volume=volume)
-    written = write_signals(signals, env=env)
+    signals = generate_signals(result, strat, env=env, volume=volume,
+                               id_fn=id_fn)
+    written = write_signals(signals, env=env) if write else 0
     return {"environment_ok": result["environment_ok"],
             "candidates": candidates,   # 返回原始候选(含被跳过的缺价者, 便于盘后追溯)
+            "signals": signals,
             "signals_written": written, "paused": False,
             "skipped_no_price": skipped_no_price}

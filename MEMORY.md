@@ -31,7 +31,7 @@
 - **排板队列状态机**（09-03 完成，089ea9d）：买入排队制（成交=新增成交量穿越前方封单+本单且仍封板；开板撤单当日禁排；收盘作废；资金冻结；跌停卖出顺延）。423 测试全绿。**待下一交易日真实验收**（13:30 时点排队第一现场/T+1/hold_expire 对照）
 
 - **F3 封单强度 ×100 修复**（09-03，ded9e1a）：bidVol/lastVolume 均为手（xtdata 官方示例 L1492 实证）；回测对比零影响（回测无实时盘口，F3 在回测恒 0——v04 九因子回测实际 8 个生效）；修复意义在实盘/模拟盘真实盘口
-- **未推 GitHub**：**6 个 commit 未推**（Tailscale 私享分享批次 `d20c8dd..4737713`，09-09 产生）+ 09-13 修复批次待提交——下次 push 前仍要问
+- **未推 GitHub**：**0 个**——09-09 Tailscale 批次（`d20c8dd..4737713`）+ 09-13 修复批次（49db972）已于 **09-13 全部推送**（`38c312e..49db972`）。09-13 实盘出口批次（live_daemon/live_account/exit_rules/trader）本地提交后**待用户拍板再推**
   - 09-13 已重启守护（PRISM.bat，15:12）：paper_daemon + prism_web 在跑；zt 缓存 15:19 自动刷新
   - **模拟盘 09-08 午后~09-13 空窗**：账本最后选股 `2026-09-07T15:05`，守护 09-08 午后停摆 → 09-08/09/10/11 四个交易日无选股无成交（非代码问题，进程没在跑）；现金仍 1,000,000、无持仓（09-03/04 九委托零成交的已知结果）
   - **发现重复 web 进程**：`prism_web\app.py` 两个实例（14248 占 5000 / 16604 冗余），启动器只查端口监听，双开仍可能漏网
@@ -39,7 +39,7 @@
 
 ## 环境备忘
 
-- 测试：`$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests prism_web/tests strategy_web/tests -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_btNN`（NN 递增，下一个 **192**；当前基线 **681 绿**（三套件）/ prism+prism_web 两套件 518 绿——09-13 体检后）。**注意沙箱**：后台运行的命令在沙箱内跑，会因①safe-delete 批量删除守卫（teardown 清理 700+ 临时文件）产生假 ERROR + SystemExit；②网络被拦（market_data 相关断言失败）→ 表现为 21~22 failed/15~177 errors，**不是代码问题**；脱沙箱（escalation）即 681 全绿。诊断时优先用非后台调用。
+- 测试：`$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests prism_web/tests strategy_web/tests tests -q --import-mode=importlib --basetemp=D:/cc-joesph/pt_btNN`（NN 递增，下一个 **198**；当前基线 **720 绿**（四路径，09-13 晚，含实盘守护 22 例）/ 三套件 703 绿——09-13 体检时三套件 681）。**basetemp 用正斜杠**：Git Bash 里传 `D:\cc-joesph\pt_btNN` 会被转义拼歪，在仓库根生成 `cc-joesphpt_btNN` 垃圾目录（踩过一次，已删）。**注意沙箱**：后台运行的命令在沙箱内跑，会因①safe-delete 批量删除守卫（teardown 清理 700+ 临时文件）产生假 ERROR + SystemExit；②网络被拦（market_data 相关断言失败）→ 表现为 21~22 failed/15~177 errors，**不是代码问题**；脱沙箱（escalation）即全绿。诊断时优先用非后台调用。
 - **诊断技巧**：pytest 全量跑出现"整片同类失败"时，用 `@pytest.fixture`/hook 打印状态边界（如注册表 `len(reg.FACTORS)`）比逐个二分快得多；autouse fixture 实例化顺序可能导致"取快照晚于污染"这类隐蔽 bug
 - xtquant 直连探测：`from xtquant import xtdata; xtdata.connect()`（系统 python 即可）
 - tdx 自检：`python -m prism.tdx_source`（6 项：连接/个股日K/大盘指数/板块指数/快照/流通股本）
@@ -68,4 +68,4 @@
 - **因子数据遗留**（09-05 审计；09-06 大修、09-07 数据层批次后**剩 1 项**）：~~①fundamental 未来函数~~ ✅ 已修（`_ref(asof)` 全路由、窗口双向 [cutoff, ref]、缓存按 asof 分日；Backtester 可注 fund_feed，Y5/Y2 快照类回测剔除，commit 3dba8f6 已推送）~~③sector_map 6 行业零覆盖~~ ✅ 已补齐（5220 只，F8 煤炭/石油石化映射恢复）~~④zt_history_index 停更无调度~~ ✅ 已修+已回补（09-07 刷新链路：refresh_cache 尾部续传+--refresh+陈旧保护+守护钩子；停更根因=增量只补新股）~~⑤Y1/Y8 float_mv 靠实时 tick~~ ✅ 已接线（tdx float_shares 兜底，单位=股实测）②**SEC3 资金流仍缺 15/31 板块**（东财 fflow 端点对 801120/801720/801890/801950 等持续封禁+部分 EMPTY，09-05/06 多轮 30s 间隔重试 0 成功；SEC3 fail-open 得 0；恢复手段：`python -m prism.market_data --build-sectors`（增量只补缺的）或等东财解封；勿用东财 BK 码回填——口径不同会污染申万体系）
 - **市场数据缓存基线**（09-06）：板块K线 31 行业到 09-02（申万源乐咕自身延迟，`--build-sectors --source sw` 下一交易日收盘后追平）；global NDX/SPX/DJIA/UDI 09-04（新浪源）、US10Y/VIX 09-03（FRED）；fundamental_cache.json 按 asof 分日后旧条目仍兼容（key 含日期段）
 - **东财 push2(clist) 09-07 起封禁中**（RemoteDisconnected，裸 requests 同样失败）。**09-13 复查：`push2his` 也已封**（全球指数/上证基准采集全部 RemoteDisconnected；而 09-06 时它还活着）→ 后果：benchmark 停更 09-07、flow_rank 仍 0 天、flow 仍 16/31、UDI 停 09-04（新浪/FRED 均无美元指数序列）。**benchmark 的可行替代=复用已建好的 `tdx_source`（通达信 get_index_bars 取上证指数）**，待接线
-- **miniQMT 实盘接入缺口**（09-13 评估，详见体检报告 §3.2）：①**新引擎→实盘出口缺失**（`trader.run_daily` 无人调度；`paper_daemon` 明确不写 QMT_SIGNALS；网页只接暂停开关；唯一入口是 v04 时代 `strategy_close_pick.py`，其 `close_pick_state.json` 停在 08-11）②仓位=100 股占位非净值比例 ③卖出链路割裂（`positions.json` 不存在，与 `exit_rules.py` 不共享）④成交回报未回写 prism 账本 ⑤风控硬约束缺失（无日内亏损/持仓上限/跌停保护）⑥信号幂等不足（prism 侧重启会重发）⑦无节假日日历 ⑧卖出未校验 T+1 `can_use_volume`。**上线三步验收（DRY_RUN→sim→小额真实单）一步未做**
+- **miniQMT 实盘接入缺口**（09-13 评估，详见体检报告 §3.2）：**P0 两项已落地（09-13 晚）**——①**prism 引擎→实盘出口**：新增 `prism/live_daemon.py`（15:05 收盘选股只落计划 → 次日 09:26-09:35 写 BUY 信号 + 记 `positions.json` → 盘中卖出巡检；默认 dry-run，`--live` 才落信号，只写信号文件绝不下单）②**卖出链路**：复用 `exit_rules`（新增 `enforce_t1` / `can_use_volume` / `is_limit_down` / `today` 注入）+ `prism/live_account.py`（只读账户，`calc_buy_volume` 按总资产×execution.pct 算整手）③顺带补：确定性 order_id 幂等（#6）、券商持仓对账（#4 部分）、持仓上限/单只比例/账户查询失败 fail-closed（#5 部分）、T+1（#8）。测试新增 `prism/tests/test_live_daemon.py` 22 例，全量 **720 绿**。**仍缺**：交易日历（仅 weekday，靠桥端 armed 兜底）、真实成交价/费用回写、日内最大亏损/停牌识别；**上线三步验收（DRY_RUN→sim→小额真实单）一步未做**——演练入口 `python -m prism.live_daemon`（默认零副作用）
