@@ -4,9 +4,27 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+import pytest
+
 from prism.registry import get_factor
 
 import prism.factors  # noqa: F401  触发因子库扫描注册(SEC1/SEC2)
+
+
+@pytest.fixture(autouse=True)
+def _ensure_real_factor_library():
+    """本文件全部用例按 id 直取真实因子(SEC1/SEC2/SEC3/SEC4/SEC6), 不注册测试因子。
+
+    它因此隐含依赖"注册表里恰好是真实因子库"。而其他套件的用例
+    (test_backtest / test_registry 等)会在自己的 autouse fixture 里
+    reg.reset() 换成测试因子, 一旦"还原"快照取在被污染之后, 真实库就会在
+    整个 session 里消失 —— 表现为本文件整片 UnknownFactorError(沙箱下稳定复现
+    21 例)。此处按需强制重扫, 让本文件不依赖外部状态、自足可跑。
+    """
+    from prism import registry as _reg
+    if "SEC1" not in _reg.FACTORS:
+        _reg.scan_factors("prism.factors", force=True)
+    yield
 
 
 def _ctx(code="600000.SH", sector="BK0475", closes=None):

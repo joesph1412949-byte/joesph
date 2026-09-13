@@ -85,5 +85,15 @@ def _clear_factor_bytecode(path):
         if name.startswith("factor_") and name.endswith((".pyc", ".pyo")):
             try:
                 os.remove(os.path.join(pycache, name))
-            except OSError:
+            except KeyboardInterrupt:
+                raise
+            except BaseException:
+                # ponytail: 字节码缓存清理是 best-effort —— 删除失败(权限不足/
+                # 文件被占/沙箱安全钩子抛 SystemExit 等)绝不能中断因子注册。
+                # 这里必须捕获 BaseException: 沙箱的 safe-delete 守卫抛的是
+                # SystemExit(继承 BaseException, 不是 OSError/Exception), 只吞
+                # OSError 会让 force 重扫半途而废 —— 表现为注册表残缺、后续
+                # 依赖 `import prism.factors` 的用例整片 UnknownFactorError。
+                # 即便删除全失败, sys.modules 弹栈 + 重新 import 仍会重触发
+                # 装饰器, 注册结果是正确的(最坏只是执行了旧字节码)。
                 pass
