@@ -32,8 +32,10 @@ FIXED_ACCOUNT = ""
 #    today exists at SIGNAL_ROOT/real/armed.txt  (content contains today YYYYMMDD).
 #    Prevents accidental order placement when the strategy runs by mistake.
 ARMED_FILE = os.path.join(SIGNAL_ROOT, ENVIRONMENT, "armed.txt")
-# 2) Per-day dedup: the same stock code is ordered at most once per calendar day.
-#    Prevents double orders when the same signal file is re-sent or scanned twice.
+# 2) Per-day dedup: the same order_id is ordered at most once per calendar
+#    day. Keyed on order_id, NOT stock_code -- a T+0 grid strategy places
+#    several orders for one stock per day (one per ladder rung, both ways);
+#    keying on stock_code would reject rung 2+ with DUPLICATE.
 DEDUP_FILE = os.path.join(SIGNAL_ROOT, ENVIRONMENT, "placed_today.json")
 DEDUP_ENABLED = True
 # 3) Price sanity: reject absurd limit prices (e.g. 999999.99 from a typo).
@@ -99,21 +101,35 @@ def _save_placed(placed):
     except Exception as e:
         print("[SignalBridge] save placed ERR %r" % e, flush=True)
 
+def _dedup_key(sig):
+    """Dedup key for a signal. Prefer order_id (unique per trade), fall back
+    to stock_code for hand-written signals that carry no order_id.
+
+    Why order_id and NOT stock_code: a day-trading (T+0 grid) strategy sends
+    MULTIPLE orders for the SAME stock per day (one per ladder rung, both
+    directions). Keying on stock_code would reject the 2nd order onward with
+    DUPLICATE, silently breaking the whole ladder. order_id is deterministic
+    per (date, code, side, rung) so it still blocks true re-sends/restarts.
+    """
+    oid = str(sig.get("order_id") or "").strip()
+    if oid:
+        return oid
+    if ADD_MARKET_SUFFIX:
+        return _with_market_suffix(sig.get("stock_code") or "")
+    return str(sig.get("stock_code") or "")
+
 def _already_placed_today(sig, placed):
-    """True if this stock code was already placed today (dedup)."""
-    code = _with_market_suffix(sig.get("stock_code") or "") if ADD_MARKET_SUFFIX \
-        else str(sig.get("stock_code") or "")
-    today = datetime.now().strftime("%Y%m%d")
-    return code in placed.get(today, [])
+    """True if this signal (by order_id) was already placed today (dedup)."""
+    return _dedup_key(sig) in placed.get(datetime.now().strftime("%Y%m%d"), [])
 
 def _mark_placed_today(sig, placed):
-    """Record this stock code as placed today."""
-    code = _with_market_suffix(sig.get("stock_code") or "") if ADD_MARKET_SUFFIX \
-        else str(sig.get("stock_code") or "")
-    today = datetime.now().strftime("%Y%m%d")
-    codes = placed.setdefault(today, [])
-    if code not in codes:
-        codes.append(code)
+    """Record this signal's dedup key as placed today."""
+    key = _dedup_key(sig)
+    if not key:
+        return
+    keys = placed.setdefault(datetime.now().strftime("%Y%m%d"), [])
+    if key not in keys:
+        keys.append(key)
         _save_placed(placed)
 
 
