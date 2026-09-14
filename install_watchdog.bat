@@ -5,11 +5,11 @@ chcp 65001 >nul
 setlocal
 
 set PY=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe
-set SCRIPT=D:\cc-joesph\watchdog.py
+set SCRIPT=D:\cc-joesph\ops\watchdog.py
 set TASK=QMT_Quant_Watchdog
 
 echo [1/2] 创建任务计划: %TASK%
-schtasks /Create /TN %TASK% /SC ONSTART /RU "%USERNAME%" /RL LIMITED /TR "\"%PY%\" -NoProfile -WindowStyle Hidden -Command \"cd /d D:\cc-joesph; python watchdog.py\"" /F
+schtasks /Create /TN %TASK% /SC ONSTART /RU "%USERNAME%" /RL LIMITED /TR "\"%PY%\" -NoProfile -WindowStyle Hidden -Command \"cd /d D:\cc-joesph; python ops\watchdog.py\"" /F
 if errorlevel 1 (
     echo    创建失败, 请确认已用管理员身份运行。
     pause

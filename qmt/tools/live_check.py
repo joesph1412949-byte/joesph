@@ -6,8 +6,8 @@
 order_stock / order_stock_async / cancel_order_stock / passorder 等任何下单接口。
 
 用法:
-    python qmt_live_check.py            # 全量自检
-    python qmt_live_check.py --quiet    # 只打印失败项与结论
+    python -m qmt.tools.live_check            # 全量自检
+    python -m qmt.tools.live_check --quiet    # 只打印失败项与结论
 
 退出码: 0 = 关键项全通过; 1 = 存在 FAIL(阻断实盘); 2 = 存在 WARN(可继续但不完备)
 """
@@ -24,20 +24,22 @@ try:
 except Exception:
     pass
 
-REPO = os.path.dirname(os.path.abspath(__file__))
+# 本文件位于 qmt/tools/, 上三级才是项目根
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+RUNTIME = os.path.join(REPO, "runtime")
 QMT_DATA_DIR = r"D:\QMT\userdata_mini"
 SIGNAL_ROOT = r"D:/QMT_SIGNALS"
 PAUSE_FILE = os.path.join(SIGNAL_ROOT, "paused")
 ARMED_FILE = os.path.join(SIGNAL_ROOT, "real", "armed.txt")
 DEDUP_FILE = os.path.join(SIGNAL_ROOT, "real", "placed_today.json")
-BRIDGE = os.path.join(REPO, "qmt_signal_bridge_real.py")
+BRIDGE = os.path.join(REPO, "qmt", "bridge", "signal_bridge_real.py")
 STRATEGY_POINTER = os.path.join(REPO, "prism", "strategies", ".active.json")
-MKT_CACHE = os.path.join(REPO, ".market_data_cache.pkl")
-ZT_CACHE = os.path.join(REPO, ".zt_history_cache.pkl")
+MKT_CACHE = os.path.join(RUNTIME, "cache", ".market_data_cache.pkl")
+ZT_CACHE = os.path.join(RUNTIME, "cache", ".zt_history_cache.pkl")
 LIVE_DAEMON = os.path.join(REPO, "prism", "live_daemon.py")
 LIVE_ACCOUNT = os.path.join(REPO, "prism", "live_account.py")
-LIVE_STATE = os.path.join(REPO, "live_state.json")
-POSITIONS = os.path.join(REPO, "positions.json")
+LIVE_STATE = os.path.join(RUNTIME, "state", "live_state.json")
+POSITIONS = os.path.join(RUNTIME, "state", "positions.json")
 
 OK, WARN, FAIL = "OK", "WARN", "FAIL"
 _rows = []
@@ -242,10 +244,10 @@ def check_live_exit():
             path if os.path.isfile(path) else "缺失: %s" % path)
     try:
         import importlib
-        for mod in ("exit_rules", "prism.live_account", "prism.live_daemon"):
+        for mod in ("shared.exit_rules", "prism.live_account", "prism.live_daemon"):
             importlib.import_module(mod)
         rec(OK, "实盘出口", "模块可导入",
-            "exit_rules / prism.live_account / prism.live_daemon")
+            "shared.exit_rules / prism.live_account / prism.live_daemon")
     except Exception as e:
         rec(FAIL, "实盘出口", "模块可导入", "失败: %r" % (e,))
 

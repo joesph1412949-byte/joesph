@@ -33,15 +33,16 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from exit_rules import PositionBook, is_limit_down
+from shared.common import STATE_DIR
+from shared.exit_rules import PositionBook, is_limit_down
 from prism import trader
 from prism.live_account import LiveAccount, calc_buy_volume
 
 LOG = logging.getLogger("live_daemon")
 
 REPO = Path(__file__).resolve().parent.parent
-STATE_FILE = REPO / "live_state.json"
-POSITIONS_FILE = REPO / "positions.json"
+STATE_FILE = STATE_DIR / "live_state.json"
+POSITIONS_FILE = STATE_DIR / "positions.json"
 
 PICK_SLOT = "15:05"               # 收盘选股时点(策略 execution.pick_slot)
 OPEN_WINDOW = ("09:26", "09:35")  # 次日开盘买入窗口(execution.open_window)

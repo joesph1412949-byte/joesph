@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))  # 项目根(common.py)
-from common import with_market_suffix as _with_market_suffix
+from shared.common import with_market_suffix as _with_market_suffix
 
 
 class FactorComputeError(Exception):

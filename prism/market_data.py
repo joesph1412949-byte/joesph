@@ -26,6 +26,8 @@ import time
 from datetime import date, timedelta
 from pathlib import Path
 
+from shared.common import CACHE_DIR
+
 try:
     import requests
 except Exception:  # pragma: no cover - 极少数环境无 requests
@@ -33,9 +35,9 @@ except Exception:  # pragma: no cover - 极少数环境无 requests
 
 logger = logging.getLogger(__name__)
 
-# 缓存路径(与 .zt_history_cache.pkl 同级, 已 gitignore)
-CACHE_PATH = Path(__file__).parent.parent / ".market_data_cache.pkl"
-INDEX_PATH = Path(__file__).parent.parent / ".market_data_index.pkl"
+# 缓存路径: 统一收在 runtime/cache/ (已 gitignore, 见 shared/common.py)
+CACHE_PATH = CACHE_DIR / ".market_data_cache.pkl"
+INDEX_PATH = CACHE_DIR / ".market_data_index.pkl"
 
 # 回填起点(用户选定: 2026年初至今)
 BACKFILL_BEG = "20260101"

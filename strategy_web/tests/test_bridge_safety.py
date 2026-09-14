@@ -6,9 +6,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))  # 项目根(桥在根目录)
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))  # 项目根
 
-import qmt_signal_bridge_real as bridge
+from qmt.bridge import signal_bridge_real as bridge
 
 
 # ---------- 授权文件机制 ----------

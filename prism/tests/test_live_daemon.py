@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from exit_rules import ExitRule, PositionBook, is_limit_down
+from shared.exit_rules import ExitRule, PositionBook, is_limit_down
 from prism.live_account import calc_buy_volume
 from prism.live_daemon import LiveDaemon, next_weekday
 

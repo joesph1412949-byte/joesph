@@ -5,7 +5,7 @@ from datetime import date
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from exit_rules import ExitRule, PositionBook
+from shared.exit_rules import ExitRule, PositionBook
 
 
 def test_stop_loss_triggers():

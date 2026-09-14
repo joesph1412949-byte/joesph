@@ -37,7 +37,7 @@ import threading as _threading
 
 from flask import Flask, jsonify, render_template, request
 
-from common import setup_logging
+from shared.common import setup_logging
 
 # 旧数据源模块(单源: strategy_web, 经上方路径注入解析; prism.data.DataProvider
 # 内部同名导入复用同一份类定义, 见 prism/data.py)
@@ -66,7 +66,7 @@ app = Flask(__name__)
 
 # 回测数据源(东财, backtest_cli): 导入失败 → /api/backtest 返回 500
 try:
-    from backtest_cli import zt_feed, kline_feed  # noqa: F401
+    from backtest.cli import zt_feed, kline_feed  # noqa: F401
     _BACKTEST_FEEDS_OK = True
 except Exception:
     zt_feed = None

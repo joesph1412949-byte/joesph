@@ -5,6 +5,11 @@
 import json
 import logging
 from datetime import date, datetime, timedelta
+from pathlib import Path
+
+# 缓存落盘位置: 统一收在 runtime/cache/ (本文件上两级 = 项目根)
+_DEFAULT_CACHE_PATH = (Path(__file__).resolve().parent.parent
+                       / "runtime" / "cache" / "fundamental_cache.json")
 
 try:
     import requests
@@ -67,7 +72,7 @@ class FundamentalFeed:
     HEADERS = {"User-Agent": "Mozilla/5.0",
                "Referer": "http://quote.eastmoney.com/"}
 
-    def __init__(self, http_get=None, cache_path="fundamental_cache.json",
+    def __init__(self, http_get=None, cache_path=_DEFAULT_CACHE_PATH,
                  timeout=5.0, asof=None):
         self.http_get = http_get or _default_http_get
         self.cache_path = cache_path

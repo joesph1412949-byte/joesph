@@ -16,8 +16,8 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
-from common import LOG_DIR, setup_logging
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # 项目根
+from shared.common import LOG_DIR, setup_logging
 
 logger = setup_logging("watchdog")
 

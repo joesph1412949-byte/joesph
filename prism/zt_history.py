@@ -21,12 +21,14 @@ import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from shared.common import CACHE_DIR
+
 logger = logging.getLogger(__name__)
 
-# 缓存路径(与 common.LOG_DIR 同级)
-CACHE_PATH = Path(__file__).parent.parent / ".zt_history_cache.pkl"
+# 缓存路径: 统一收在 runtime/cache/ (见 shared/common.py)
+CACHE_PATH = CACHE_DIR / ".zt_history_cache.pkl"
 # 按日索引路径: date → [{code, boards}], 查询 O(1)
-INDEX_PATH = Path(__file__).parent.parent / ".zt_history_index.pkl"
+INDEX_PATH = CACHE_DIR / ".zt_history_index.pkl"
 
 # 拉多少根日K(约1.5年交易日)
 KLINE_COUNT = 400

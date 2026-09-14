@@ -11,6 +11,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+from shared.common import STATE_DIR
 from prism import engine
 from prism.engine import load_strategy
 
@@ -75,7 +76,7 @@ class PaperAccount:
         if state_path is not None:
             self.state_path = Path(state_path)
         else:
-            self.state_path = Path(__file__).parent.parent / STATE_FILENAME
+            self.state_path = STATE_DIR / STATE_FILENAME
         self.state = None
         self._strategy = None
 

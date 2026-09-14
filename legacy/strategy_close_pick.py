@@ -3,9 +3,9 @@
 正式收盘选股策略：选今日涨停的科技股 → 次日挂涨停价买入
 ====================================================================
 用法（在本机 Python 运行）：
-  python strategy_close_pick.py screen    # 收盘后选股, 生成明日候选清单
-  python strategy_close_pick.py send      # 次日开盘前, 把候选清单发成买入信号
-  python strategy_close_pick.py send --code 002859.SZ   # 只发指定股票
+  python legacy/strategy_close_pick.py screen    # 收盘后选股, 生成明日候选清单
+  python legacy/strategy_close_pick.py send      # 次日开盘前, 把候选清单发成买入信号
+  python legacy/strategy_close_pick.py send --code 002859.SZ   # 只发指定股票
 
 为什么分两步：
   QMT 桥每 2 秒扫一次 pending, 拿到信号会立刻 passorder。
@@ -32,15 +32,21 @@ try:
 except Exception:
     pass
 
+# 本脚本已移入 legacy/, 运行时把项目根注入 sys.path 才能 import shared.*
+_ROOT = str(Path(__file__).resolve().parent.parent)
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
 from xtquant import xtdata
 
-from common import SIGNAL_ROOT, SECTORS, limit_ratio_for_code, with_market_suffix
-from exit_rules import PositionBook
+from shared.common import (SIGNAL_ROOT, SECTORS, STATE_DIR,
+                           limit_ratio_for_code, with_market_suffix)
+from shared.exit_rules import PositionBook
 
 # ====================== 配置区 ======================
 ENV = "sim"                          # "sim"模拟盘 / "real"真实盘
-STATE_FILE = Path(__file__).parent / "close_pick_state.json"   # 候选清单存盘
-POSITIONS_FILE = Path(__file__).parent / "positions.json"      # 持仓档案(卖出策略用)
+STATE_FILE = STATE_DIR / "close_pick_state.json"    # 候选清单存盘
+POSITIONS_FILE = STATE_DIR / "positions.json"       # 持仓档案(卖出策略用)
 VOLUME = 100                         # 每只 100 股(无资金查询时的兜底)
 MAX_PICKS = 5                        # 每天最多选几只(防止一次发太多)
 ACCOUNT = ""                         # 留空让 QMT 端自动用登录账号

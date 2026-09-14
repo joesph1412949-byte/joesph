@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from common import SIGNAL_ROOT
+from shared.common import SIGNAL_ROOT
 
 PAUSE_FILE = Path(r"D:/QMT_SIGNALS/paused")
 

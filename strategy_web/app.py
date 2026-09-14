@@ -16,7 +16,7 @@ import threading as _threading
 from flask import Flask, jsonify, render_template, request
 
 sys.path.insert(0, str(Path(__file__).parent.parent))  # 项目根(common.py)
-from common import setup_logging
+from shared.common import setup_logging
 
 from data_source import DataSource, DataSourceError
 from manual_store import ManualStore

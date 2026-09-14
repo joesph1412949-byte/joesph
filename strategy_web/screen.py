@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))  # 项目根(common.py)
-from common import SECTORS
+from shared.common import SECTORS
 
 from data_source import DataSource
 from eastmoney import EastMoneyFeed

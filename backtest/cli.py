@@ -2,9 +2,9 @@
 """回测 CLI: 用东财真实数据(历史涨停池 + 历史K线)运行回测。
 
 用法:
-  python backtest_cli.py --start 20260701 --end 20260731
-  python backtest_cli.py --start 20260701 --end 20260731 --compare
-  python backtest_cli.py --start 20260701 --end 20260731 \
+  python -m backtest.cli --start 20260701 --end 20260731
+  python -m backtest.cli --start 20260701 --end 20260731 --compare
+  python -m backtest.cli --start 20260701 --end 20260731 \
       --min-limit 30 --picks 5 --hold 3
 
 数据源: 东财公开接口(getTopicZTPool 涨停池 / push2his K线), 无需 QMT。

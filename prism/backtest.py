@@ -30,7 +30,7 @@ from datetime import date, timedelta
 
 import pandas as pd
 
-from exit_rules import ExitRule
+from shared.exit_rules import ExitRule
 from prism import registry as reg
 from prism import sector_score
 from prism.context import FactorContext

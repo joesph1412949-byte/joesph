@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))  # 项目根(common.py)
 
-from common import (SIGNAL_ROOT, SECTORS, LOG_DIR, em_code_to_tick_key,
+from shared.common import (SIGNAL_ROOT, SECTORS, LOG_DIR, em_code_to_tick_key,
                     limit_ratio_for_code, setup_logging, with_market_suffix)
 
 

@@ -22,8 +22,19 @@ SIGNAL_ROOT = Path(r"D:/QMT_SIGNALS")
 # Default tech-sector pool used for sector mapping (F4/S6) and close-pick.
 SECTORS = ["SW1电子", "SW1计算机", "SW1通信"]
 
+# ------------------------------------------------------- runtime paths
+# 项目根 = 本文件的上两级(shared/common.py -> shared -> 项目根)。
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# 所有"运行期产出"统一收在 runtime/ 下, 与代码分离, 便于备份与清理:
+#   runtime/cache/  可重建的采集缓存
+#   runtime/state/  不可重建的账本与状态
+#   runtime/log/    组件日志
+RUNTIME_DIR = PROJECT_ROOT / "runtime"
+CACHE_DIR = RUNTIME_DIR / "cache"
+STATE_DIR = RUNTIME_DIR / "state"
+
 # Where component logs go (web app, qmt_sync, close-pick, watchdog).
-LOG_DIR = Path(__file__).parent / "log"
+LOG_DIR = RUNTIME_DIR / "log"
 
 # ---------------------------------------------------------------- logging
 

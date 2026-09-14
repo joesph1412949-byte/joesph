@@ -13,7 +13,7 @@ _ROOT = str(Path(__file__).parent.parent)
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from common import with_market_suffix  # noqa: E402
+from shared.common import with_market_suffix  # noqa: E402
 
 
 def _parse_timetag_hhmm(ts):
