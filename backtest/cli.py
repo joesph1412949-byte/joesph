@@ -273,8 +273,10 @@ def main():
     ap.add_argument("--end", required=True, help="结束日期 YYYYMMDD")
     ap.add_argument("--strategy", default="default",
                     help="策略 id(prism/strategies/, 默认 default)")
-    ap.add_argument("--sell-tp", type=float, default=None, help="止盈%(覆盖策略配置)")
-    ap.add_argument("--sell-sl", type=float, default=None, help="止损%(覆盖策略配置)")
+    ap.add_argument("--sell-tp", type=float, default=None,
+                    help="止盈百分比(覆盖策略配置, 如 0.15)")
+    ap.add_argument("--sell-sl", type=float, default=None,
+                    help="止损百分比(覆盖策略配置, 如 0.08)")
     ap.add_argument("--hold", type=int, default=None, help="持有天数(覆盖策略配置)")
     ap.add_argument("--oos", action="store_true",
                     help="运行样本外验证(前后半段对比, 防过拟合)")
