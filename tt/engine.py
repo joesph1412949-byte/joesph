@@ -202,8 +202,11 @@ class TTEngine:
 
         ladder = ctx["ladder"]
         n_units = int(ladder.get("n_units", 5))
+        # max_units: 日内实际使用的最大档数(底仓容量决定), 缺省=n_units。
+        max_units = int(self.grid_cfg.get("max_units") or n_units)
+        depth = min(n_units, max_units)
         # HALF: 只做到前一半档位; 整数至少 1 档
-        n_eff = max(1, int(round(n_units * ctx["scale"]))) \
+        n_eff = max(1, int(round(depth * ctx["scale"]))) \
             if ctx["scale"] > 0 else 0
 
         high = ctx.get("high") or ctx["last"]
@@ -264,6 +267,27 @@ class TTEngine:
         if price is None or price <= 0:
             return bad("LADDER_MISS", "第%d档无价" % unit)
 
+        # ---- 运行时交叉校验(band_mode=sigma 专用) ----
+        # sigma 模式的 band 由日波动率×band_k 现算, 配置期无法静态判定最深档偏离。
+        # 这里算完就用同口径校验: 若 depth*band > max_price_deviation_pct, 说明
+        # 深层档位会被偏离闸门整片拦掉(功能静默缺失) → 直接报错并给出可做档数。
+        # 用 max_units(实际用几档) 而非 n_units(阶梯算几档) —— 后者可大于前者。
+        band = float(ladder.get("band") or 0)
+        max_dev = float(self.cfg.get("risk", {}).get(
+            "max_price_deviation_pct", 0.05) or 0)
+        eff_depth = min(int(ladder.get("n_units", 5)),
+                        int(self.grid_cfg.get("max_units")
+                            or ladder.get("n_units", 5)))
+        if band > 0 and max_dev > 0:
+            worst_dev = eff_depth * band
+            if worst_dev > max_dev + 1e-9:
+                usable = int(max_dev / band)
+                return bad("DEPTH_BEYOND_DEVIATION",
+                           "最深档(第%d档)固有偏离 %.2f%% > 偏离闸门 %.2f%% "
+                           "(band=%.3f%%×%d) → 该档必被拦; 本配置下最多做到第 %d 档"
+                           % (eff_depth, worst_dev * 100, max_dev * 100,
+                              band * 100, eff_depth, usable))
+
         # ---- 股数: 浮仓单位金额 ÷ 挂单价 ----
         weight = float(sym.get("weight") or 0)
         n_units = int(ladder.get("n_units", 5))
@@ -308,10 +332,16 @@ class TTEngine:
                     volume = vol2
 
         # ---- 风控总闸门 ----
+        # ladder_price_ref 语义 = "本该挂的档位价"(阶梯理论价), 与 price(实际委托价)
+        # 分开传入, 让 check_slippage 真正生效。计划阶段两者相同 → 滑点 0 恒过;
+        # 执行层(executor)改用对手价/追价时, 传入真实委托价, 闸门才有意义。
+        # 历史缺陷: 此处曾传 ladder_price_ref=price(同值) → 滑点恒 0, 纯装饰。
+        ladder_ref = grid.ladder_price(ladder, side, unit)
         max_net_buy_qty = self._max_net_buy_qty(acct, sym, price)
         v = self.gate.check(
             side=side, code=code, price=price, volume=volume,
-            ref_price=ctx["ref"], ladder_price_ref=price,
+            ref_price=ctx["ref"],
+            ladder_price_ref=ladder_ref if ladder_ref else price,
             last_close=ctx["last_close"], hhmm=hhmm,
             session_cfg=self.session_cfg, lot=self.lot,
             sold_today=sold_today, bought_today=bought_today,

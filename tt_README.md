@@ -29,7 +29,42 @@ python tt_web/app.py            # http://127.0.0.1:5010
 
 Windows 可双击 `启动做T监控台.bat` / `启动做T守护.bat`。
 
-### 模拟通道（QMT 模拟盘）
+### 直连模式（推荐 — 外部 Python 直接下单）
+
+**为什么用直连**：实测 `xtquant.xttrader` 在本机可直接 `connect()==0`，
+且 `order_stock / order_stock_async / cancel_order_stock*` 全部可用，因此
+**无需把桥脚本粘进 QMT 策略编辑器**。那条老路受 GBK 编码约束、无法调试、
+无法回归测试，且 QMT 内 `python/SIGNALBRIDGE.py` 是**密文**、无法核对版本。
+
+```bash
+# 直连演练（连真实账户只读 + 算意图，dry-run 默认开，绝不下单）
+python -m tt.daemon --direct --once
+
+# 直连守护（dry-run，长期挂着看它想干什么）
+python -m tt.daemon --direct --interval 5
+
+# 直连实盘（需 paused 不存在 + real/armed.txt 含今日日期）
+python -m tt.daemon --direct --live --interval 5
+```
+
+Windows 双击：`启动做T直连守护.bat`（演练）/ `启动做T实盘直连.bat`（实盘）。
+
+**每日放行条**（人工闸门，替代桥端的 armed 检查）：
+
+```bash
+python tt/arm_today.py            # 写今日放行条(并确保无急停)
+python tt/arm_today.py --status   # 只看状态
+python tt/arm_today.py --pause    # 一键急停
+python tt/arm_today.py --resume   # 解除急停
+python tt/arm_today.py --disarm   # 撤销放行条
+```
+
+Windows 可双击 `做T-今日放行.bat`。
+
+> **每天必须重新放行**：`armed.txt` 里的日期是昨天的 → 今天不放行、零报单。
+> 这是刻意的设计：守护可以常驻，但**每天必须有人点头**。
+
+### 信号文件通道（旧路，仍保留）
 
 ```bash
 # ⑤ 模拟通道演练（信号写 D:/QMT_SIGNALS/sim/，仍不下发）
@@ -55,15 +90,15 @@ Windows 可双击 `启动做T模拟守护.bat`（默认 DRY-RUN，要真下发�
 
 ---
 
-## 2. 安全模型（三道闸门 + 九道风控）
+## 2. 安全模型（三道闸门 + 十一风控）
 
-**闸门**（必须同时满足才会写信号；任一不满足只记录、不下发）：
+**闸门**（两条通道都串联；任一不满足只记录、不下发）：
 
 | 闸门 | 位置 | 说明 |
 |---|---|---|
-| `dry_run` | 配置 / `--live` | 默认 True，只算不落盘 |
+| `dry_run` | 配置 / `--live` | 默认 True，只算不落盘/不报单 |
 | `paused` | `D:/QMT_SIGNALS/paused` | 一键急停，存在即整体停发 |
-| `armed` | `D:/QMT_SIGNALS/<env>/armed.txt` | 须含当日 `YYYYMMDD`，桥端最终闸门 |
+| `armed` | `D:/QMT_SIGNALS/<env>/armed.txt` | 须含当日 `YYYYMMDD`，最终闸门 |
 
 **风控**（`tt/risk.py`，按顺序短路，任一不过即拒并记录原因码）：
 
@@ -84,7 +119,15 @@ Windows 可双击 `启动做T模拟守护.bat`（默认 DRY-RUN，要真下发�
 **T+1 的两道保险**：账本层"买回不超过已卖出"（日内净持仓只减不增）
 + 券商层 `can_use_volume` 硬约束。两者同时满足才算合规。
 
-**本进程绝不下单**，只写信号文件；真实成交由 QMT 桥端完成。
+**两条通道的职责边界（重要）**：
+
+| 通道 | 谁下单 | 铁律 |
+|---|---|---|
+| **直连**（`--direct`） | `tt/executor.py`（外部 Python `order_stock`） | 唯一会报单的地方；账户号必须匹配才放行 |
+| **信号文件**（默认） | QMT 内的 `signal_bridge_real.py` | 策略进程只写文件、绝不下单 |
+
+直连通道的执行层还有**纵深防御**（即便 engine 已查过也再兜一道）：
+单笔金额上限、委托价上限、整手校验、账户一致性、`order_id` 进程内幂等。
 
 ---
 
@@ -119,18 +162,23 @@ tt/                       策略子包
 ├── state.py              当日T账本 + 档位水位 + 跨日重置
 ├── market.py             行情(QMT xtdata / 离线样本)
 ├── engine.py             编排: 行情+网格+账本+风控 → 意图
-├── daemon.py             守护: 轮询 → 闸门 → 落信号 → 记账
+├── executor.py           直连执行器(唯一会真报单的地方)
+├── arm_today.py          人工闸门工具(放行/急停/看状态)
+├── daemon.py             守护: 轮询 → 闸门 → 落信号/报单 → 记账
 ├── sample_data/          离线样本K线(非交易时段演示用)
-└── tests/                88 例 pytest
+└── tests/                140 例 pytest
 
 tt_web/                   可视化
 ├── app.py                Flask(只监听 127.0.0.1)
 ├── templates/index.html  ECharts 面板
 └── static/echarts.min.js
 
-tt_state.json             运行时状态(当日账本, 自动跨日重置)
-tt_runtime.json           守护每轮写的快照(面板优先读它)
+runtime/state/tt_state.json    运行时状态(当日账本, 自动跨日重置)
+runtime/state/tt_runtime.json  守护每轮写的快照(面板优先读它)
 ```
+
+> 路径说明：目录重组后运行数据统一收进 `runtime/`（由 `shared/common.py`
+> 的 `STATE_DIR` 提供，单一真相来源）。`.gitignore` 忽略其内容。
 
 ---
 

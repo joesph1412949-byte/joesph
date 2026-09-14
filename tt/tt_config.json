@@ -8,6 +8,7 @@
     "band_mode": "sigma",
     "band_k": 1.0,
     "n_units": 5,
+    "max_units": 3,
     "ref_mode": "prev_close",
     "sigma_window": 60
   },
@@ -49,7 +50,7 @@
       "name": "中国海油",
       "enabled": true,
       "weight": 0.15,
-      "band_pct": 2.0,
+      "band_pct": 1.65,
       "n_units": 5,
       "switch": {
         "dev_max_pct": 4.0,

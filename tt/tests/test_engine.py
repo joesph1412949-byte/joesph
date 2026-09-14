@@ -288,3 +288,75 @@ def test_config_enabled_symbols_helper():
         {"code": "603268.SH", "enabled": False}]})
     names = [s["code"] for s in tt_config.enabled_symbols(cfg)]
     assert names == ["600900.SH"]
+
+
+# ------------------------------------------------------------ max_units (档数解耦)
+
+def test_max_units_caps_depth(eng_factory, ledger, sym, snap_factory):
+    """max_units=2 时, 即使价格穿越 5 档也只做 2 档。"""
+    ledger.load()
+    # 把行情推到远超第5档
+    eng, _ = eng_factory({"600900.SH": snap_factory(
+        last=28.45, last_close=28.09, high=29.50, low=28.10,
+        ma20=28.19, ma20_prev=28.19)})
+    eng.grid_cfg["max_units"] = 2
+    ctx, intents = eng.plan_symbol(sym, eng.account_state(), OPEN, "OPEN")
+    assert ctx["n_eff_units"] == 2
+    sells = [i for i in intents if i.side == "SELL"]
+    assert len(sells) == 2                      # 单轮上限 2 且深度上限 2
+
+
+def test_max_units_does_not_change_unit_size(eng_factory, ledger, sym,
+                                             snap_factory):
+    """max_units 只限制档数, 不改变单档股数(n_units 仍决定分母)。"""
+    ledger.load()
+    eng, _ = eng_factory({"600900.SH": snap_factory(
+        last=28.45, last_close=28.09, high=28.57, low=28.10,
+        ma20=28.19, ma20_prev=28.19)})
+    a = eng.plan_symbol(sym, eng.account_state(), OPEN, "OPEN")[1]
+    vol_a = [i for i in a if i.side == "SELL"][0].volume
+
+    ledger2 = eng.ledger
+    eng.grid_cfg["max_units"] = 3
+    b = eng.plan_symbol(sym, eng.account_state(), OPEN, "OPEN")[1]
+    vol_b = [i for i in b if i.side == "SELL"][0].volume
+    assert vol_a == vol_b
+
+
+def test_default_max_units_equals_n_units():
+    """配置未设 max_units 时, 应兜底等于 n_units。"""
+    import copy
+    raw = copy.deepcopy(tt_config.DEFAULT_CONFIG)
+    raw["grid"] = {"band_mode": "sigma", "band_k": 1.0, "n_units": 4,
+                   "ref_mode": "prev_close", "sigma_window": 60}
+    raw.pop("paper_positions", None)
+    raw["symbols"] = [{"code": "600900.SH", "name": "X", "enabled": True,
+                       "weight": 0.1, "band_pct": 0.5, "n_units": 4}]
+    # 直接调 validate, 不走 load() 的深合并 —— 后者会把盘上 tt_config.json
+    # 的 max_units=3 并进来, 与"未设 max_units"的前提冲突。
+    assert "max_units" not in raw["grid"]
+    c = tt_config.validate(raw)
+    assert c["grid"]["max_units"] == 4
+
+
+def test_max_units_above_n_units_rejected():
+    """max_units > n_units 属配置错误, 应报错。"""
+    with pytest.raises(tt_config.ConfigError):
+        tt_config.load(overrides={
+            "grid": {"band_mode": "sigma", "band_k": 1.0, "n_units": 3,
+                     "max_units": 5, "ref_mode": "prev_close",
+                     "sigma_window": 60},
+            "symbols": [{"code": "600900.SH", "name": "X", "enabled": True,
+                         "weight": 0.1, "band_pct": 0.5, "n_units": 3}],
+        })
+
+
+def test_max_units_zero_rejected():
+    with pytest.raises(tt_config.ConfigError):
+        tt_config.load(overrides={
+            "grid": {"band_mode": "sigma", "band_k": 1.0, "n_units": 3,
+                     "max_units": 0, "ref_mode": "prev_close",
+                     "sigma_window": 60},
+            "symbols": [{"code": "600900.SH", "name": "X", "enabled": True,
+                         "weight": 0.1, "band_pct": 0.5, "n_units": 3}],
+        })

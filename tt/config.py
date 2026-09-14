@@ -20,15 +20,17 @@ DEFAULT_CONFIG = {
     "account_id": "",
     "paper_total_asset": 500000.0,   # 账户不可用时的纸面推演基数(仅演示/演练)
     "paper_positions": {             # 纸面底仓(可卖股数), 仅演示用
-        "600900.SH": 5000,
-        "600938.SH": 3000,
-        "601088.SH": 1000
+        "600900.SH": 1000,
+        "600938.SH": 700,
+        "601088.SH": 300,
+        "603268.SH": 100
     },
     "max_units_per_round": 2,        # 单轮单标的最多补几档(防一轮打满)
     "grid": {
         "band_mode": "sigma",      # sigma=日波动率×k | fixed=直接用 band_pct
         "band_k": 1.0,
-        "n_units": 5,
+        "n_units": 5,              # 阶梯深度 + 每档金额分母(总资产×weight÷n_units)
+        "max_units": 5,            # 日内实际使用的最大档数(≤n_units); 底仓容量决定
         "ref_mode": "prev_close",  # prev_close=前收 | open=当日开盘
         "sigma_window": 60,
     },
@@ -163,6 +165,23 @@ def validate(cfg):
         raise ConfigError("grid.sigma_window 应在 [20, 250], 当前 %r" % win)
     grid["band_k"], grid["n_units"], grid["sigma_window"] = k, n, win
 
+    # grid.max_units: 日内实际使用的最大档位数(缺省=n_units)。
+    # 存在的理由: n_units 同时决定「阶梯深度」与「每档金额的分母」
+    # (unit_value = 总资产×weight÷n_units)。当底仓只够 3 档却想让每档
+    # 金额维持 1/5 时, 把 n_units 留 5、max_units 设 3 即可 —— 两个语义解耦。
+    mu = grid.get("max_units")
+    if mu is None:
+        mu = n
+    else:
+        try:
+            mu = int(mu)
+        except (TypeError, ValueError):
+            raise ConfigError("grid.max_units 必须为整数")
+    if not (1 <= mu <= n):
+        raise ConfigError("grid.max_units 应在 [1, %d](即不超过 n_units), 当前 %r"
+                          % (n, mu))
+    grid["max_units"] = mu
+
     # ---- risk ----
     risk = cfg.setdefault("risk", {})
     for name, (lo, hi) in _RISK_BOUNDS.items():
@@ -210,6 +229,31 @@ def validate(cfg):
         # 未给 band_pct 且 band_mode=fixed → 无带宽, 该标的无法做T
         if grid["band_mode"] == "fixed" and s["band_pct"] <= 0:
             raise ConfigError("band_mode=fixed 时 symbols[%d].band_pct 必须 > 0" % i)
+
+        # ---- 交叉校验: 最深"实际使用档"的固有偏离须仍在偏离中枢闸门内 ----
+        # 第 n 档挂单价 = ref*(1 ± band*n) → 固有偏离 = n*band。
+        # 若 max_units*band > max_price_deviation_pct, 深档会被 DEVIATION_TOO_BIG
+        # 静默拦掉(功能缺失而非安全), 故 fail-closed 报错, 强制人显式调参。
+        # 用 max_units(实际用几档) 而非 n_units(阶梯算几档), 后者可大于前者。
+        # 单位: band_pct 是百分数(0.53 = 0.53%), 换算成小数再比。
+        if grid["band_mode"] == "fixed":
+            worst_band = s["band_pct"] / 100.0
+            eff_n = min(s["n_units"], grid["max_units"])
+            if worst_band > 0:
+                worst_dev = eff_n * worst_band
+                if worst_dev > risk["max_price_deviation_pct"] + 1e-9:
+                    raise ConfigError(
+                        "symbols[%d] %s: 实际档数(%d) × band(%.2f%%) = %.2f%% 超过 "
+                        "risk.max_price_deviation_pct(%.2f%%) → 第 %d 档起会被"
+                        "偏离闸门静默拦下。请降 grid.max_units 或收紧 band_pct, "
+                        "或放宽该闸门"
+                        % (i, code, eff_n, s["band_pct"], worst_dev * 100,
+                           risk["max_price_deviation_pct"] * 100,
+                           min(eff_n,
+                               int(risk["max_price_deviation_pct"]
+                                   / worst_band) + 1)))
+        # band_mode=sigma 时带宽由日波动率×band_k 现算, 无法在配置期静态判定,
+        # 由 engine 在算完 meta['band'] 后做同口径运行时校验(见 engine._make_intent)。
 
     return cfg
 

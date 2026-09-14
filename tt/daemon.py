@@ -99,11 +99,15 @@ def write_signals(signals, env="real", root=None):
 
 
 class TTDaemon:
-    """做T守护。依赖可注入(engine/ledger/feed/now_fn)便于离线测试。"""
+    """做T守护。依赖可注入(engine/ledger/feed/now_fn)便于离线测试。
+
+    direct 模式: 不写信号文件, 由 executor 直接下单(外部 Python 直连 miniQMT)。
+    这是与"信号文件→QMT内桥"并列的第二条通道, 二选一。
+    """
 
     def __init__(self, cfg, ledger=None, engine=None, feed=None,
                  dry_run=None, now_fn=None, runtime_path=None,
-                 signal_root=None):
+                 signal_root=None, executor=None, direct=False):
         self.cfg = cfg
         self.ledger = ledger or Ledger(path=STATE_PATH, now_fn=now_fn)
         self.now_fn = now_fn or datetime.now
@@ -119,6 +123,8 @@ class TTDaemon:
             else bool(dry_run)
         self.runtime_path = Path(runtime_path or RUNTIME_PATH)
         self.signal_root = Path(signal_root or SIGNAL_ROOT)
+        self.direct = bool(direct)
+        self.executor = executor
         self.rounds = 0
 
     # ---------------- 一轮 ----------------
@@ -135,10 +141,20 @@ class TTDaemon:
         signals = plan.get("signals", [])
         written = 0
         blocked = ""
+        exec_results = []
         if self.dry_run:
             blocked = "dry_run"
+            if self.direct and signals:
+                exec_results = self._exec_direct(signals, dry_run=True)
         elif paused:
             blocked = "paused(急停开关打开)"
+        elif self.direct:
+            # 直连通道仍要求 armed —— 保留人工放行闸门, 只是不写文件
+            if not armed:
+                blocked = "not_armed: %s" % armed_msg
+            else:
+                exec_results = self._exec_direct(signals, dry_run=False)
+                self._book(signals, plan.get("hhmm", ""))
         elif not armed:
             blocked = "not_armed: %s" % armed_msg
         else:
@@ -148,6 +164,7 @@ class TTDaemon:
         runtime = dict(plan)
         runtime.update({
             "env": env,
+            "direct": self.direct,
             "dry_run": self.dry_run,
             "paused": paused,
             "armed": armed,
@@ -158,9 +175,28 @@ class TTDaemon:
             "runtime_at": self.now_fn().isoformat(timespec="seconds"),
             "ledger": self.ledger.snapshot(),
         })
+        if exec_results:
+            runtime["exec"] = exec_results
+            runtime["exec_stats"] = dict(
+                getattr(self.executor, "stats", {}) or {})
+            # 真实下单后账户必然变化, 下一轮重查
+            if not self.dry_run:
+                self.engine.invalidate_account()
         self._write_runtime(runtime)
         self.rounds += 1
         return runtime
+
+    def _exec_direct(self, signals, dry_run):
+        """经由 executor 直连下单。未配置 executor → 返回空并告警。"""
+        if self.executor is None:
+            LOG.error("direct 模式但未注入 executor, 跳过下单")
+            return []
+        try:
+            return self.executor.execute(signals, dry_run=dry_run)
+        except Exception as e:              # 单轮异常不终止守护
+            LOG.exception("直连下单异常: %r", e)
+            return []
+
 
     def _book(self, signals, hhmm):
         """按挂单价做理论成交记账 + 推进档位水位。"""
@@ -227,8 +263,22 @@ def build_daemon(args):
     # --sample: 全离线(样本行情 + 纸面账户), 绝不触碰真实账户
     eng = TTEngine(cfg, led, feed=feed, now_fn=now_fn,
                    force_paper=bool(args.sample))
+    executor = None
+    if getattr(args, "direct", False):
+        # 直连执行器: 账户号取配置; --sample 时不给 executor(纯离线)
+        if not args.sample:
+            from .executor import DirectExecutor
+            risk = cfg.get("risk", {})
+            executor = DirectExecutor(
+                account_id=cfg.get("account_id") or "",
+                lot=getattr(eng, "lot", 100),
+                max_order_amount=risk.get("max_single_order_amount"),
+                now_fn=now_fn)
     return TTDaemon(cfg, ledger=led, engine=eng, dry_run=cfg["dry_run"],
-                    now_fn=now_fn, signal_root=args.signal_root)
+                    now_fn=now_fn, signal_root=args.signal_root,
+                    executor=executor, direct=bool(getattr(args, "direct",
+                                                           False)))
+
 
 
 # sim 通道的醒目提示: 桥端不校验账户, 必须由人来确认登录的是模拟账户
@@ -240,13 +290,19 @@ SIM_NOTICE = (
 )
 
 
-def env_banner(cfg, dry_run):
+def env_banner(cfg, dry_run, direct=False):
     """返回启动横幅(多行)。sim 通道额外给出账户警告。"""
     env = cfg.get("env", "real")
-    lines = ["  信号通道: %s  (%s/)" % (env, SIGNAL_ROOT / env),
-             "  下发模式: %s" % ("DRY-RUN — 只算不落盘" if dry_run
-                                 else "LIVE — 会写信号文件")]
-    if env == "sim":
+    if direct:
+        lines = ["  执行通道: 直连 miniQMT (外部 Python order_stock, 不写信号文件)",
+                 "  账户: %s" % (cfg.get("account_id") or "(自动枚举已登录账号)"),
+                 "  下发模式: %s" % ("DRY-RUN — 只算不提交" if dry_run
+                                     else "LIVE — 会真实报单")]
+    else:
+        lines = ["  信号通道: %s  (%s/)" % (env, SIGNAL_ROOT / env),
+                 "  下发模式: %s" % ("DRY-RUN — 只算不落盘" if dry_run
+                                     else "LIVE — 会写信号文件")]
+    if env == "sim" and not direct:
         lines.append(SIM_NOTICE)
     return "\n".join(lines)
 
@@ -267,12 +323,14 @@ def main(argv=None):
     ap.add_argument("--signal-root", default=None, help="信号根目录")
     ap.add_argument("--env", choices=("real", "sim"), default=None,
                     help="信号通道: real=实盘(默认) | sim=QMT 模拟通道")
+    ap.add_argument("--direct", action="store_true",
+                    help="直连模式: 外部 Python 直接下单(不写信号文件桥)")
     ap.add_argument("--fake-now", action="store_true",
                     help="用固定时钟(2026-09-14 10:00)便于演练")
     args = ap.parse_args(argv)
 
     d = build_daemon(args)
-    banner = env_banner(d.cfg, d.dry_run)
+    banner = env_banner(d.cfg, d.dry_run, direct=d.direct)
     if args.once:
         rt = d.run_once()
         print(banner)
@@ -288,6 +346,10 @@ def main(argv=None):
             print("  [已拦下] %s %s %s股 @ %.3f → %s: %s"
                   % (rj["code"], rj["name"], rj["volume"], rj["price"] or 0,
                      rj["reject_code"], rj["reject_msg"]))
+        for ex in rt.get("exec", []):
+            print("  [下单] %s %s ok=%s %s"
+                  % (ex.get("order_id"), ex.get("code"), ex.get("ok"),
+                     ex.get("msg", "")))
         return 0
     print(banner)
     d.run_forever(interval=args.interval, max_rounds=args.rounds)
