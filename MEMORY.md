@@ -19,7 +19,7 @@
 | 实盘（prism 主策略） | **未上线**。代码已通（`prism/live_daemon.py`），三步验收一步未做 |
 | 实盘（tt 做T策略） | **已接 miniQMT 外部直连**（09-14 晚决策，见「路线回退」节）。代码/测试/闸门就绪，**放行条需每日重写**，`dry_run` 默认仍 True，`--live` 才真报单 |
 | 真实账户 | 账号 **88869979**，总资产 **274,648.96**，4 只持仓（全部 `可卖==持仓` → **9/15 起可直接做T**） |
-| Git | `master` 领先 origin 4 个提交未推（重组批次 + P0 实盘出口），**push 前必须先问用户** |
+| Git | **master 与 origin 同步**（09-14 晚已推 `49db972..46e8537`，7 个提交）；**push 前仍必须先问用户** |
 
 **最容易踩的 5 个坑（血泪教训，务必先看）**：
 1. **Bash 工具在本机会随机挂掉**（`dirname/head/grep: command not found`）→ 立刻切 **PowerShell 工具**，把输出 `Out-File -Encoding utf8` 再 Read，别在 Bash 上重试。
@@ -339,7 +339,7 @@ prism/ 主引擎 → 写 JSON → D:/QMT_SIGNALS/real/pending/*.json
 6. **重复 web 进程**：`prism_web/app.py` 曾有两个实例（14248 占 5000 / 16604 冗余），启动器只查端口监听，双开可能漏网 → 建议改成按进程名查。
 7. **守护断连不自动重启**（60×10s 后需人工）→ 考虑接 `ops/watchdog.py`。
 8. **`ops/watchdog.py` 服务清单**仍配着 legacy `strategy_web`（端口 5000 实际已被 prism_web 占用）。
-9. **`git push`**：领先 origin **4 个提交**（`2c472c1` P0实盘出口 / `52b9112` 目录重组 / `094e6d9` 补入库 / `e2e9444` 修 --help）→ **push 前必须先问用户**。
+9. **`git push`**：✅ **已完成**（09-14 晚，`49db972..46e8537`，7 个提交全部推上 GitHub）。下次 push 前仍必须问用户。
 
 ## 🟢 低优先（历史遗留 / 数据源）
 
