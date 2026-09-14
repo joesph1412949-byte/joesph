@@ -181,6 +181,13 @@
 
 **9/15 实盘状态**：`armed.txt` 已写 `20260914`（当日有效）；**9/15 需重新放行**（`python tt/arm_today.py`）。配置 `dry_run` 仍为 `true`，真报单需 `--live`。操作卡见 `docs/做T操作卡_20260915.md`。
 
+**大 QMT 跑法（09-14 晚补充，用户提问后整理）**：三种跑法参数手册见 `docs/大QMT网格参数手册.md`。
+- **A1** QMT 内原生写网格（passorder）｜**A2** QMT 跑桥 `qmt/bridge/signal_bridge_real.py`（最省事）｜**B** 外部直连（当前在用）
+- **A2 与 B 共用同一份 `tt_config.json`**，随时可切；**但两条通道不能同时开 → 会双重下单**
+- **桥端日去重键已修**：`stock_code` → **`order_id`**（新增 `_dedup_key()`）。原逻辑让每票每天只放行 1 单，做T多档全废 → 这是 MEMORY 原「3 条必改项」第 1 条的最终处置
+- QMT 内是 **GBK** → 桥脚本**刻意全用英文注释**；`FILE_MIN_AGE` 建议 `1.0 → 0.2`
+- **两套下单常量不可混**：QMT `passorder` 用 `opType 0/1`；外部 API 用 `STOCK_BUY=23 / STOCK_SELL=24`
+
 ---
 
 # 一、项目全貌（子项目清单）
@@ -317,8 +324,8 @@ prism/ 主引擎 → 写 JSON → D:/QMT_SIGNALS/real/pending/*.json
 
 ## 🔴 高优先（阻塞实盘 / 有资金风险）
 
-1. **tt 3 条必改项 —— 已随「改直连」全部处置**（09-14 晚）：
-   - 桥端日去重键 `stock_code` → **不再适用**（直连不写 pending 队列，绕开整个桥）
+1. **tt 3 条必改项 —— 已全部处置**（09-14 晚）：
+   - 桥端日去重键 `stock_code` → ✅ **已修为 `order_id`**（`qmt/bridge/signal_bridge_real.py` 新增 `_dedup_key()`；外部直连通道本就不走桥，但走 A2 时必需）
    - `n_units × band ≤ max_price_deviation_pct` 交叉校验 → ✅ **已做**（`config.validate()` fail-closed + `engine._make_intent` 运行时 `DEPTH_BEYOND_DEVIATION`）
    - 滑点闸门 `ladder_price_ref=price` 同值 → ✅ **已修**（传真实阶梯价）
 2. **确认 QMT 里跑的桥是哪一版**：`D:/QMT/python/SIGNALBRIDGE.py` 是 16434 字节单行密文 → 直连方案下**不再阻塞 tt**（tt 已绕开桥）；但 prism 主策略仍走桥，**该确认仍然有效**。
