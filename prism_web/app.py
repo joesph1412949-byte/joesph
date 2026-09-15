@@ -44,8 +44,6 @@ from shared.common import setup_logging
 from data_source import DataSource, DataSourceError
 from manual_store import ManualStore
 from perf_store import PerfStore
-from eastmoney import EastMoneyFeed  # noqa: F401
-from fundamental import FundamentalFeed  # noqa: F401
 
 from prism import registry as reg
 from prism.engine import load_strategy, run_screen
@@ -129,36 +127,33 @@ def _valid_sid(sid):
     return bool(sid) and _SID_RE.match(sid) is not None
 
 
+def _strategy_path(sid):
+    """sid → 策略文件路径。白名单(防路径穿越) ∧ 文件存在, 任一不过 → None。"""
+    if not _valid_sid(sid):
+        return None
+    p = STRATEGIES_DIR / ("%s.json" % sid)
+    return p if p.is_file() else None
+
+
 def _load_strategy_for_screen(sid):
     """按 id 加载策略配置(校验因子存在性)。失败抛 ValueError。"""
-    if not _valid_sid(sid):
-        raise ValueError("策略不存在: %s" % sid)
-    p = STRATEGIES_DIR / ("%s.json" % sid)
-    if not p.is_file():
+    p = _strategy_path(sid)
+    if p is None:
         raise ValueError("策略不存在: %s" % sid)
     return load_strategy(p)
 
 
-# 东财个股因子输出集(fundamental_feed.compute_for_stock)与手填因子集(前端 MANUAL_ALL),
-# 用于候选 auto_manual 来源推断(审查 I1/M6)。
+# 东财个股因子输出集(fundamental_feed.compute_for_stock), 用于候选 auto_manual
+# 来源推断(审查 I1/M6)。手填因子已全部被 K线自动因子取代(2026-08):
+# 原 S1/S5/S7 已移除, 故无 "manual" 来源。
 _FUNDAMENTAL_FIDS = {"Y1", "Y5", "F7", "Y7", "Y2", "Y6"}
-# 手填因子已全部被 K线自动因子取代(2026-08): 原 S1/S5/S7 移除, 集合为空
-_MANUAL_FIDS = set()
 
 
 def _infer_auto_manual(factors):
-    """候选因子来源推断(简化版, 与旧 screen.py auto_manual 语义尽量一致):
-    东财个股因子 → "fundamental"; 手填因子 → "manual"; 其余 → "auto"。
+    """候选因子来源推断: 东财个股因子 → "fundamental", 其余 → "auto"。
     前端 renderFactors 按 {fid: 来源} 渲染来源徽标。"""
-    out = {}
-    for fid in factors:
-        if fid in _FUNDAMENTAL_FIDS:
-            out[fid] = "fundamental"
-        elif fid in _MANUAL_FIDS:
-            out[fid] = "manual"
-        else:
-            out[fid] = "auto"
-    return out
+    return {fid: ("fundamental" if fid in _FUNDAMENTAL_FIDS else "auto")
+            for fid in factors}
 
 
 def _merge_candidate_fields(candidates, limit_ups):
@@ -596,10 +591,8 @@ def api_strategies():
 
 @app.route("/api/strategy/<sid>")
 def api_strategy(sid):
-    if not _valid_sid(sid):
-        return jsonify({"ok": False, "error": "策略不存在: %s" % sid}), 404
-    p = STRATEGIES_DIR / ("%s.json" % sid)
-    if not p.is_file():
+    p = _strategy_path(sid)
+    if p is None:
         return jsonify({"ok": False, "error": "策略不存在: %s" % sid}), 404
     return jsonify({"ok": True, "strategy": _json.loads(p.read_text(encoding="utf-8"))})
 
@@ -639,10 +632,7 @@ def api_strategy_create():
 def api_strategy_activate(sid):
     """设为默认策略(spec §5): sid 白名单 ∧ 文件存在 → 写指针。"""
     from prism.engine import set_active_strategy
-    if not _valid_sid(sid):
-        return jsonify({"ok": False, "error": "策略不存在: %s" % sid}), 404
-    p = STRATEGIES_DIR / ("%s.json" % sid)
-    if not p.is_file():
+    if _strategy_path(sid) is None:
         return jsonify({"ok": False, "error": "策略不存在: %s" % sid}), 404
     set_active_strategy(sid)
     return jsonify({"ok": True, "active": sid})
@@ -663,10 +653,8 @@ def api_backtest():
         return jsonify({"ok": False, "error": "日期格式应为 YYYYMMDD"}), 400
     if s > e:
         return jsonify({"ok": False, "error": "start 不能晚于 end"}), 400
-    if not _valid_sid(sid):
-        return jsonify({"ok": False, "error": "策略不存在: %s" % sid}), 404
-    p = STRATEGIES_DIR / ("%s.json" % sid)
-    if not p.is_file():
+    p = _strategy_path(sid)
+    if p is None:
         return jsonify({"ok": False, "error": "策略不存在: %s" % sid}), 404
     if not _BACKTEST_FEEDS_OK:
         return jsonify({"ok": False, "error": "回测数据源不可用"}), 500

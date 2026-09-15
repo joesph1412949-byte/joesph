@@ -37,8 +37,8 @@ def _ret_series(dates, closes):
 
 
 def _share_series(mkt):
-    """全板块日成交额占比 → (dates, {code: [share_t...]})(与 dates 对齐,
-    某板块当日无数据 → None)。总量 = 当日有数据板块之和(同源, 无需基准)。"""
+    """全板块日成交额占比 → {code: [share_t...]}(日期骨架取全板块当日有数据的
+    日子, 某板块当日无数据 → None)。总量 = 当日有数据板块之和(同源, 无需基准)。"""
     secs = mkt.get("sector") or {}
     amounts = {}
     all_dates = set()
@@ -60,7 +60,7 @@ def _share_series(mkt):
             v = m.get(d)
             col.append(v / totals[i] if v and totals[i] > 0 else None)
         shares[code] = col
-    return dates, shares
+    return shares
 
 
 def _mean(vals):
@@ -164,7 +164,7 @@ def sector_table(mkt, new_high=None, etf_quotes=None, etf_map=None):
         return []
     bench = mkt.get("benchmark") or {}
     bench_ret = _ret_series(bench.get("dates") or [], bench.get("close") or [])
-    _, shares = _share_series(mkt)
+    shares = _share_series(mkt)
     out = []
     for code, rec in sorted((mkt.get("sector") or {}).items()):
         rec = rec or {}
