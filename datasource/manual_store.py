@@ -3,8 +3,13 @@
 数据存 JSON 文件，重新选股时自动合并到自动因子。"""
 import json
 import logging
+import sys
 import time
 from pathlib import Path
+
+# 运行期数据统一收纳(runtime/ 目录重组约定): runtime/state/manual_factors.json
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from shared.common import STATE_DIR  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -14,8 +19,8 @@ class ManualStore:
     # 不再需要手填。保留空列表兼容旧代码(网页手填功能仍在, 只是无可用因子)。
     MANUAL_FACTORS = []
 
-    def __init__(self, path="manual_factors.json"):
-        self.path = Path(path)
+    def __init__(self, path=None):
+        self.path = Path(path) if path else STATE_DIR / "manual_factors.json"
         self._data = self._load()
 
     def _load(self):

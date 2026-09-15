@@ -8,6 +8,7 @@ import sys
 import webbrowser
 
 PY37 = r"C:\Users\28037\AppData\Local\Programs\Python\Python37\python.exe"
+PY312 = r"C:\Users\28037\AppData\Local\Programs\Python\Python312\python.exe"
 QMT_LIB = r"D:\QMT\bin.x64\Lib\site-packages"
 LOGS = r"D:\QMT_SYNC\logs"
 ACCOUNT_ID = "88869979"
@@ -21,9 +22,11 @@ PROCS = [
     },
     {
         "name": "prism_web",
-        "cmd": [PY37, "app.py"],
-        "cwd": r"d:\cc-joesph\prism_web",
-        # 不带 PYTHONPATH: xtquant 已通过 junction 链接进 Py3.7 site-packages,
+        "cmd": [PY312, r"prism_web\app.py"],
+        "cwd": r"d:\cc-joesph",
+        # 2026-09-15 修正: 旧条目是 Py3.7 + cwd=prism_web(已被 prism 接管前的老形态),
+        # 现役入口与 PRISM.bat 一致 = 系统 Python3.12 + 仓库根启动。
+        # 不带 PYTHONPATH: xtquant 已通过 junction 链接进 Py3.12 site-packages,
         # 挂 QMT_LIB 会污染 numpy/pandas (QMT 自带 cp36 二进制)
         "env": {"APP_DEBUG": "0"},
     },
@@ -44,7 +47,7 @@ PROCS = [
 ]
 
 # Windows: 让子进程脱离当前控制台。否则 start_all.bat 的窗口一关,
-# Windows 向该控制台所有进程发 CTRL_CLOSE_EVENT, strategy_web 等全部被杀
+# Windows 向该控制台所有进程发 CTRL_CLOSE_EVENT, prism_web 等全部被杀
 # (症状: 点 start_all 后服务正常, 关窗口就"网页打不开")。
 _DETACH = getattr(subprocess, "DETACHED_PROCESS", 0)
 

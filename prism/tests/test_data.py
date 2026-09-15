@@ -241,7 +241,7 @@ def test_build_market_context_provides_880368_index_for_n1():
 def test_build_stock_context_fail_open_when_ds_raises():
     """真实 DataProvider 构造(注入假 DS): ds.get_kline 抛异常仍返回上下文(fail-open)。
 
-    同时验证 import 现有 strategy_web 模块(data_source/eastmoney/fundamental/
+    同时验证 import 现有 datasource 模块(data_source/eastmoney/fundamental/
     manual_store)不破坏构造 —— 本测试走的是真实 __init__ 路径。
     """
     class BoomDS:

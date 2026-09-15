@@ -14,7 +14,7 @@ zt_history 缓存条目 code(本就是 QMT 带后缀格式), data.build_market_c
 在扩张: 板块今日涨停家数 ≥ 昨日。
 连板股口径(v04 修复, live/回测统一): 昨日也涨停的今日涨停股
 (今日池 code ∈ mkt["zt_prev"]["codes"], 连续两日涨停=连板≥2)。
-boards 字段不再使用——实盘涨停池条目(strategy_web/data_source.
+boards 字段不再使用——实盘涨停池条目(datasource/data_source.
 get_limit_up_stocks 产物)无该键, 按 boards 判定实盘恒 0; 今日∩昨日
 判定零新依赖且两侧口径一致。
 昨日池缺失 → fail-closed 0(无昨日基准无法判定扩张)。"""

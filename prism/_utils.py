@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""因子库共享工具函数(从 strategy_web/factors.py 迁移, 与旧实现逐行一致)。
+"""因子库共享工具函数(从 datasource/factors.py 迁移, 与旧实现逐行一致)。
 
 Task 5 迁移: F2 用 _parse_timetag_hhmm; Y4/S4 用 ma; F4/S6 用 sector_count。
 全部保持旧逻辑不变。东财裸代码 → QMT 键统一走 shared.common.with_market_suffix。

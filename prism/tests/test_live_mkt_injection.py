@@ -137,7 +137,7 @@ def _mk_strategy(for_factor):
 
 
 def test_run_screen_f9_hits_with_live_style_pool():
-    """实盘通路(F9): strategy_web/data_source.get_limit_up_stocks 产物条目
+    """实盘通路(F9): datasource/data_source.get_limit_up_stocks 产物条目
     无 boards 键, F9 连板判定改用 zt_prev(今日∩昨日)后 run_screen 全链路
     可命中候选(修复前 boards 恒缺失 → 连板恒 0 → F9 实盘完全失效)。"""
     reg.scan_factors("prism.factors", force=True)   # 注册真实 F9/N1(_fresh_registry 已 reset)

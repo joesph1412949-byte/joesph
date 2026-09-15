@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """数据适配层: 把 QMT/东财/手填 数据封装成因子上下文。
 
-第一版复用 strategy_web 现有实现(DataSource/EastMoneyFeed/FundamentalFeed/
+第一版复用 datasource 现有实现(DataSource/EastMoneyFeed/FundamentalFeed/
 ManualStore), 迁移完成后逐步内联。因子永远不直接碰本层。
 """
 import sys
 from pathlib import Path
 
-_WEB = str(Path(__file__).parent.parent / "strategy_web")
+_WEB = str(Path(__file__).parent.parent / "datasource")
 if _WEB not in sys.path:
     sys.path.insert(0, _WEB)
 

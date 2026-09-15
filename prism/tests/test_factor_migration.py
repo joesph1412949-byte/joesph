@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""因子迁移比对: 新因子(prism.factors) vs 旧实现(strategy_web.factors) 输出一致。
+"""因子迁移比对: 新因子(prism.factors) vs 旧实现(datasource.factors) 输出一致。
 
 对全部 23 个存活迁移因子逐因子构造相同假数据, 分别跑旧实现与新注册因子, 断言
 score(必要时含 note)一致; 另含 36 因子注册核对与 full_factor_v1 验收位(文件 Task F2 落盘)。
@@ -19,8 +19,8 @@ from prism.context import FactorContext
 import prism.factors  # noqa: F401  触发扫描注册
 
 # ---- 旧实现(比对基准) ----
-from strategy_web.factors import FactorEngine  # noqa: F401
-from strategy_web.fundamental import FundamentalFeed  # noqa: F401
+from datasource.factors import FactorEngine  # noqa: F401
+from datasource.fundamental import FundamentalFeed  # noqa: F401
 
 
 ALL_23_IDS = ["F1", "F2", "F3", "F4", "F5", "F6", "F7",

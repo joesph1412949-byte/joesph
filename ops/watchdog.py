@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""watchdog.py — 进程守护: 监控 strategy_web / vibe_backend / vibe_frontend,
+"""watchdog.py — 进程守护: 监控 datasource / vibe_backend / vibe_frontend,
 进程挂了自动拉起, 避免服务静默死亡(网页打不开的常见原因之一)。
 
 用法:
@@ -24,11 +24,11 @@ logger = setup_logging("watchdog")
 # 与 start_all.py 保持一致的服务定义(端口 → 探测目标)
 SERVICES = [
     {
-        "name": "strategy_web",
+        "name": "prism_web",
         "port": 5000,
-        "cmd": [r"C:\Users\28037\AppData\Local\Programs\Python\Python37\python.exe",
-                "app.py"],
-        "cwd": r"D:\cc-joesph\strategy_web",
+        "cmd": [r"C:\Users\28037\AppData\Local\Programs\Python\Python312\python.exe",
+                r"prism_web\app.py"],
+        "cwd": r"D:\cc-joesph",
         "env": {"APP_DEBUG": "0"},
     },
     {

@@ -2,10 +2,10 @@
 """Shared config & code helpers for the cc-joesph quant stack.
 
 Centralizes values/logic that used to be duplicated across:
-  - strategy_web/factors.py  (_tick_key_for_em_code)
+  - datasource/factors.py    (_tick_key_for_em_code)
   - strategy_close_pick.py   (with_market_suffix, SECTORS, SIGNAL_ROOT)
   - qmt_signal_bridge_real.py(_with_market_suffix, SIGNAL_ROOT)
-  - strategy_web/screen.py   (SECTORS)
+  - v04 screen.py (removed 2026-09-15; SECTORS now lives here)
 
 NOTE: keep comments pure ASCII. QMT strategies import this file under a
 GBK interpreter; module-level string VALUES may contain CJK (the file is

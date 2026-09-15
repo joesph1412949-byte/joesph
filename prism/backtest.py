@@ -144,7 +144,7 @@ class Backtester:
         self.strategy = load_strategy(strategy)
         self.zt_feed = zt_feed
         self.kline_feed = kline_feed
-        # fund_feed: 可选(strategy_web.fundamental.FundamentalFeed)。
+        # fund_feed: 可选(datasource.fundamental.FundamentalFeed)。
         # 注入后 F7/Y6/Y7 在回测中按选股日 asof 取数(防未来函数, feed 内部
         # 保证窗口不越 asof)。默认 None → fund 不注入, 这三个因子得 0
         # (与旧行为一致)。注意 Y5/Y2 是"当前快照"类数据, 回测接入自带

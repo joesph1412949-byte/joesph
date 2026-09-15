@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""prism.market 市场情绪分类测试(与旧 strategy_web.models.classify_market 等价)。"""
+"""prism.market 市场情绪分类测试(与旧 datasource.models.classify_market 等价)。"""
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))

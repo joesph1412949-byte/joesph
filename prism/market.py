@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""市场情绪分类(等价于旧 strategy_web.models.ModelScorer.classify_market)。
+"""市场情绪分类(等价于旧 datasource.models.ModelScorer.classify_market)。
 
-网页 /api/screen 的 market.stage 使用本函数。刻意不 import strategy_web
+网页 /api/screen 的 market.stage 使用本函数。刻意不 import datasource
 (双份模块问题, 见 Task 8 审查 I2) —— prism 侧单源实现, 语义与旧站一致:
 5=高潮期 / 4=回暖期 / 3=冰点期 / <3=退潮期。
 """

@@ -3,7 +3,7 @@
 
 连板口径(v04 修复, live/回测统一): 连板股 = 昨日也涨停的今日涨停股
 (今日池 code ∈ mkt.zt_prev codes)。boards 字段实盘不可得
-(strategy_web/data_source.get_limit_up_stocks 产物无该键), 今日∩昨日
+(datasource/data_source.get_limit_up_stocks 产物无该键), 今日∩昨日
 判定两侧口径一致; 含判别用例: boards 字段即使存在也不参与判定。
 """
 import sys

@@ -11,13 +11,17 @@
 """
 import json
 import logging
+import sys
 from datetime import date, datetime
 from pathlib import Path
 
+# 运行期数据统一收纳(runtime/ 目录重组约定): 存档根目录 runtime/state/perf/
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from shared.common import STATE_DIR  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
-# 存档根目录: strategy_web/perf/
-PERF_DIR = Path(__file__).parent / "perf"
+PERF_DIR = STATE_DIR / "perf"
 
 
 def _date_key(d=None):

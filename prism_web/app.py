@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Prism Web — 可视化网页 + JSON API(strategy_web 改造)。
+"""Prism Web — 可视化网页 + JSON API(v04 网页的继任者)。
 
-保留旧 strategy_web 全部 API(选股/行情/绩效/手工因子), 新增:
+保留 v04 网页全部 API(选股/行情/绩效/手工因子), 新增:
   GET /api/factors            因子库列表(可带 ?category=)
   GET /api/strategies         策略列表
   GET /api/strategy/<id>      策略详情
@@ -15,16 +15,16 @@ import sys
 import re
 from pathlib import Path
 
-# 路径注入(单源真相, 审查 I2): strategy_web(旧数据源模块唯一出处) → 项目根
+# 路径注入(单源真相, 审查 I2): datasource(旧数据源模块唯一出处) → 项目根
 # (common/prism/backtest_cli)。prism_web 不再保留数据模块副本, app 与
 # prism.data.DataProvider 按名 import 时经 sys.modules 缓存解析到同一份
-# strategy_web 模块, 杜绝"双份模块"类定义分叉。
+# datasource 模块, 杜绝"双份模块"类定义分叉。
 # 注意: 必须 resolve() 再取 parent —— 'python app.py' 相对启动时 __file__
 # 是相对路径, Path('app.py').parent 得到 '.', 会导致 sys.path 注入相对路径,
 # Py3.7 下后续 import common 失败(ModuleNotFoundError)。
 _WEB = str(Path(__file__).resolve().parent)       # prism_web(仅模板/静态资源)
 _ROOT = str(Path(__file__).resolve().parent.parent)  # 项目根
-_OLD_WEB = str(Path(__file__).resolve().parent.parent / "strategy_web")
+_OLD_WEB = str(Path(__file__).resolve().parent.parent / "datasource")
 for _p in (_OLD_WEB, _ROOT):
     if _p not in sys.path:
         sys.path.insert(0, _p)
@@ -39,7 +39,7 @@ from flask import Flask, jsonify, render_template, request
 
 from shared.common import setup_logging
 
-# 旧数据源模块(单源: strategy_web, 经上方路径注入解析; prism.data.DataProvider
+# 旧数据源模块(单源: datasource, 经上方路径注入解析; prism.data.DataProvider
 # 内部同名导入复用同一份类定义, 见 prism/data.py)
 from data_source import DataSource, DataSourceError
 from manual_store import ManualStore
