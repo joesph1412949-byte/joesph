@@ -914,3 +914,45 @@ def test_sector_tab_weekly_js_contract():
     assert "escHtml(etf" in js                              # XSS 契约
     assert "1e8" in js                                      # 成交额折亿
     assert "<td>—</td>" in js                               # 留空锚点显示—
+
+
+# ---------------- 个股K线降级(交付视角 2026-09-15) ----------------
+
+def _fake_kdf(n=70):
+    """同结构假 K线 DataFrame(open/high/low/close/volume, 日期在索引)。"""
+    import pandas as pd
+    idx = pd.date_range("2026-06-01", periods=n, freq="D")
+    return pd.DataFrame({
+        "open": [10.0 + i * 0.1 for i in range(n)],
+        "high": [10.5 + i * 0.1 for i in range(n)],
+        "low": [9.5 + i * 0.1 for i in range(n)],
+        "close": [10.2 + i * 0.1 for i in range(n)],
+        "volume": [1000 + i for i in range(n)],
+    }, index=idx)
+
+
+def test_stock_kline_falls_back_to_tdx(client, monkeypatch):
+    """QMT 取数失败 → 降级通达信, 个股K线不因 QMT 停机不可用。"""
+    import prism.tdx_source as tdx
+    monkeypatch.setattr(app_module.ds_obj, "get_kline",
+                        lambda code, days=120:
+                        (_ for _ in ()).throw(RuntimeError("QMT down")))
+    monkeypatch.setattr(tdx, "get_kline", lambda code, days=120: _fake_kdf())
+    r = client.get("/api/stock/600519/kline")
+    assert r.status_code == 200
+    d = r.get_json()
+    assert len(d["closes"]) == 70 and len(d["dates"]) == 70
+    assert d["up_stop"] == 0                     # 涨停价缺失不牵连K线
+
+
+def test_stock_kline_both_sources_down(client, monkeypatch):
+    """两个源都挂 → 503 + 友好错误(交付视角: 不返回 500 裸异常)。"""
+    import prism.tdx_source as tdx
+    monkeypatch.setattr(app_module.ds_obj, "get_kline",
+                        lambda code, days=120:
+                        (_ for _ in ()).throw(RuntimeError("QMT down")))
+    monkeypatch.setattr(tdx, "get_kline", lambda code, days=120: None)
+    r = client.get("/api/stock/600519/kline")
+    assert r.status_code == 503
+    body = r.get_json()
+    assert body["ok"] is False and "行情源不可用" in body["error"]

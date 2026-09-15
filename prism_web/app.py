@@ -437,13 +437,41 @@ def market_tick():
     return jsonify({"ok": True, "data": ticks})
 
 
+def _stock_kline_df(code, days=120):
+    """个股K线 DataFrame: QMT 优先, 空/异常降级通达信(与因子链路同一降级策略)。
+
+    二者返回同结构(open/high/low/close/volume/amount), 下游无需分叉。
+    全失败 → None(调用方给友好错误, 不是 500 裸异常)。"""
+    df = None
+    try:
+        df = ds_obj.get_kline(code, days=days)
+    except Exception as e:
+        logger.warning("K线(QMT)失败(%s), 降级通达信: %r", code, e)
+    if df is None or len(df) == 0:
+        try:
+            from prism import tdx_source
+            df = tdx_source.get_kline(code, days=days)
+        except Exception as e:
+            logger.warning("K线(通达信)失败(%s): %r", code, e)
+            df = None
+    return df
+
+
 @app.route("/api/stock/<code>/kline")
 def stock_kline(code):
     try:
-        df = ds_obj.get_kline(code, days=120)
+        df = _stock_kline_df(code)
+        if df is None or len(df) == 0:
+            # 上游全挂(交付视角: 明确告知, 不是 500 裸异常)
+            return jsonify({"ok": False,
+                            "error": "行情源不可用(QMT未连接且通达信取数失败)"}), 503
         ma60 = df["close"].rolling(60).mean().tolist()
-        detail = ds_obj.get_instrument(code)
         # OHLC 用于前端 ECharts 蜡烛图 (spec §4③)
+        up_stop = 0
+        try:
+            up_stop = ds_obj.get_instrument(code).get("UpStopPrice") or 0
+        except Exception:
+            pass                      # 涨停价缺失 → 0(fail-open, 不牵连K线)
         return jsonify({
             "dates": _kline_dates(df),
             "opens": [float(x) for x in df["open"]],
@@ -452,7 +480,7 @@ def stock_kline(code):
             "lows": [float(x) for x in df["low"]],
             "volumes": [int(v) for v in df["volume"]],
             "ma60": [None if x != x else round(x, 2) for x in ma60],  # NaN→None
-            "up_stop": detail.get("UpStopPrice") or 0,
+            "up_stop": up_stop,
         })
     except Exception as e:
         return jsonify({"error": "K线获取失败: %r" % e}), 500
