@@ -937,6 +937,9 @@ def test_stock_kline_falls_back_to_tdx(client, monkeypatch):
     monkeypatch.setattr(app_module.ds_obj, "get_kline",
                         lambda code, days=120:
                         (_ for _ in ()).throw(RuntimeError("QMT down")))
+    monkeypatch.setattr(app_module.ds_obj, "get_instrument",
+                        lambda code:
+                        (_ for _ in ()).throw(RuntimeError("QMT down")))
     monkeypatch.setattr(tdx, "get_kline", lambda code, days=120: _fake_kdf())
     r = client.get("/api/stock/600519/kline")
     assert r.status_code == 200
