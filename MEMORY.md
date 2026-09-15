@@ -213,6 +213,8 @@
 - **xtquant 在系统 Python 3.12 里可用**（`C:\Users\28037\AppData\Local\Programs\Python\Python312\Lib\site-packages\xtquant`，**全套含 `datacenter.cp312.pyd` + `xtpythonclient.cp312.pyd`**）→ **外部 Python 可直接下单，无需 PYTHONPATH、无需 QMT 内 pyd**。⚠️ 旧记录「xtquant 不在系统 python 里」**已过时**。
 - `D:\QMT\bin.x64\Lib\site-packages` 下的是 cp36~cp311 老版（**py3.12 用不了**），别拿它当参照。
 - **QMT 安装目录没有 `python.exe`**，只有 `andpythonw.exe`（Python **3.6.8**）—— QMT 内嵌解释器，只有需要在 QMT 内部跑策略时才用它。
+- **本机两个版本都装了**：`D:\QMT\bin.x64\XtItClient.exe`（大 QMT 完整版）+ `XtMiniQmt.exe`（miniQMT 极简版），`userdata` 与 `userdata_mini` 两套数据目录都在 → **外部直连、QMT 内嵌两条路都能走**。
+- **外部直连的前提 = QMT 极速交易服务已登录**（`XtMiniQmt.exe` 在跑，或 `XtItClient` 以极速模式登录）。**QMT 没开 → `connect()` 必失败，不是代码问题**（09-15 08:56 实测：两个进程都没跑）。
 - 项目主用 **Python 3.12**（`C:\Users\28037\AppData\Local\Programs\Python\Python312`）。
 - 通达信 `pytdx` 已接入（`prism/tdx_source.py`），定位**补充源**，QMT 优先。
 - 模拟盘守护由**用户双击桌面 `PRISM.bat`** 启动（不寄生 agent 会话）。
