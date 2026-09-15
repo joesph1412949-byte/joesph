@@ -17,7 +17,6 @@ _registry = reg  # validate 的 reg=None 形参遮蔽模块级名 → 别名兜�
 composite_modes = {
     "top3_weighted": lambda scores, cfg: _top3_weighted(scores, cfg),
     "sum": lambda scores, cfg: sum(scores),
-    "max": lambda scores, cfg: max(scores) if scores else 0.0,
     "average": lambda scores, cfg: (sum(scores) / len(scores)) if scores else 0.0,
 }
 
@@ -60,6 +59,23 @@ def load_strategy(path_or_dict):
     if mode not in composite_modes:
         raise ValueError("未知组合模式: %s" % mode)
     return data
+
+
+def gate_evaluate(fids, market_ctx):
+    """门禁因子求值: {fid: 1/0}。
+
+    因子缺失/抛异常/无 score → 0(fail-closed, 与 run_screen 门槛口径一致)。
+    模拟盘/实盘/交易三处共用(此前各写一份同逻辑)。
+    """
+    out = {}
+    for fid in fids:
+        try:
+            res = reg.get_factor(fid)["func"](market_ctx)
+            score = res.get("score") if isinstance(res, dict) else res
+            out[fid] = 1 if score else 0
+        except Exception:
+            out[fid] = 0
+    return out
 
 
 def _factor_entry(item):
@@ -227,7 +243,6 @@ def run_screen(strategy, market_ctx, gate_factors=None, stock_contexts=None):
                     sec_score = rec["score"] if rec else None
                     if sec_score is None or sec_score <= score_cfg["threshold"]:
                         continue
-                    ev["sector_score"] = sec_score
                 candidates.append(ev)
         candidates.sort(key=lambda c: c["scores"]["composite"], reverse=True)
 
@@ -256,6 +271,25 @@ def active_strategy_id(pointer_path=None):
     if not sid or not (STRATEGIES_DIR / ("%s.json" % sid)).is_file():
         return _ACTIVE_FALLBACK
     return sid
+
+
+def resolve_strategy(strategy_or_id=None):
+    """统一策略加载(模拟盘/实盘/交易共用): dict 原样校验返回; id/None → 读默认指针。
+
+    非 dict 时先幂等重扫因子库(load_strategy 的因子存在性校验依赖它)。
+    """
+    if isinstance(strategy_or_id, dict):
+        return load_strategy(strategy_or_id)
+    reg.scan_factors(force=True)
+    sid = strategy_or_id or active_strategy_id()
+    return load_strategy(STRATEGIES_DIR / ("%s.json" % sid))
+
+
+def execution_sizing(strategy):
+    """策略 execution 块的 (pct, top_n); 缺失 → (None, None)(调用方各自回落)。"""
+    ex = (strategy or {}).get("execution") or {}
+    return (float(ex["pct"]) if ex.get("pct") else None,
+            int(ex["top_n"]) if ex.get("top_n") else None)
 
 
 def set_active_strategy(sid, pointer_path=None):

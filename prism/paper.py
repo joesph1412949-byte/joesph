@@ -7,29 +7,17 @@
 import copy
 import json
 import logging
-import os
 from datetime import datetime
 from pathlib import Path
 
-from shared.common import STATE_DIR
+from shared.common import STATE_DIR, atomic_write, next_weekday
 from prism import engine
-from prism.engine import load_strategy
 
 STATE_FILENAME = ".paper_account.json"
 _DEFAULT_STRATEGY = Path(__file__).parent / "strategies" / "first_board_v04.json"
 _REQUIRED_KEYS = ("version", "created", "initial_capital", "cash", "holdings",
                   "trades", "nav_history", "live_nav", "screens_done",
                   "settled_dates")
-
-
-def _next_weekday(d):
-    """下一交易日(仅跳周六日, 不含节假日历——ponytail: 模拟盘可接受)。"""
-    from datetime import date, timedelta
-    y, m, dd = map(int, d.split("-"))
-    cur = date(y, m, dd) + timedelta(days=1)
-    while cur.weekday() >= 5:
-        cur += timedelta(days=1)
-    return cur.isoformat()
 
 
 def _limit_ratio(code):
@@ -87,15 +75,10 @@ class PaperAccount:
         sid = engine.active_strategy_id()
         if self._strategy is None or self._strategy.get("id") != sid:
             try:
-                from prism import registry as reg
-                reg.scan_factors(force=True)   # 幂等重扫注册因子库(load_strategy 校验依赖)
-                self._strategy = load_strategy(
-                    engine.STRATEGIES_DIR / ("%s.json" % sid))
+                self._strategy = engine.resolve_strategy(sid)
                 # execution.pct 覆盖默认仓位(spec §4); 无 execution 块回落构造参数
-                exec_pct = ((self._strategy or {}).get("execution") or {}) \
-                    .get("pct")
-                self.position_ratio = (float(exec_pct) if exec_pct
-                                       else self._position_ratio_ctor)
+                pct, _top_n = engine.execution_sizing(self._strategy)
+                self.position_ratio = pct or self._position_ratio_ctor
             except Exception as e:
                 if self._strategy is None:
                     raise            # 首载且失败 → 无退路, 照抛
@@ -147,10 +130,8 @@ class PaperAccount:
 
     def save(self):
         """原子写: 先写 .tmp 再 os.replace; 任何异常向上抛(调用方回滚)。"""
-        tmp = self.state_path.with_name(self.state_path.name + ".tmp")
-        tmp.write_text(json.dumps(self.state, ensure_ascii=False, indent=1),
-                       encoding="utf-8")
-        os.replace(tmp, self.state_path)
+        atomic_write(self.state_path,
+                     json.dumps(self.state, ensure_ascii=False, indent=1))
 
     # ---------- 执行临界段 ----------
     def _snapshot_state(self):
@@ -205,92 +186,12 @@ class PaperAccount:
         return max(float(nav), 0.0)
 
     # ---------- 买入 ----------
-    def buy_from_screen(self, provider, now=None, slot=None,
-                        tick_provider=None):
-        """时点选股(first_board_v04, 同一引擎) + 排板委托创建(改道: 不再直接成交)。
-
-        tick_provider: callable(codes)->{code: tick}, daemon 在时点前拉一次候选池
-        盘口注入; 不传 → tick={} → create_pending_buy 保守不建(记 skips
-        "排板不通过")。幂等键: slot 显式传入(守护按计划时点补跑, 终审 I-1)优先,
-        否则 YYYY-MM-DDTHH:MM(实际分钟, 向后兼容)。键已在 screens_done →
-        already_done。选股失败/保存失败 fail-closed(不记账), 报告 error。"""
-        now = now or datetime.now()
-        if self.state is None and not self.load():
-            return {"error": "未初始化"}
-        d = now.strftime("%Y-%m-%d")
-        ts_key = slot or "%sT%s" % (d, now.strftime("%H:%M"))
-        if ts_key in self.state["screens_done"]:
-            return {"candidates": 0, "bought": [], "skipped": [],
-                    "env_ok": False, "already_done": True}
-        try:
-            result = self._screen_candidates(provider)
-        except Exception as e:
-            snap = self._snapshot_state()
-            self.state["screens_done"].append(ts_key)
-            try:
-                self.save()
-            except Exception:
-                self._restore_state(snap)
-            return {"error": "选股失败: %r" % e}
-        env_ok = bool(result.get("environment_ok"))
-        bought, skipped = [], []
-        if env_ok:
-            nav = self._nav_estimate()
-            provider_tick = {}
-            if tick_provider is not None:
-                try:      # 时点前拉一次候选池盘口; 失败保守视为无盘口(下方全部不建)
-                    provider_tick = tick_provider(
-                        [c.get("code") for c in result.get("candidates", [])]) or {}
-                except Exception:
-                    provider_tick = {}
-            for c in result.get("candidates", []):
-                code = c.get("code")
-                up = float(c.get("up_stop_price") or 0)
-                if not code or up <= 0:
-                    skipped.append({"code": code, "reason": "缺涨停价"})
-                    continue
-                reason = self._buyable(code, nav, now)
-                if reason:
-                    skipped.append({"code": code, "reason": reason})
-                    continue
-                if self._one_word_board(code, up, provider):
-                    skipped.append({"code": code, "reason": "一字板买不到"})
-                    continue
-                tick = (provider_tick or {}).get(code) or {}
-                p = self.create_pending_buy(code, up, now, tick)
-                if p is None:
-                    skipped.append({"code": code, "reason": "排板不通过"})
-                    continue
-                bought.append(p)
-                nav = self._nav_estimate()   # 建委托后更新可用净值(冻结口径)
-        snap = self._snapshot_state()
-        self.state["screens_done"].append(ts_key)
-        try:
-            self.save()
-        except Exception:
-            self._restore_state(snap)
-            return {"candidates": len(result.get("candidates", [])),
-                    "bought": bought, "skipped": skipped, "env_ok": env_ok,
-                    "error": "状态保存失败"}
-        return {"candidates": len(result.get("candidates", [])),
-                "bought": bought, "skipped": skipped, "env_ok": env_ok}
-
     def _screen_candidates(self, provider):
-        """门禁求值 + 引擎选股(pick/盘中排队共用编排)。"""
+        """门禁求值 + 引擎选股(收盘选股 pick_top5_at_close 的编排)。"""
         from prism.engine import run_screen
-        from prism import registry as reg
         market_ctx = provider.build_market_context()
         gate_fids = (self.strategy.get("market_gate") or {}).get("factors", [])
-        gate_factors = {}
-        for fid in gate_fids:
-            try:
-                res = reg.get_factor(fid)["func"](market_ctx)
-                if isinstance(res, dict):
-                    gate_factors[fid] = 1 if res.get("score") else 0
-                else:
-                    gate_factors[fid] = 1 if res else 0
-            except Exception:
-                gate_factors[fid] = 0
+        gate_factors = engine.gate_evaluate(gate_fids, market_ctx)
         limit_ups = provider.get_limit_ups()
         stock_contexts = {}
         for lu in limit_ups:
@@ -335,7 +236,7 @@ class PaperAccount:
                                       str(c.get("code"))))
         picked = [{"code": c["code"],
                    "score": float(c.get("scores", {}).get("composite", 0)),
-                   "date": d, "for_date": _next_weekday(d)}
+                   "date": d, "for_date": next_weekday(d)}
                   for c in cands[:top_n if env_ok else 0]]
         snap = self._snapshot_state()
         self.state["planned_buys"] = picked
@@ -433,17 +334,6 @@ class PaperAccount:
             return "现金不足"
         return None
 
-    def _one_word_board(self, code, up_price, provider):
-        """一字板判定: 当日K线 low >= up_price-0.01(全天未开板) → True。"""
-        try:
-            df = provider.ds.get_kline(code, days=1)
-        except Exception:
-            return True              # 拿不到K线 → 保守视为买不到
-        if df is None or len(df) == 0 or "low" not in getattr(df, "columns", []):
-            return True
-        low = float(df["low"].iloc[-1])
-        return low >= up_price - 0.01
-
     # ---------- 排板队列状态机(设计 §2/§3) ----------
     def available_cash(self):
         """可用现金 = cash − Σ冻结(排板挂单锁定额)。"""
@@ -503,58 +393,71 @@ class PaperAccount:
         filled, canceled = [], []
         for p in list(self.state.get("pending_buys", [])):
             t = ticks.get(p["code"])
-            if not t:
+            if not t or t.get("lastPrice") is None:
                 continue                      # tick 缺失 → 保持排队
-            last = t.get("lastPrice")
-            if last is None:
-                continue
+            last = t["lastPrice"]
+            # dvol 单位=股: lastVolume(手) − base_volume(手) = 手差, ×100 折股,
+            # 与 queued_shares(股)+shares(股) 同量纲比较(成交条件才可满足)
+            dvol = (int(t.get("lastVolume") or 0) - p["base_volume"]) * 100
+            eaten = dvol >= p["queued_shares"] + p["shares"]
             if last < p["price"] - 0.001:
                 # 路径②(真实打板主成交通道): 炸板时若建单时初始队列已被卖单
                 # 吃穿(ΔV ≥ queued+shares), 说明已轮到我们 → 按涨停价成交;
                 # 未吃穿 → 真没排到, 撤单(流水记 ΔV 供事后归因)。
-                dvol_break = ((int(t.get("lastVolume") or 0)
-                               - p["base_volume"]) * 100)
-                if dvol_break >= p["queued_shares"] + p["shares"] \
-                        and self._execute_fill_buy(p, now):
+                if eaten and self._execute_fill_buy(p, now):
                     filled.append(p["code"])
                     continue
                 self._dispose_pending(p["code"], "queue_cancel_break",
-                                      now, dvol=dvol_break)
+                                      now, dvol=dvol)
                 canceled.append(p["code"])
                 continue
-            # dvol 单位=股: lastVolume(手) − base_volume(手) = 手差, ×100 折股,
-            # 与 queued_shares(股)+shares(股) 同量纲比较(成交条件才可满足)
-            dvol = (int(t.get("lastVolume") or 0) - p["base_volume"]) * 100
-            if dvol >= p["queued_shares"] + p["shares"] \
-                    and abs(last - p["price"]) <= 0.001:
+            # 路径①(钉板排队): 队列吃穿 + 现价仍在涨停价 → 成交
+            if eaten and abs(last - p["price"]) <= 0.001:
                 if self._execute_fill_buy(p, now):
                     filled.append(p["code"])
         return {"filled": filled, "canceled": canceled}
+
+    def _record_buy(self, code, shares, price, now, reason, fee=None):
+        """买入记账内核(临界段内): 扣款 + holdings + 流水, 返回成交 dict; 失败 None。
+
+        调用方持有临界段与 save/回滚; 成交价按各通道口径算好(排板成交/开盘买入
+        无上滑, screen 路径含滑点)。fee 缺省 = 金额×(佣金+过户费); entry_nav
+        取记账前净值(与 _execute_buy 原口径一致)。
+        """
+        st = self.state
+        nav = self._nav_estimate()            # 记账前净值(必须先于扣款)
+        amount = round(shares * price, 2)
+        if fee is None:
+            fee = round(amount * (self.fee_rate + self.transfer_fee), 2)
+        fee = round(float(fee), 2)
+        cash_after = round(st["cash"] - amount - fee, 2)
+        if cash_after < 0:
+            return None
+        d = now.strftime("%Y-%m-%d")
+        st["cash"] = cash_after
+        # holdings 字段各买入通道完全对齐(cost/buy_price/entry_nav)
+        st["holdings"].append({"code": code, "shares": shares, "cost": price,
+                               "buy_date": d, "buy_price": price,
+                               "entry_nav": nav})
+        st["trades"].append({
+            "ts": now.strftime("%Y-%m-%dT%H:%M:%S"), "date": d, "side": "buy",
+            "code": code, "price": price, "shares": shares, "amount": amount,
+            "fee": fee, "reason": reason, "cash_after": cash_after})
+        return {"code": code, "shares": shares, "price": price,
+                "amount": amount, "fee": fee}
 
     def _execute_fill_buy(self, p, now):
         """排板成交记账(临界段): 按挂单价成交, 无上滑; 解冻差额隐含
         (frozen 不扣——成交扣实际金额, pending 移除后冻结自然释放)。"""
         code, shares, price = p["code"], p["shares"], p["price"]
-        amount = shares * price
-        fee = amount * (self.fee_rate + self.transfer_fee)   # 佣金万2.5+过户万0.1
+        fee = shares * price * (self.fee_rate + self.transfer_fee)  # 佣金万2.5+过户万0.1
         snap = self._snapshot_state()
         try:
-            st = self.state
-            if st["cash"] < amount + fee:
+            if self._record_buy(code, shares, price, now, "queue_fill",
+                                fee=fee) is None:
                 return False
-            nav = self._nav_estimate()
-            d = now.strftime("%Y-%m-%d")
-            ts = now.strftime("%Y-%m-%dT%H:%M:%S")
-            st["cash"] = round(st["cash"] - amount - fee, 4)
-            # holdings 字段与既有 _execute_buy 完全对齐(cost/buy_price/entry_nav)
-            st["holdings"].append({"code": code, "shares": shares,
-                                   "cost": price, "buy_date": d,
-                                   "buy_price": price, "entry_nav": nav})
-            st["trades"].append({"side": "buy", "code": code, "shares": shares,
-                                 "price": price, "fee": round(fee, 4),
-                                 "date": d, "reason": "queue_fill", "ts": ts})
-            st["pending_buys"] = [x for x in st["pending_buys"]
-                                  if x["code"] != code]
+            self.state["pending_buys"] = [x for x in self.state["pending_buys"]
+                                          if x["code"] != code]
             self.save()
             return True
         except Exception:
@@ -591,35 +494,21 @@ class PaperAccount:
         """买入执行(临界段: 内存改→不变量校验→save, 失败回滚)。"""
         now = now or datetime.now()
         snap = self._snapshot_state()
-        nav = self._nav_estimate()
-        target = nav * self.position_ratio
+        target = self._nav_estimate() * self.position_ratio
         buy_price = round(up_price * (1 + (self.slippage if slip is None else slip)), 4)
         shares = int(target / buy_price / 100) * 100
         if shares <= 0:
             return None
-        amount = round(shares * buy_price, 2)
-        fee = round(amount * (self.fee_rate + self.transfer_fee), 2)
-        cash_after = round(self.state["cash"] - amount - fee, 2)
-        if cash_after < 0:
+        done = self._record_buy(code, shares, buy_price, now, "screen")
+        if done is None:
             return None
-        d = now.strftime("%Y-%m-%d")
-        ts = now.strftime("%Y-%m-%dT%H:%M:%S")
-        self.state["cash"] = cash_after
-        self.state["holdings"].append({
-            "code": code, "shares": shares, "cost": buy_price,
-            "buy_date": d, "buy_price": buy_price, "entry_nav": nav})
-        self.state["trades"].append({
-            "ts": ts, "date": d, "side": "buy", "code": code,
-            "price": buy_price, "shares": shares, "amount": amount,
-            "fee": fee, "reason": "screen", "cash_after": cash_after})
         self.state["live_nav"] = round(self._nav_estimate(), 2)
         try:
             self.save()
         except Exception:
             self._restore_state(snap)
             return None
-        return {"code": code, "shares": shares, "price": buy_price,
-                "amount": amount, "fee": fee}
+        return done
 
     # ---------- 卖出 ----------
     def sell_check(self, ticks, now=None):
@@ -734,34 +623,18 @@ class PaperAccount:
         rules = self.strategy.get("sell_rules") or {}
         return int(float(rules.get("max_hold_days") or 5))
 
-    def _due_by_kline(self, code, buy_date, provider):
-        """到期判定(兜底口径): 持仓股K线中 buy_date 之后的交易日数 >= max_hold_days。
-
-        注(终审 I-3): 自然日为主口径(与回测/实盘 ExitRule 一致, 见
-        PaperDaemon._due_natural); K线 bar 数仅作数据缺失兜底, 不再被
-        daemon 默认路径使用。"""
-        try:
-            df = provider.ds.get_kline(code, days=15)
-            days = self._kline_day_strs(df)
-        except Exception:
-            return False
-        if df is None or len(df) == 0:
-            return False
-        b = self._n8(buy_date)
-        after = [s for s in days if s > b]
-        return len(after) >= self.max_hold_days()
-
     def _nav_at(self, close_fn, d):
         """收盘盯市净值(结算/补算共用): 现金 + Σ持仓×(收盘价, 缺价回退成本)。"""
         return self.state["cash"] + sum(
             h["shares"] * float(close_fn(h["code"], d) or h["cost"])
             for h in self.state["holdings"])
 
-    def settle_day(self, close_fn, due_fn=None, provider=None, now=None):
+    def settle_day(self, close_fn, due_fn, now=None):
         """盘后结算: 到期持仓按收盘价卖出 + 当日净值盯市定格 + 幂等。
 
         close_fn(code, day=None) -> float|None; due_fn(code, buy_date) -> bool
-        (缺省 _due_by_kline); 拿不到收盘价的到期持仓保留(下个交易日再结)。"""
+        (生产调用点恒传自然日口径闭包, 见 PaperDaemon._due_natural);
+        拿不到收盘价的到期持仓保留(下个交易日再结)。"""
         now = now or datetime.now()
         d = now.strftime("%Y-%m-%d")
         if self.state is None and not self.load():
@@ -770,9 +643,7 @@ class PaperAccount:
             return {"already_done": True}
         closed = []
         for h in list(self.state["holdings"]):
-            due = due_fn(h["code"], h["buy_date"]) if due_fn \
-                else self._due_by_kline(h["code"], h["buy_date"], provider)
-            if not due:
+            if not due_fn(h["code"], h["buy_date"]):
                 continue
             px = close_fn(h["code"], d)
             if not px or px <= 0:

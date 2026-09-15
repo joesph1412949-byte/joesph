@@ -63,21 +63,6 @@ def test_settle_no_price_keeps_holding(acc):
     assert out["closed"] == [] and len(acc.state["holdings"]) == 1
 
 
-def test_due_by_kline(acc, monkeypatch):
-    """_due_by_kline: buy_date 后 K线 bar 数 >=5 → 到期。"""
-    import pandas as pd
-    class _DS:
-        def get_kline(self, code, days=15):
-            return pd.DataFrame(
-                {"close": [1.0] * 7},
-                index=["20260901", "20260902", "20260903", "20260904",
-                       "20260907", "20260908", "20260909"])
-    class _P:
-        ds = _DS()
-    assert acc._due_by_kline("600000.SH", "2026-09-01", _P()) is True
-    assert acc._due_by_kline("600000.SH", "2026-09-03", _P()) is False
-
-
 def test_backfill_nav(acc):
     """缺口日补算: nav_history 末日后交易日逐日盯市; created 之前不补(M-b)。"""
     acc.state["nav_history"] = []               # 全空 → last=None, 从头补

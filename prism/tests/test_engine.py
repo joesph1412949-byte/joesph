@@ -172,9 +172,8 @@ def test_factor_hit_unknown_op_falls_back_score():
 
 # ---------------- v5 实盘板块评分门(run_screen) ----------------
 
-def test_run_screen_sector_score_gate_and_attach():
-    """评分开启+ctx带mkt: 低分板块候选被剔除, 通过者附 sector_score。"""
-    from prism import sector_score as ss
+def test_run_screen_sector_score_gate_filters():
+    """评分开启+ctx带mkt: 低分/无评分板块候选被剔除(引擎不再挂候选字段)。"""
     s = {
         "id": "t", "name": "t", "description": "",
         "market_gate": {"model": "node", "threshold": 0, "factors": []},
@@ -198,11 +197,10 @@ def test_run_screen_sector_score_gate_and_attach():
     out = engine.run_screen(s, market_ctx, stock_contexts=stock_ctxs)
     codes = [c["code"] for c in out["candidates"]]
     assert codes == ["600000.SH"]                 # 801999 无评分 → 剔除
-    assert out["candidates"][0]["sector_score"] > 75
 
 
 def test_run_screen_sector_score_disabled_noop():
-    """评分关闭/ctx无mkt → 行为与 v4 完全一致, 不附键。"""
+    """评分关闭/ctx无mkt → 行为与 v4 完全一致(不过滤)。"""
     s = {"id": "t", "name": "t", "description": "",
          "market_gate": {"model": "node", "threshold": 0, "factors": []},
          "scoring_models": [{"id": "m", "name": "m", "weight": 1.0,
@@ -213,7 +211,7 @@ def test_run_screen_sector_score_disabled_noop():
     stock_ctxs = {"600000.SH": FactorContext(code="600000.SH", kline=None)}
     out = engine.run_screen(s, market_ctx, stock_contexts=stock_ctxs)
     assert len(out["candidates"]) == 1
-    assert "sector_score" not in out["candidates"][0]
+    assert out["candidates"][0]["code"] == "600000.SH"
 
 
 def test_run_screen_sector_score_empty_scores_fail_closed():

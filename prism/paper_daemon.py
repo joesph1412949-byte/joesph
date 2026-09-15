@@ -9,13 +9,15 @@ import threading
 import time
 from datetime import datetime
 
+from prism import schedule
 from prism.paper import PaperAccount
 
 LOG = logging.getLogger("paper_daemon")
-PICK_SLOT = "15:05"               # 收盘选股时点(spec §5)
-OPEN_WINDOW = ("09:26", "09:35")  # 次日开盘买入窗口(spec §5)
-SETTLE_AFTER = "15:00"
-POLL_SECONDS = 5
+# 调度时点常量与时段/连接/退避共用 live_daemon(prism/schedule.py)
+PICK_SLOT = schedule.PICK_SLOT     # 收盘选股时点(spec §5)
+OPEN_WINDOW = schedule.OPEN_WINDOW  # 次日开盘买入窗口(spec §5)
+SETTLE_AFTER = schedule.SETTLE_AFTER
+POLL_SECONDS = 5                   # 模拟盘轮询间隔(纯内存记账, 可密)
 INDEX_CODE = "000001.SH"          # 上证指数: 交易日历来源
 ZT_REFRESH_INTERVAL = 6 * 3600    # 涨停池缓存刷新节流(秒)
 
@@ -43,11 +45,8 @@ class PaperDaemon:
 
     # ---------- 时段 ----------
     def in_session(self, now):
-        """交易日时段: 周一~五 ∧ (09:30-11:30 ∨ 13:00-15:00)。"""
-        if now.weekday() >= 5:
-            return False
-        hm = now.strftime("%H:%M")
-        return ("09:30" <= hm <= "11:30") or ("13:00" <= hm <= "15:00")
+        """交易日时段(与实盘守护同一份判定, prism/schedule.py)。"""
+        return schedule.in_session(now)
 
     # ---------- 数据函数(结算/补算用, 全部只读) ----------
     def close_fn(self, code, day=None):
@@ -68,8 +67,7 @@ class PaperDaemon:
 
     def _due_natural(self, buy_date, day_str):
         """到期判定(主口径, 终审 I-3): 自然日 (结算日 - buy_date).days
-        >= max_hold_days, 与回测/实盘 ExitRule 同口径;
-        K线 bar 数(_due_by_kline)仅作数据缺失兜底, 不再走 daemon 默认路径。"""
+        >= max_hold_days, 与回测/实盘 ExitRule 同口径。"""
         try:
             held = (datetime.strptime(day_str, "%Y-%m-%d")
                     - datetime.strptime(str(buy_date), "%Y-%m-%d")).days
@@ -154,7 +152,7 @@ class PaperDaemon:
                 # (due_fn 形参为 (code, buy_date), 结算日经 _due_natural 注入)
                 out["settle"] = self.account.settle_day(
                     self.close_fn, due_fn=lambda c, bd: self._due_natural(bd, d),
-                    provider=self.provider, now=now)
+                    now=now)
                 out["action"] = "settle"
             # 收盘选股(spec §5): 15:05, 同 tick 先结算后选股; 幂等键带日期
             # (C1: pickT<日>T15:05 每日唯一), 结果落日志(C3)
@@ -240,24 +238,11 @@ class PaperDaemon:
 
     # ---------- 连接与主循环 ----------
     def _sleep(self, sec):
-        if self.sleep_fn:
-            self.sleep_fn(sec)
-        else:
-            time.sleep(sec)
+        schedule.sleep(sec, self.sleep_fn)
 
     def connect_provider(self, max_retry=60, retry_wait=10):
-        from prism.data import DataProvider
-        for _ in range(max_retry):
-            try:
-                p = DataProvider()
-                p.connect()
-                if p.connected:
-                    self.provider = p
-                    return True
-            except Exception:
-                pass
-            self._sleep(retry_wait)
-        return False
+        """连接 QMT 行情数据源(与 live_daemon 同一份重试, prism/schedule.py)。"""
+        return schedule.connect_provider(self, max_retry, retry_wait)
 
     def startup_guard(self):
         """启动守卫(§8.3, 终审 I-4): 账本存在但损坏/版本不符 → 拒绝启动,

@@ -22,7 +22,7 @@ def test_generate_signals_shape():
                         "up_stop_price": 10.55, "scores": {"composite": 5.0}}],
     }
     strategy = {"id": "default", "sell_rules": {}}
-    sigs = trader.generate_signals(result, strategy, env="sim")
+    sigs = trader.generate_signals(result, strategy)
     assert len(sigs) == 1
     s = sigs[0]
     assert s["action"] == "BUY"
@@ -38,7 +38,7 @@ def test_generate_signals_shape():
 
 def test_generate_signals_empty_when_env_bad():
     result = {"environment_ok": False, "candidates": []}
-    assert trader.generate_signals(result, {"id": "x"}, env="sim") == []
+    assert trader.generate_signals(result, {"id": "x"}) == []
 
 
 def test_check_paused(tmp_path, monkeypatch):
@@ -145,7 +145,7 @@ def _factors(tmp_path, monkeypatch):
 
 
 def test_run_daily_full_flow(tmp_path, monkeypatch):
-    """补充: 盘后完整流程 — 选股 → archive 回调 → 生成信号 → 写入 pending。"""
+    """补充: 盘后完整流程 — 选股 → 生成信号 → 写入 pending。"""
     monkeypatch.setattr(trader, "SIGNAL_ROOT", tmp_path)
     strategy = {
         "id": "flow",
@@ -155,14 +155,11 @@ def test_run_daily_full_flow(tmp_path, monkeypatch):
         "filters": {"candidate_min_model": 1},
     }
     provider = _FakeProvider([{"code": "600000.SH"}, {"code": "000001.SZ"}])
-    archived = []
-    result = trader.run_daily(strategy, provider, env="sim", volume=200,
-                              archive=lambda cands: archived.append(cands))
+    result = trader.run_daily(strategy, provider, env="sim", volume=200)
     assert result["paused"] is False
     assert result["environment_ok"] is True
     assert len(result["candidates"]) == 2
     assert result["signals_written"] == 2
-    assert len(archived) == 1 and len(archived[0]) == 2
     files = list((tmp_path / "sim" / "pending").glob("*.json"))
     assert len(files) == 2
     for f in files:
@@ -190,7 +187,7 @@ def test_generate_signals_price_zero_when_no_up_stop_price():
         "environment_ok": True,
         "candidates": [{"code": "600000.SH", "scores": {"composite": 5.0}}],
     }
-    sigs = trader.generate_signals(result, {"id": "x"}, env="real")
+    sigs = trader.generate_signals(result, {"id": "x"})
     assert len(sigs) == 1 and sigs[0]["price"] == 0
 
 
@@ -277,18 +274,3 @@ def test_run_daily_sim_keeps_no_price_candidates(tmp_path, monkeypatch):
     assert result["skipped_no_price"] == 0
     files = list((tmp_path / "sim" / "pending").glob("*.json"))
     assert len(files) == 2
-
-
-# ---------------- v5 信号透传 sector_score ----------------
-
-def test_generate_signals_passes_sector_score():
-    """候选带 sector_score → 透传信号; 不带 → null(协议兼容)。"""
-    result = {"environment_ok": True, "candidates": [
-        {"code": "600000.SH", "up_stop_price": 10.0,
-         "scores": {"composite": 3}, "sector_score": 82.3},
-        {"code": "000001.SZ", "up_stop_price": 9.0,
-         "scores": {"composite": 2}},
-    ]}
-    sigs = trader.generate_signals(result, {"id": "s1"})
-    assert sigs[0]["sector_score"] == 82.3
-    assert sigs[1]["sector_score"] is None

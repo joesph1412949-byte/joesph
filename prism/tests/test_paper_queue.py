@@ -227,3 +227,28 @@ def test_fill_price_no_slip(acc):
     assert h["buy_price"] == 10.0
     fee = 300000.0 * 0.00026
     assert acc.state["cash"] == pytest.approx(1_000_000.0 - 300000.0 - fee)
+
+
+def test_buyable_rejection_reasons(acc):
+    """_buyable 拒绝链(生产入口 create_pending_buy 走同一判定, 且不改账本):
+    已持仓 / 仓位已满 / 现金不足 / 今日已交易。"""
+    now = datetime(2026, 9, 2, 10, 0, 5)
+    tick = _tick(10.0, 1_000_000, bid_vol=_BID_OK)
+
+    def hold(code):
+        return {"code": code, "shares": 100, "cost": 9.0, "buy_date": "2026-09-01",
+                "buy_price": 9.0, "entry_nav": 1e6}
+
+    acc.state["holdings"].append(hold("600000"))
+    assert acc._buyable("600000", 1e6, now) == "已持仓"
+    assert acc.create_pending_buy("600000", 10.0, now, tick) is None
+    acc.state["holdings"] = [hold("60000%d" % i) for i in range(5)]
+    assert acc._buyable("000001", 1e6, now) == "仓位已满"          # max_positions=5
+    acc.state["holdings"] = []
+    acc.state["cash"] = 8000.0
+    assert acc._buyable("000001", 50000.0, now) == "现金不足"      # 8000 < 5万×30%
+    acc.state["cash"] = 1_000_000.0
+    acc.state["trades"].append({"side": "buy", "code": "000001",
+                                "date": "2026-09-02", "reason": "queue_fill"})
+    assert acc._buyable("000001", 1e6, now) == "今日已交易"
+    assert acc.state["pending_buys"] == []                        # 判定不建委托

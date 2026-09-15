@@ -170,23 +170,6 @@ def test_backtest_fee_impact():
     assert rep1["avg_return_pct"] < rep0["avg_return_pct"]
 
 
-def test_backtest_compare_params_grid():
-    """参数网格对比: 每组参数一行, 含盈亏/回撤等统计。"""
-    s = load_strategy(_mk_strategy())
-    zf, kf = _feeds()
-    bt = backtest.Backtester(s, zt_feed=zf, kline_feed=kf)
-    rows = bt.compare_params(date(2026, 7, 1), date(2026, 7, 3), [
-        {"take_profit": 0.08, "stop_loss": 0.05, "hold_days": 5},
-        {"take_profit": 0.05, "stop_loss": 0.05, "hold_days": 5},
-    ])
-    assert len(rows) == 2
-    assert rows[0]["take_profit"] == 0.08 and rows[1]["take_profit"] == 0.05
-    assert rows[0]["trades"] == 1 and rows[1]["trades"] == 1
-    for row in rows:
-        assert "win_rate" in row and "avg_return_pct" in row
-        assert "max_drawdown_pct" in row and "hold_days" in row
-
-
 # ---------------- I1(审查 Important): 回测数据适配层 + sell_rules 采纳 + 端到端 ----------------
 
 def test_backtest_stock_ctx_builds_dataframe():

@@ -9,7 +9,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import pytest
 
 import prism.engine
-from prism.paper import PaperAccount, _next_weekday
+from prism.paper import PaperAccount
+from shared.common import next_weekday as _next_weekday
 
 
 STRATEGY = {"market_gate": {"factors": ["N1"], "threshold": 1},

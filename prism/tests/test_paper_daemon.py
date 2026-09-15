@@ -139,23 +139,6 @@ def test_kline_day_strs_index_fallback(tmp_path):
     assert acc._kline_day_strs(pd.DataFrame({"close": [1.0, 2.0, 3.0]})) == []
 
 
-def test_due_by_kline_time_column(tmp_path):
-    """新 schema(time列+RangeIndex)下 _due_by_kline 仍正确判定到期。"""
-    import pandas as pd
-    acc = PaperAccount(state_path=tmp_path / "k3.json")
-
-    class _P:
-        class ds:
-            @staticmethod
-            def get_kline(code, days=15):
-                return pd.DataFrame({"time": _ms_dates(range(2, 9)),
-                                     "close": [1.0] * 7})
-    # 2026-09-01 买入 → 买日后 7 根 ≥ max_hold_days(5) → 到期
-    assert acc._due_by_kline("600000.SH", "2026-09-01", _P()) is True
-    # 2026-09-04 买入 → 买日后 4 根 < 5 → 未到期
-    assert acc._due_by_kline("600000.SH", "2026-09-04", _P()) is False
-
-
 def test_close_fn_time_column(tmp_path):
     """daemon close_fn 在新 schema(time列)下取 ≤day 最后一根收盘价。"""
     import pandas as pd
@@ -470,15 +453,14 @@ def test_tick_once_open_window(tmp_path, monkeypatch, caplog):
 
 
 def test_tick_once_no_intraday_queue(tmp_path, monkeypatch):
-    """盘中 10:00/13:30/14:30 不再建买入队列(Task 4 删除盘中时点)。"""
+    """盘中 10:00/13:30/14:30 不建买入队列(Task 4 删除盘中时点后
+    buy_from_screen 已整体移除): 只盯盘, 不建 pending/不成交。"""
     d, acc = _daemon(tmp_path, monkeypatch)
-    calls = []
-    monkeypatch.setattr(acc, "buy_from_screen",
-                        lambda *a, **k: calls.append(1))
     for hm in ((10, 1), (13, 31), (14, 31)):
         out = d.tick_once(now=datetime(2026, 9, 2, *hm))
         assert out["action"] == "tick" and out["buys"] == []
-    assert calls == []                            # 全程未触发 buy_from_screen
+    assert acc.state["pending_buys"] == []
+    assert acc.state["holdings"] == []
 
 
 def test_open_buy_ticks_inject_limits(tmp_path, monkeypatch):

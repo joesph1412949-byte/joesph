@@ -13,6 +13,8 @@ UTF-8 and declares so), but comments must stay ASCII to avoid confusion.
 """
 import logging
 import logging.handlers
+import os
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # ---------------------------------------------------------------- paths
@@ -107,3 +109,32 @@ def limit_ratio_for_code(code):
     if c.startswith(("300", "301", "688")):
         return 0.20
     return 0.10
+
+
+# ---------------------------------------------------------------- io / dates
+# NOTE: comments here stay ASCII (same rule as the rest of this file).
+
+def atomic_write(path, text):
+    """Write text to path atomically: same-dir .tmp then os.replace.
+
+    A crash mid-write must never leave a half-written ledger/state file
+    (readers of paper/live state treat a truncated file as corrupt)."""
+    path = Path(path)
+    tmp = Path(str(path) + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def next_weekday(d):
+    """Next weekday (Sat/Sun skipped). Accepts date or 'YYYY-MM-DD';
+    returns the same type.
+
+    ponytail: no holiday calendar - a midweek holiday still counts as a
+    trading day; upgrade path is a real trading calendar."""
+    as_str = isinstance(d, str)
+    if as_str:
+        d = datetime.strptime(d, "%Y-%m-%d").date()
+    nxt = d + timedelta(days=1)
+    while nxt.weekday() >= 5:
+        nxt += timedelta(days=1)
+    return nxt.isoformat() if as_str else nxt

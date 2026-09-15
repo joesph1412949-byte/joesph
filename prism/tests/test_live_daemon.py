@@ -11,9 +11,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+from shared.common import next_weekday
 from shared.exit_rules import ExitRule, PositionBook, is_limit_down
 from prism.live_account import calc_buy_volume
-from prism.live_daemon import LiveDaemon, next_weekday
+from prism.live_daemon import LiveDaemon
 
 MON = datetime(2026, 9, 14, 15, 6)      # 周一 收盘后(选股)
 TUE_OPEN = datetime(2026, 9, 15, 9, 27)  # 周二 开盘买入窗口

@@ -29,25 +29,24 @@
 import argparse
 import json
 import logging
-import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
-from shared.common import STATE_DIR
+from shared.common import STATE_DIR, atomic_write, next_weekday
 from shared.exit_rules import PositionBook, is_limit_down
-from prism import trader
+from prism import schedule, trader
 from prism.live_account import LiveAccount, calc_buy_volume
 
 LOG = logging.getLogger("live_daemon")
 
-REPO = Path(__file__).resolve().parent.parent
 STATE_FILE = STATE_DIR / "live_state.json"
 POSITIONS_FILE = STATE_DIR / "positions.json"
 
-PICK_SLOT = "15:05"               # 收盘选股时点(策略 execution.pick_slot)
-OPEN_WINDOW = ("09:26", "09:35")  # 次日开盘买入窗口(execution.open_window)
-SETTLE_AFTER = "15:00"
-POLL_SECONDS = 30
+# 调度时点常量与时段/连接/退避共用 paper_daemon(prism/schedule.py)
+PICK_SLOT = schedule.PICK_SLOT    # 收盘选股时点(策略 execution.pick_slot)
+OPEN_WINDOW = schedule.OPEN_WINDOW  # 次日开盘买入窗口(execution.open_window)
+SETTLE_AFTER = schedule.SETTLE_AFTER
+POLL_SECONDS = 30                 # 实盘轮询间隔(比模拟盘宽: 有券商查询开销)
 SYNC_INTERVAL = 60                # 券商对账节流(秒)
 STATE_VERSION = 1
 DEFAULT_TAKE_PROFIT = 0.15        # 策略无 sell_rules 时的实盘缺省(同 full_factor_v1)
@@ -55,25 +54,9 @@ DEFAULT_STOP_LOSS = 0.05
 DEFAULT_MAX_HOLD = 5
 
 
-def next_weekday(d):
-    """下一个工作日(无节假日日历, 见体检报告 §3.2 #7 —— 桥端 armed 兜底)。"""
-    nxt = d + timedelta(days=1)
-    while nxt.weekday() >= 5:
-        nxt += timedelta(days=1)
-    return nxt
-
-
 def _code_tag(code):
     """order_id 里用的代码片段(去点/去横线)。"""
     return str(code).replace(".", "").replace("-", "").upper()
-
-
-def _atomic_write(path, text):
-    """原子写: 同目录 tmp + os.replace, 防半截文件。"""
-    path = Path(path)
-    tmp = Path(str(path) + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
 
 
 class LiveDaemon:
@@ -114,19 +97,13 @@ class LiveDaemon:
         if self._strat_cache is not None \
                 and self._strat_cache.get("id") == sid:
             return self._strat_cache
-        from prism import registry as reg
-        from prism.engine import load_strategy
-        reg.scan_factors(force=True)      # 幂等重扫(load_strategy 校验依赖)
-        self._strat_cache = load_strategy(
-            engine.STRATEGIES_DIR / ("%s.json" % sid))
-        exec_blk = (self._strat_cache.get("execution") or {})
+        self._strat_cache = engine.resolve_strategy(sid)
         # execution 块优先(策略 spec 单一事实源), 缺省回落构造参数
-        pct = exec_blk.get("pct")
+        pct, top_n = engine.execution_sizing(self._strat_cache)
         if pct and self._position_ratio_ctor is None:
-            self.position_ratio = float(pct)
-        top_n = exec_blk.get("top_n")
+            self.position_ratio = pct
         if top_n and self._max_positions_ctor is None:
-            self.max_positions = int(top_n)
+            self.max_positions = top_n
         return self._strat_cache
 
     def _sell_rules(self):
@@ -160,8 +137,8 @@ class LiveDaemon:
                 "exit_signaled": {}}
 
     def _save_state(self, st):
-        _atomic_write(self.state_path,
-                      json.dumps(st, ensure_ascii=False, indent=2))
+        atomic_write(self.state_path,
+                     json.dumps(st, ensure_ascii=False, indent=2))
 
     def _load_positions(self):
         if self.positions_path.exists():
@@ -173,8 +150,8 @@ class LiveDaemon:
         return PositionBook()
 
     def _save_positions(self, book):
-        _atomic_write(self.positions_path,
-                      json.dumps(book.all(), ensure_ascii=False, indent=2))
+        atomic_write(self.positions_path,
+                     json.dumps(book.all(), ensure_ascii=False, indent=2))
 
     # ---------------- 行情 ----------------
     def _ticks(self, codes):
@@ -361,11 +338,8 @@ class LiveDaemon:
 
     # ---------------- 单轮 ----------------
     def in_session(self, now):
-        """交易日时段: 周一~五 ∧ (09:30-11:30 ∨ 13:00-15:00)。"""
-        if now.weekday() >= 5:
-            return False
-        hm = now.strftime("%H:%M")
-        return ("09:30" <= hm <= "11:30") or ("13:00" <= hm <= "15:00")
+        """交易日时段(与模拟盘同一份判定, prism/schedule.py)。"""
+        return schedule.in_session(now)
 
     def tick_once(self, now=None):
         now = now or (self.now_fn() if self.now_fn else datetime.now())
@@ -411,27 +385,11 @@ class LiveDaemon:
 
     # ---------------- 连接与主循环 ----------------
     def _sleep(self, sec):
-        if self.sleep_fn:
-            self.sleep_fn(sec)
-        else:
-            time.sleep(sec)
+        schedule.sleep(sec, self.sleep_fn)
 
     def connect_provider(self, max_retry=60, retry_wait=10):
-        """连接 QMT 行情数据源(与 paper_daemon.connect_provider 同款重试)。"""
-        if self.provider is not None:
-            return True
-        from prism.data import DataProvider
-        for _ in range(max_retry):
-            try:
-                p = DataProvider()
-                p.connect()
-                if p.connected:
-                    self.provider = p
-                    return True
-            except Exception:
-                pass
-            self._sleep(retry_wait)
-        return False
+        """连接 QMT 行情数据源(与 paper_daemon 同一份重试, prism/schedule.py)。"""
+        return schedule.connect_provider(self, max_retry, retry_wait)
 
     def run_forever(self):
         logging.basicConfig(level=logging.INFO,

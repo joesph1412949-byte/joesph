@@ -68,70 +68,67 @@ _GATE_DATA_NEEDS = {
 }
 
 
+def _cut(rec, key, asof_str):
+    """K线记录切片: {"dates": [...], key: [...]}, 只留 dates <= asof 的下标。
+
+    key 传 str 或 tuple(str)(tuple 供同记录多值列, 如 sector 的 close+amount);
+    值为 None 的列不切(与旧实现 `if rec.get("amount") is not None` 同语义)。
+    无 <=asof 的数据 → None。
+    防未来函数核心, 逐字保持: 同下标同步拷贝, 不重排不改值。
+    """
+    dates = rec.get("dates") or []
+    keep = [i for i, d in enumerate(dates) if d <= asof_str]
+    if not keep:
+        return None
+    out = {"dates": [dates[i] for i in keep]}
+    for k in ((key,) if isinstance(key, str) else key):
+        if rec.get(k) is not None:
+            out[k] = [rec[k][i] for i in keep]
+    return out
+
+
+def _cut_rows(rows, key, asof_str):
+    """{code: 记录} 整体切片: 空切片项直接丢弃(与旧实现 `if keep` 同语义)。"""
+    out = {}
+    for code, rec in (rows or {}).items():
+        cut = _cut(rec, key, asof_str)
+        if cut:
+            out[code] = cut
+    return out
+
+
 def _slice_mkt(mkt, asof):
     """把完整市场数据缓存切成 asof 日快照(防未来函数)。
 
     mkt: 市场数据层缓存, {"sector": {code: {"dates":[...], "close":[...]},
-    "global": {...}}} 或按日的 day_snapshot 结构。返回 {"sector": {...}} 只含
+    "global": {...}}}。返回 {"sector": {...}} 只含
     dates <= asof 的K线(与 _pick 的股票K线同语义: 因子只见当日及之前)。
     """
     if not mkt:
         return {}
+    fields = mkt if isinstance(mkt, dict) else {}   # 非 dict 脏数据 → 只剩空 sector
     asof_str = asof.strftime("%Y-%m-%d")
-    sectors = (mkt.get("sector") or {} if isinstance(mkt, dict)
-               else {})
     out = {"sector": {}}
-    for code, rec in sectors.items():
-        dates = rec.get("dates") or []
-        keep = [i for i, d in enumerate(dates) if d <= asof_str]
-        if not keep:
-            continue
-        out["sector"][code] = {
-            "dates": [dates[i] for i in keep],
-            "close": [rec["close"][i] for i in keep],
-        }
-        if rec.get("amount") is not None:
-            out["sector"][code]["amount"] = [
-                rec["amount"][i] for i in keep]
-    # 全球指数同样切片(美股映射因子用)
-    glob = mkt.get("global") if isinstance(mkt, dict) else {}
-    if glob:
-        out["global"] = {}
-        for code, rec in glob.items():
-            dates = rec.get("dates") or []
-            keep = [i for i, d in enumerate(dates) if d <= asof_str]
-            if keep:
-                out["global"][code] = {
-                    "dates": [dates[i] for i in keep],
-                    "close": [rec["close"][i] for i in keep],
-                }
-    # 板块资金流同样切片(SEC3 板块资金流因子用)
-    flows = mkt.get("sector_flow") if isinstance(mkt, dict) else {}
-    if flows:
-        out["sector_flow"] = {}
-        for code, rec in flows.items():
-            dates = rec.get("dates") or []
-            keep = [i for i, d in enumerate(dates) if d <= asof_str]
-            if keep:
-                out["sector_flow"][code] = {
-                    "dates": [dates[i] for i in keep],
-                    "main_net_in": [rec["main_net_in"][i] for i in keep],
-                }
-    # 商品期货同样切片(F8 行业边际变化因子用)
-    futs = mkt.get("futures") if isinstance(mkt, dict) else {}
+    # sector: close 恒切, amount(可选, SEC4 拥挤度)有值才切
+    for code, rec in (fields.get("sector") or {}).items():
+        keys = ("close", "amount") if rec.get("amount") is not None else "close"
+        cut = _cut(rec, keys, asof_str)
+        if cut:
+            out["sector"][code] = cut
+    # global(美股映射) / sector_flow(SEC3 板块资金流) 同款切片, 无数据不带键
+    for name, key in (("global", "close"), ("sector_flow", "main_net_in")):
+        if fields.get(name):
+            out[name] = _cut_rows(fields[name], key, asof_str)
+    # 商品期货(F8 行业边际变化): 板块 → 品种 → K线 两层嵌套, 单独展开
+    futs = fields.get("futures") or {}
     if futs:
         out["futures"] = {}
         for scode, rec in futs.items():
             comms = {}
             for sym, k in (rec.get("commodities") or {}).items():
-                dates = k.get("dates") or []
-                keep = [i for i, d in enumerate(dates) if d <= asof_str]
-                if keep:
-                    comms[sym] = {
-                        "name": k.get("name"),
-                        "dates": [dates[i] for i in keep],
-                        "close": [k["close"][i] for i in keep],
-                    }
+                cut = _cut(k, "close", asof_str)
+                if cut:
+                    comms[sym] = dict(cut, name=k.get("name"))
             out["futures"][scode] = {"name": rec.get("name"),
                                      "commodities": comms}
     return out
@@ -501,8 +498,7 @@ class Backtester:
         if exit_close is None:
             return None
         # ---- 真实交易成本(A股标准) ----
-        # 买入成本: 佣金(双向) + 过户费(双向) + 滑点(买+)
-        buy_price = entry_close * (1 + self.slippage)
+        # 买入成本: 佣金(双向) + 过户费(双向) + 滑点(买+; buy_price 见上)
         buy_comm = buy_price * self.fee_rate          # 买入佣金
         buy_transfer = buy_price * self.transfer_fee  # 买入过户费
         # 卖出成本: 佣金 + 印花税(仅卖出) + 过户费 + 滑点(卖-)
@@ -543,8 +539,8 @@ class Backtester:
                 ev2["sell"].append(t)
         skipped = 0
         curve = []
-        # 持仓: [(uid, 投入本金, code, 买入日期, 收益率锚点)]
-        # 盯市: 持有期内按 K线收盘价相对买入价的涨跌估算当前市值
+        # 持仓: [(uid, 投入本金, 该笔收益率)]
+        # 盯市: 持有期内按已实现收益率估算当前市值(day_nav 用于下一笔建仓定档)
         holdings = []
         all_days = sorted(set(list(events.keys()) +
                               [t["date"] for t in trades]))
@@ -553,15 +549,15 @@ class Backtester:
             # 1) 卖出: 回款 本金×(1+收益率), 从持仓移除(按 uid 精确匹配)
             for t in ev["sell"]:
                 uid = "%s|%s" % (t["date"], t["code"])
-                for i, (u, p, _c, _bd, _r) in enumerate(holdings):
-                    if u == uid:
+                for i, h in enumerate(holdings):
+                    if h[0] == uid:
                         holdings.pop(i)
-                        cash += p * (1 + t["return_pct"] / 100.0)
+                        cash += h[1] * (1 + t["return_pct"] / 100.0)
                         break
                 # 未成交的买入(不在持仓) → 不回款
             # 2) 买入: 按当日净值×仓位比例投入, 现金足且持仓未满
-            day_nav = cash + sum(p * (1 + r / 100.0) for _u, p, _c, _bd, r
-                                 in holdings)
+            day_nav = cash + sum(p * (1 + r / 100.0)
+                                 for _u, p, r in holdings)
             for t in ev["buy"]:
                 # per_trade 必须在循环内用本笔的 t(审查 Critical#1: 循环外
                 # 引用泄漏变量, 当日多笔买入共用无关交易的乘数)
@@ -570,12 +566,11 @@ class Backtester:
                 if cash >= per_trade and len(holdings) < self.max_positions:
                     cash -= per_trade
                     holdings.append(("%s|%s" % (t["date"], t["code"]),
-                                     per_trade, t["code"], t["date"],
-                                     t["return_pct"]))
+                                     per_trade, t["return_pct"]))
                 else:
                     skipped += 1
-            # 3) 当日净值: 现金 + 持仓按已实现收益计(持有期内保守按成本)
-            nav = cash + sum(p for _u, p, _c, _bd, _r in holdings)
+            # 3) 当日净值: 现金 + 持仓按成本计(持有期内保守按成本)
+            nav = cash + sum(p for _u, p, _r in holdings)
             curve.append((day, round(nav, 2)))
         return curve, skipped
 
@@ -613,13 +608,11 @@ class Backtester:
 
     # ---------------- 统计 ----------------
     @staticmethod
-    def _report(trades, dates, gate_notes=None, equity_stats=None,
-                skipped_cash=0):
+    def _report(trades, dates, gate_notes, equity_stats, skipped_cash=0):
         """汇总回测报告。
 
-        equity_stats: _equity_stats 的结果(基于净值曲线), 包含
-        total_return_pct/max_drawdown_pct/sharpe_ratio; None 时回退到
-        旧的"每笔等权累加"口径(兼容无资金场景的简单报告)。"""
+        equity_stats: _equity_stats 的结果(基于资金模拟净值曲线), 含
+        total_return_pct/max_drawdown_pct/sharpe_ratio。"""
         n = len(trades)
         base = {"trading_days": len(dates), "trades": n,
                 "gate_notes": gate_notes or [], "skipped_cash": skipped_cash}
@@ -637,33 +630,10 @@ class Backtester:
         avg_win = sum(wins) / len(wins) if wins else 0.0
         avg_loss = sum(losses) / len(losses) if losses else 0.0
         pl_ratio = (avg_win / abs(avg_loss)) if losses and avg_loss != 0 else None
-        # 净值口径指标(优先): 总收益/最大回撤/夏普 基于资金模拟曲线
-        if equity_stats:
-            total_ret = equity_stats.get("total_return_pct")
-            max_dd = equity_stats.get("max_drawdown_pct")
-            sharpe = equity_stats.get("sharpe_ratio")
-        else:
-            # 回退: 每笔等权累加(旧口径, 无资金模型)
-            total_ret = round(sum(returns), 2)
-            cum = {}
-            for t in trades:
-                cum[t["date"]] = cum.get(t["date"], 0.0) + t["return_pct"]
-            eq = 0.0
-            peak = 0.0
-            max_dd = 0.0
-            for d in sorted(cum):
-                eq += cum[d]
-                peak = max(peak, eq)
-                if peak > 0:
-                    max_dd = max(max_dd, (peak - eq) / peak * 100)
-            max_dd = round(max_dd, 2)
-            sharpe = None
-            if n >= 2:
-                mean_r = sum(returns) / n
-                var = sum((r - mean_r) ** 2 for r in returns) / (n - 1)
-                std = var ** 0.5
-                if std > 0:
-                    sharpe = round((mean_r / std) * 7.07, 2)
+        # 净值口径指标: 总收益/最大回撤/夏普 基于资金模拟曲线
+        total_ret = equity_stats.get("total_return_pct")
+        max_dd = equity_stats.get("max_drawdown_pct")
+        sharpe = equity_stats.get("sharpe_ratio")
         # 交易日志: 按日期降序(最新在前), 每笔含 日期/代码/题材/综合分/买价/卖价/收益率
         trade_log = sorted(
             trades,
@@ -683,26 +653,6 @@ class Backtester:
             "sharpe_ratio": sharpe,
             "trade_log": trade_log,
         }
-
-    # ---------------- 参数对比 ----------------
-    def compare_params(self, start_date, end_date, param_grid, progress=None):
-        """param_grid: [{take_profit, stop_loss, hold_days}, ...] → 对比表 rows。"""
-        rows = []
-        for params in param_grid:
-            sell = {"take_profit_pct": params.get("take_profit", 0.08),
-                    "stop_loss_pct": params.get("stop_loss", 0.05),
-                    "max_hold_days": params.get("hold_days", 5)}
-            rep = self.run(start_date, end_date, sell_rules=sell,
-                           progress=progress)
-            rows.append({
-                "take_profit": sell["take_profit_pct"],
-                "stop_loss": sell["stop_loss_pct"],
-                "hold_days": sell["max_hold_days"],
-                "trades": rep["trades"], "win_rate": rep["win_rate"],
-                "avg_return_pct": rep["avg_return_pct"],
-                "max_drawdown_pct": rep["max_drawdown_pct"],
-            })
-        return rows
 
     # ---------------- 防过拟合: 样本外验证 ----------------
     def run_oos(self, start_date, end_date, split_ratio=0.5,
