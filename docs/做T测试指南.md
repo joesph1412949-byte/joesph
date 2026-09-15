@@ -105,18 +105,33 @@ if self.dry_run:
 **这是预期行为，不是 bug**（dry-run 不该污染账本）。但它意味着：
 **dry-run 只能演练"高抛"那条腿，"低吸回补"那条腿看不到。**
 
-**补齐办法**（任选）：
+**补齐办法：`--book-dry-run`（已实现）**
 
-- **A. 接受盲区** —— 买腿逻辑由 L1 单测覆盖（`test_buy_intent_on_low_then_blocked_by_exposure` / `test_gate_allows_closing_buy` 等）
-- **B. 加演练记账开关** —— 给 daemon 加 `--book-dry-run`，**强制配合独立 `--state`** 使用，避免污染实盘账本：
+```bash
+python -m tt.daemon --direct --interval 5 \
+    --book-dry-run \
+    --state runtime/state/tt_state.drill.json
+```
 
-  ```bash
-  python -m tt.daemon --direct --interval 5 \
-      --book-dry-run \
-      --state runtime/state/tt_state.drill.json
-  ```
+第 1 轮卖单记账 → 第 2 轮起买单就有额度，**两条腿都能演练**。
 
-  第 1 轮卖单记账 → 第 2 轮起买单就有额度，两条腿都能看到。
+**安全设计（fail-closed，三道隔离）**：
+
+1. `--book-dry-run` **必须显式给 `--state`**，否则拒绝启动 —— 防止手滑用错账本
+2. `--state` **不能指向实盘默认账本**（`runtime/state/tt_state.json`），否则拒绝启动
+3. `runtime` 快照自动隔离到 `<state 同名>.runtime.json`，不会盖掉面板读的那份
+
+记账只发生在 dry-run 分支内 → **物理上不可能下单**（实盘走的是另一个 `elif` 分支）。
+
+**实测效果**（离线样本连跑 2 轮）：
+
+| 轮次 | intents | booked | 说明 |
+|---|---|---|---|
+| 第 1 轮 | 4（全卖出） | 4 | 高抛：长电 2 档 + 海油 1 档 + 神华 1 档 |
+| 第 2 轮 | 1（**买入**） | 1 | 低吸：海油买回 400 @33.852，与第 1 轮卖的 400 配对 |
+
+第 2 轮账本显示海油 `sold_today=400 / bought_today=400 / net_exposure=0 / trips=1 / realized_pnl=454.4`
+—— **一个完整的 T 走通了**，且 `signals_written: 0`，零报单。
 
 ---
 

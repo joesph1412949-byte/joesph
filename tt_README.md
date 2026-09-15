@@ -45,9 +45,20 @@ python -m tt.daemon --direct --interval 5
 
 # 直连实盘（需 paused 不存在 + real/armed.txt 含今日日期）
 python -m tt.daemon --direct --live --interval 5
+
+# 演练记账：dry-run 下也推进本地账本, 让「低吸回补」那条腿也可见
+#   —— 必须配独立 --state(账本与 runtime 快照都会隔离到该路径)
+python -m tt.daemon --direct --interval 5 --book-dry-run \
+    --state runtime/state/tt_state.drill.json
 ```
 
 Windows 双击：`启动做T直连守护.bat`（演练）/ `启动做T实盘直连.bat`（实盘）。
+
+> **`--book-dry-run` 说明**：不加它是"干净"的 dry-run —— 账本不推进，于是
+> 日内净敞口恒为 0，**所有买入信号都会被 `NET_EXPOSURE` 拦下**（这是对的，
+> 买入必须等卖出成交），代价是演练时只能看到"高抛"看不到"低吸"。
+> 加上它，第 1 轮卖单记账 → 第 2 轮起买单就有额度，**一个完整的 T 就串起来了**。
+> 两道 fail-closed 守卫：必须显式 `--state`，且不能指向实盘默认账本。
 
 **每日放行条**（人工闸门，替代桥端的 armed 检查）：
 

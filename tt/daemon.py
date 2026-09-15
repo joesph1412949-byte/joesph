@@ -107,7 +107,8 @@ class TTDaemon:
 
     def __init__(self, cfg, ledger=None, engine=None, feed=None,
                  dry_run=None, now_fn=None, runtime_path=None,
-                 signal_root=None, executor=None, direct=False):
+                 signal_root=None, executor=None, direct=False,
+                 book_dry_run=False):
         self.cfg = cfg
         self.ledger = ledger or Ledger(path=STATE_PATH, now_fn=now_fn)
         self.now_fn = now_fn or datetime.now
@@ -125,6 +126,9 @@ class TTDaemon:
         self.signal_root = Path(signal_root or SIGNAL_ROOT)
         self.direct = bool(direct)
         self.executor = executor
+        # 演练记账: dry-run 时也推进本地账本, 让"低吸回补"那条腿可见。
+        # 只动本地账本, 与下单通道无关; 必须配独立 --state(见 build_daemon 守卫)。
+        self.book_dry_run = bool(book_dry_run)
         self.rounds = 0
 
     # ---------------- 一轮 ----------------
@@ -140,12 +144,18 @@ class TTDaemon:
 
         signals = plan.get("signals", [])
         written = 0
+        booked = 0
         blocked = ""
         exec_results = []
         if self.dry_run:
             blocked = "dry_run"
             if self.direct and signals:
                 exec_results = self._exec_direct(signals, dry_run=True)
+            if self.book_dry_run and signals:
+                # 演练记账: 只推进本地账本(理论成交) + 档位水位, 好让下一轮的
+                # 买入腿拿到 net_exposure 额度。仍在 dry_run 分支内 → 无下单可能。
+                self._book(signals, plan.get("hhmm", ""))
+                booked = len(signals)
         elif paused:
             blocked = "paused(急停开关打开)"
         elif self.direct:
@@ -171,6 +181,8 @@ class TTDaemon:
             "armed_msg": armed_msg,
             "signals_written": written,
             "blocked": blocked,
+            "book_dry_run": self.book_dry_run,
+            "booked": booked,
             "rounds": self.rounds,
             "runtime_at": self.now_fn().isoformat(timespec="seconds"),
             "ledger": self.ledger.snapshot(),
@@ -232,10 +244,11 @@ class TTDaemon:
         while True:
             try:
                 rt = self.run_once()
-                LOG.info("round %d hhmm=%s intents=%d rejected=%d written=%d %s",
+                LOG.info("round %d hhmm=%s intents=%d rejected=%d written=%d "
+                         "booked=%d %s",
                          rt.get("rounds"), rt.get("hhmm"),
                          rt["counts"]["intents"], rt["counts"]["rejected"],
-                         rt.get("signals_written"),
+                         rt.get("signals_written"), rt.get("booked", 0),
                          ("blocked=%s" % rt["blocked"]) if rt.get("blocked") else "")
             except KeyboardInterrupt:
                 LOG.info("收到中断, 退出")
@@ -245,6 +258,29 @@ class TTDaemon:
             if max_rounds is not None and self.rounds >= max_rounds:
                 return
             time.sleep(interval)
+
+
+def _guard_drill_state(state_arg):
+    """`--book-dry-run` 的账本隔离守卫(fail-closed)。
+
+    演练会往账本写"理论成交"(sold_today / 档位水位)。若误用实盘账本, 这些假
+    数据会让后续真实运行时 net_exposure 误判(放过本该拦下的买单), 档位水位也
+    会错乱。所以强制两条: **必须显式 --state**, 且**不能指向实盘默认账本**。
+    """
+    if not state_arg:
+        raise SystemExit(
+            "--book-dry-run 必须配合显式 --state <演练账本路径> 使用。\n"
+            "  原因: 演练会往账本写理论成交, 误用实盘账本 %s 会污染\n"
+            "        sold_today 与档位水位, 进而放过本该拦下的买单。\n"
+            "  例: --state runtime/state/tt_state.drill.json" % STATE_PATH)
+    try:
+        same = Path(state_arg).resolve() == Path(STATE_PATH).resolve()
+    except OSError:
+        same = False
+    if same:
+        raise SystemExit(
+            "--book-dry-run 的 --state 不能指向实盘默认账本 %s, 请换一个路径。"
+            % STATE_PATH)
 
 
 def build_daemon(args):
@@ -259,6 +295,12 @@ def build_daemon(args):
         cfg["dry_run"] = False
     now_fn = (lambda: datetime(2026, 9, 14, 10, 0, 0)) if args.fake_now else None
     feed = market.make_feed(prefer_sample=args.sample, now_fn=now_fn)
+    book_dry = bool(getattr(args, "book_dry_run", False))
+    drill_runtime = None
+    if book_dry:
+        _guard_drill_state(args.state)
+        # runtime 快照同样隔离 —— 否则演练数据会盖掉面板读的那份
+        drill_runtime = str(Path(args.state).with_suffix(".runtime.json"))
     led = Ledger(path=args.state or STATE_PATH, now_fn=now_fn)
     # --sample: 全离线(样本行情 + 纸面账户), 绝不触碰真实账户
     eng = TTEngine(cfg, led, feed=feed, now_fn=now_fn,
@@ -277,7 +319,8 @@ def build_daemon(args):
     return TTDaemon(cfg, ledger=led, engine=eng, dry_run=cfg["dry_run"],
                     now_fn=now_fn, signal_root=args.signal_root,
                     executor=executor, direct=bool(getattr(args, "direct",
-                                                           False)))
+                                                           False)),
+                    runtime_path=drill_runtime, book_dry_run=book_dry)
 
 
 
@@ -290,7 +333,7 @@ SIM_NOTICE = (
 )
 
 
-def env_banner(cfg, dry_run, direct=False):
+def env_banner(cfg, dry_run, direct=False, book_dry_run=False):
     """返回启动横幅(多行)。sim 通道额外给出账户警告。"""
     env = cfg.get("env", "real")
     if direct:
@@ -304,6 +347,9 @@ def env_banner(cfg, dry_run, direct=False):
                                      else "LIVE — 会写信号文件")]
     if env == "sim" and not direct:
         lines.append(SIM_NOTICE)
+    if dry_run and book_dry_run:
+        lines.append("  !! 演练记账已开: 会推进本地账本(理论成交), 仍然不下单。\n"
+                     "     请确认 --state 指向演练专用账本, 而非实盘账本。")
     return "\n".join(lines)
 
 
@@ -327,16 +373,21 @@ def main(argv=None):
                     help="直连模式: 外部 Python 直接下单(不写信号文件桥)")
     ap.add_argument("--fake-now", action="store_true",
                     help="用固定时钟(2026-09-14 10:00)便于演练")
+    ap.add_argument("--book-dry-run", action="store_true",
+                    help="演练记账: dry-run 也推进本地账本(须配独立 --state), "
+                         "让买入腿可见")
     args = ap.parse_args(argv)
 
     d = build_daemon(args)
-    banner = env_banner(d.cfg, d.dry_run, direct=d.direct)
+    banner = env_banner(d.cfg, d.dry_run, direct=d.direct,
+                        book_dry_run=d.book_dry_run)
     if args.once:
         rt = d.run_once()
         print(banner)
         print(json.dumps({k: rt[k] for k in
                           ("ok", "hhmm", "phase", "dry_run", "paused", "armed",
-                           "env", "blocked", "signals_written", "counts")},
+                           "env", "blocked", "signals_written", "booked",
+                           "counts")},
                          ensure_ascii=False, indent=2))
         for it in rt.get("intents", []):
             print("  [可执行] %s %s %s %s股 @ %.3f (%s)"
