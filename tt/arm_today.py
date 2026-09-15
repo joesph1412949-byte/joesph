@@ -23,6 +23,10 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+# 项目根不在 sys.path 时(直接 python tt/arm_today.py)也能取到 shared
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from shared.common import atomic_write  # noqa: E402
+
 SIGNAL_ROOT = Path(os.environ.get("TT_SIGNAL_ROOT") or r"D:/QMT_SIGNALS")
 PAUSE_FILE = SIGNAL_ROOT / "paused"
 ENV = "real"
@@ -34,14 +38,8 @@ def _today():
 
 
 def _atomic_write(path, text):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = Path(str(path) + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as fp:
-        fp.write(text)
-        fp.flush()
-        os.fsync(fp.fileno())
-    os.replace(tmp, path)
+    """原子写: 复用 shared.common.atomic_write(mkdir+fsync+os.replace)。"""
+    atomic_write(path, text)
 
 
 def status():

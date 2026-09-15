@@ -25,7 +25,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from shared.common import STATE_DIR
+from shared.common import STATE_DIR, atomic_write
 
 from . import config as tt_config
 from . import market
@@ -44,14 +44,8 @@ DEFAULT_INTERVAL = 5.0
 
 
 def _atomic_write(path, text):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = Path(str(path) + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as fp:
-        fp.write(text)
-        fp.flush()
-        os.fsync(fp.fileno())
-    os.replace(tmp, path)
+    """原子写: 复用 shared.common.atomic_write(mkdir+fsync+os.replace)。"""
+    atomic_write(path, text)
 
 
 def is_paused(root=None):

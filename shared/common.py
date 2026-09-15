@@ -115,13 +115,19 @@ def limit_ratio_for_code(code):
 # NOTE: comments here stay ASCII (same rule as the rest of this file).
 
 def atomic_write(path, text):
-    """Write text to path atomically: same-dir .tmp then os.replace.
+    """Write text to path atomically: mkdir + same-dir .tmp + fsync + replace.
 
     A crash mid-write must never leave a half-written ledger/state file
-    (readers of paper/live state treat a truncated file as corrupt)."""
+    (readers of paper/live state treat a truncated file as corrupt).
+    The fsync is what makes this survive a power loss, not just a process
+    crash - tt/ carried the stronger variant, so it won here (2026-09-15)."""
     path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(str(path) + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
+    with open(tmp, "w", encoding="utf-8") as fp:
+        fp.write(text)
+        fp.flush()
+        os.fsync(fp.fileno())
     os.replace(tmp, path)
 
 

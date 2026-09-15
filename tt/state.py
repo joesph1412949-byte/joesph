@@ -15,11 +15,10 @@
   - **events 环形截断**: 只留最近 N 条, 防止状态文件无限膨胀(它是每秒读的)。
 """
 import json
-import os
 from datetime import datetime, date
 from pathlib import Path
 
-from shared.common import STATE_DIR
+from shared.common import STATE_DIR, atomic_write
 
 STATE_VERSION = 1
 MAX_EVENTS = 500
@@ -66,15 +65,8 @@ def _empty_state(day):
 
 
 def _atomic_write(path, text):
-    """原子写: 同目录 tmp + os.replace(与项目既有惯例一致)。"""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = Path(str(path) + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as fp:
-        fp.write(text)
-        fp.flush()
-        os.fsync(fp.fileno())
-    os.replace(tmp, path)
+    """原子写: 复用 shared.common.atomic_write(mkdir+fsync+os.replace)。"""
+    atomic_write(path, text)
 
 
 class Ledger:
