@@ -14,7 +14,7 @@
 
 | 维度 | 状态 |
 |---|---|
-| 测试基线 | **887 绿**（六路径，09-14 晚脱沙箱复跑，0 failed / 0 errors）＝ prism/prism_web/strategy_web/tests 四路径 + tt 140 + qmt_sync |
+| 测试基线 | **837 绿**（六路径一条命令跑完，2026-09-15 精简重构后）：`python -m pytest prism/tests prism_web/tests datasource/tests tt/tests qmt_sync/tests tests -q --import-mode=importlib --basetemp=...` = prism 471 + prism_web 51 + datasource 123 + tt 148 + qmt_sync 27 + 根 17。比 09-14 的 887 少 50：**随死代码一起删掉的用例**（v04 网页外壳 40 个 + 幽灵功能 20 个），另补 2 个降级用例 |
 | 模拟盘 | 运行中，但 09-08~09-13 有 5 个交易日空窗（守护进程停摆），账本仍 1,000,000 现金、**零持仓** |
 | 实盘（prism 主策略） | **未上线**。代码已通（`prism/live_daemon.py`），三步验收一步未做 |
 | 实盘（tt 做T策略） | **已接 miniQMT 外部直连**（09-14 晚决策，见「路线回退」节）。代码/测试/闸门就绪，**放行条需每日重写**，`dry_run` 默认仍 True，`--live` 才真报单 |
@@ -38,9 +38,17 @@
 - **ponytail 约束延续**：最懒可行方案；每个子代理 dispatch 注入 ponytail 约束（阶梯：needs-to-exist→reuse→stdlib→one-line→minimal；绝不简化掉校验完整性/原子写/指针回落/default保护；`# ponytail:` 标记）
 - **默认工作方式**：superpowers SDD（子代理实现 + 独立子代理两阶段审查 + 台账记录），TDD 红绿循环
 
-## 项目现状（截至 2026-09-13）
+## 项目现状（截至 2026-09-15）
 
 **prism**：A股量化系统。选股引擎（36 因子 / 3 策略 / JSON 策略文件）+ 回测 + Flask 网页 GUI（5000 端口）+ 模拟盘守护。Windows + Python 3.12 + QMT miniQMT（xtquant：`C:\Users\28037\AppData\Local\Programs\Python\Python312\Lib\site-packages`）+ **通达信 pytdx 1.72（同目录，09-05 装）**。
+
+- **ponytail 全仓精简 + 结构归位**（2026-09-15，commit 9bb567a..，**生产代码净 -824 行**）：三块并行审计（数据/交易/网页层）后逐条 `git grep` 证死再删——
+  · 删：market_data 整套「按日索引」死子系统、zt_history 重复定义的 `qmt_zt_feed`、旧买入路径 `buy_from_screen`、`composite mode="max"` 幽灵模式、trader 四个零调用钩子、tdx 三个死函数、`_report` 里带 `sharpe=7.07` 常数的死分支等；
+  · 抽：`prism/schedule.py`（两守护共用调度）、`engine.resolve_strategy/gate_evaluate`、`shared.common.atomic_write/next_weekday`（**升级为 mkdir+fsync 最强版**，tt 的三份副本归并过来）、`_batch_download`、`_strategy_path`、`_cut`；
+  · 交易层做过**差分回归**：新旧 backtest 5 场景 + paper 7 场景逐字段 IDENTICAL 才提交。
+  · **结构**：`strategy_web/` → **`datasource/`**（v04 网页外壳已删，只剩现役数据模块 data_source/eastmoney/fundamental/manual_store/perf_store + factors 迁移比对基准；其 123 个测试纳入标准命令）；绩效存档 `perf/` 与 `manual_factors.json` 迁入 `runtime/state/`；依赖清单提根 `requirements.txt`；`ops/watchdog.py`+`start_all.py` 的「strategy_web 占 5000」陷阱修正为 prism_web（Py3.12）；死索引 `.market_data_index.pkl`(1.85MB)、根 `log/`、测试残留 bak、10 个 `pt_*` 临时目录已清。
+  · **交付视角测试**：新增 `ops/smoke_check.py`（导入/缓存/14 条 GET 路由/计算层/状态健康五关，503 记为可接受降级、500 记缺陷）——首跑抓到 `/api/stock/<code>/kline` 在 QMT 停机时 **500 裸异常**，已修为「QMT→通达信降级 + 两头都挂返回 503 + 友好文案」；另修 `_report` 死分支、`_share_series` 收窄、README/STRUCTURE 路径同步。
+  · 审计与执行明细：`docs/reports/ponytail精简审计_20260915.md`；项目总结（HR 用）生成器 `ops/make_summary_pdf.py`。
 
 - **板块周度跟踪**（09-07/08，commit d0adcbc..68b3195，**纯观察面板**）：`prism/sector_etf_map.py`（31 行业 ETF 锚点映射，24 锚点+7 留空，QMT 逐码验证）+ `sector_stage.new_high_counts()`（60 日新高家数，zt 缓存直算）+ `sector_table()` 扩展四列（week_rank/etf/new_high/pos_cap 纸面上限）+ app.py 组装（**801 前置过滤=纯申万宇宙**[占比分母与旧面板有出入，已记录]、双重翻译 6位码→801→行业名、memo 双 mtime）+ 板块观察 tab 新四列（**建议上限=纸面参考未接入交易**）。周排名/新高/占比拥挤等 triage：C3 机构共识去掉、C1 惯性/C2 拥挤查重已有、状态调制暂缓（红线）。ETF 行情**按日刷新**（本地末根<今日才批量下载，memo 失败也占当日槽；09-08 终审 I-1 修冻结病）。`build_sector_cache` 尾部过期重采修复（原"已有即跳过"日期永久冻结 09-02；变短守卫防静默截断）。全量 **518 绿**
 - **板块感知层**（09-06/07，commit 3b368c0..361956c，**观察模式不进打分**——用户拍板）：`prism/sector_stage.py` 纯计算（孕育期三信号：近3日≥2日跑赢上证/成交额占比MA5>MA20/站上5日线且近5日阳≥3，未启动 r5<8%；五阶段判定 退潮>高潮>主升>启动>孕育>休整；资金惯性 streak=每日净流入前3连续上榜，≥5日=系统性增配）+ market_data 新段 `flow_rank`（**东财 BK 细分行业口径自洽，勿回填 SEC3 申万体系**；CLIST f62 当日快照**前向累积**幂等、空快照不落盘）+ `benchmark`（上证日K全量替换，09-07 已落 165 日）+ CLI `--build-flow-rank`/`--build-benchmark`（**容错：一段被封不连累另一段，点名失败非零退出**）+ GUI `/api/sector_stage` +「板块观察」tab（**需重启 5000 Flask 生效**）。**升级对话 triage 沉淀为 skill `.claude/skills/prism-upgrade-triage/SKILL.md`**（三问门：数据层可办到/取数容易/实测有效 → 保留/降级/去掉 + 用户拍板；已过 RED/GREEN 子代理测试）
@@ -78,6 +86,7 @@
 - QMT 数据/守护可并发读；守护日志看 job_output
 - **Tailscale 私享分享**（09-09）：朋友经 tailnet **全功能**访问 5000（装客户端+邀请即可；用户拍板不上护栏不上 ACL——"我这边什么样朋友见什么样"；远程只读护栏 26b648f 已撤销）；你关机=朋友不可用（已接受）；免费档 3 用户/100 设备
 - **DSH × OpenCode Go（09-08）**：opencode.ai/zen/go 网关 09-05 起强制 `x-opencode-session` 头，缺失返 400 MissingSessionID（"Console Go"）；DSH 官方已知问题（discussion 5495 未修）。本机已修：`C:\Users\28037\.dsh\settings.yaml` → `llm-pi-ai.providers` 6 个 opencode 供应商补 `headers: { 'x-opencode-session': 'dsh-opencode-go-joesph' }`（备份 .bak-20260908；llm-pi-ai 适配器逐请求读配置，通常免重启）。**09-08 当天实测生效**（下一条消息即不再 400）。若 aux 路径仍 400 需动 deepseek-harness 仓库 llm-pi-ai 代码（重建 profile）
+- **DSH 接入 OpenCode Go 的 DeepSeek V4.1 Flash（09-15）**：官方 Go 文档确认该型号 **Go 专属**（Zen 端点表里没有），model ID `deepseek-v4.1-flash`，端点 `https://opencode.ai/zen/go/v1/chat/completions`（OpenAI 兼容）；线上实证 `GET https://opencode.ai/zen/go/v1/models` 返回该 id。**坑：只改 settings.yaml 会 fail-closed 报错**——DSH 内置 pi-ai 目录快照（08-24）没有这个型号，`resolveRouteModels` 里 `api = request.api ?? base?.api ?? routeApi` 全为 undefined（该路由目录同时含 anthropic-messages/openai-completions/openai-responses 三种协议 → `sharedCatalogApi` 返回 undefined），而 schema 的 `modelProfile` **不允许逐模型写 `api`**、路由级 `api` 又会把 minimax-m3/grok-4.5 一起改协议（不可行）。**修法两处**：① `…\pi-ai\dist\providers\data\opencode-go.json` 的 `openai-completions` 段补一条（照抄 deepseek-v4-flash 的 compat：`thinkingFormat:deepseek` / `maxTokensField:max_tokens` / `requiresReasoningContentOnAssistantMessages:true`；`.manifest.json` 只被读生成时间戳，**不校验哈希**）② `settings.yaml` 的 opencode-go models 列表加一条（备份 `.bak-20260915`）。**该 JSON 是进程启动静态 import → 必须重启 DSH 一次才生效**（settings 逐请求读，目录不是）。DSH 升级会覆盖 node_modules 补丁 → 需重打（新版目录通常已含该型号）
 
 ## 因子管理惯例（2026-09-03 起）
 

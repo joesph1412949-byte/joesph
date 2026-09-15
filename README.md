@@ -4,7 +4,7 @@
 
 > 仅限本机 localhost 使用,不连接任何外部服务,无实盘下单路径。
 
-> **当前主入口已切换至 Prism**(新引擎, 见下文「Prism 引擎」章节): 网页走 `prism_web`, 选股/回测/信号走 `prism` 引擎; 旧 `strategy_web` 仍保留兼容期(数据层被 Prism 复用), 待真实环境验证后移除。
+> **当前主入口已切换至 Prism**(新引擎, 见下文「Prism 引擎」章节): 网页走 `prism_web`, 选股/回测/信号走 `prism` 引擎; 旧 v04 网页(app.py/模板/静态资源)已于 2026-09-15 删除; 其数据模块更名为 `datasource/`, 由 Prism 复用。
 
 ## 功能
 
@@ -39,9 +39,9 @@
 
 ## Prism 引擎(新系统, 主入口)
 
-Prism 是新一代量化引擎, 已接管网页选股、回测与交易信号生成(旧 strategy_web 的
-models/factors/screen 实现被取代, 保留数据层供复用)。**主入口: 网页 `prism_web`,
-引擎 `prism`**。
+Prism 是新一代量化引擎, 已接管网页选股、回测与交易信号生成(v04 的
+models/factors/screen 实现被取代并删除, 数据模块保留在 `datasource/` 供复用)。
+**主入口: 网页 `prism_web`, 引擎 `prism`**。
 
 ### 目录结构
 
@@ -50,7 +50,7 @@ prism/                       # 引擎(纯库, 无网页依赖)
   registry.py                # 因子注册表: @factor 装饰器 + 扫描注册
   context.py                 # FactorContext: 因子统一上下文(数据缺失一律 None)
   engine.py                  # 策略引擎: load_strategy / run_screen / 打分分级
-  data.py                    # 数据适配层: DataProvider(复用 strategy_web 数据层)
+  data.py                    # 数据适配层: DataProvider(复用 datasource 数据层)
   market.py                  # 市场环境分类(classify_market)
   factors/                   # 因子库: factor_*.py 每文件一个因子(当前 26 个)
   strategies/                # 策略配置: default.json
@@ -82,7 +82,7 @@ prism_web/                   # 网页(主入口): app.py + templates/ + static/
 - `market_gate`: 市场门槛 — `factors`(节点因子 id 列表) + `threshold`(达标分数, 默认 3)
 - `scoring_models`: 打分模型列表 — 每个模型 `{id, name, weight, factors[]}`, 因子项
   支持简写 `"F1"` / 加权 `{"id": "F1", "weight": 1.0}` / 阈值 `{"id": "F1", "op": ">=", "threshold": 1}`
-- `composite`: 综合分组合 — `mode`(`top3_weighted` / `sum` / `max` / `average`) + 权重
+- `composite`: 综合分组合 — `mode`(`top3_weighted` / `sum` / `average`) + 权重
 - `filters`: `candidate_min_model` 候选过滤(最强模型分下限)
 - `sell_rules`: 止盈 / 止损 / 最大持有天数(回测与卖出巡检用)
 
@@ -152,7 +152,7 @@ print(json.dumps(bt.run(datetime.date(2026,7,27), datetime.date(2026,8,13)), ens
 - **Python 3.12**(QMT / miniQMT 自带,或本机任意 3.8+)
 - `xtquant` **不要用 pip 安装** —— 它来自 QMT 的 Python 环境,运行前确保 `import xtquant` 可用(本机默认 `python` 即指向带 xtquant 的解释器)
 
-pip 依赖(`strategy_web/requirements.txt`):
+pip 依赖(根目录 `requirements.txt`):
 
 ```bash
 pip install flask requests numpy pandas
@@ -175,8 +175,7 @@ python prism_web/app.py
 看到 `Running on http://127.0.0.1:5000` 即启动成功。一键启动全部组件
 (qmt_sync + prism_web + Vibe-Trading)可用 `python start_all.py` 或双击 `start_all.bat`。
 
-> 旧入口 `cd strategy_web && python app.py` 仍可用(兼容期), 但新功能
-> (因子库/策略/回测 API)只在 prism_web 提供, 建议统一走新入口。
+> 网页入口统一为 `prism_web`(5000)与 `tt_web`(5010); v04 网页入口已移除。
 
 **3. 浏览器访问**
 
@@ -214,7 +213,7 @@ python prism_web/app.py
 - **题材主线聚类**(`eastmoney.py aggregate_by_theme`):东财涨停池按 hybk 题材聚合,
   识别当日主线题材(涨停家数/连板高度排序),输出 `market.top_themes` 供页面展示;
   F4/S6 板块共振从纯申万行业扩展到**题材共振**(题材优先,申万兜底)。
-- **绩效追踪**(`perf_store.py`):每次选股自动按日期存档候选清单(`strategy_web/perf/YYYYMMDD.json`),
+- **绩效追踪**(`perf_store.py`):每次选股自动按日期存档候选清单(`runtime/state/perf/YYYYMMDD.json`),
   之后用行情回填 N 日实际涨跌,按 A-E 等级统计胜率/平均收益,验证打分体系有效性。
 - **回测框架**(`backtest.py` + `backtest_cli.py`):用东财历史涨停池回放简化选股规则
   (环境门槛 + 主线题材 + 连板高度),统计胜率/盈亏比/最大回撤,支持参数网格对比。
@@ -244,13 +243,12 @@ python prism_web/app.py
 
 ## 测试
 
-全部离线(无真实网络、无需 QMT);**328 个测试全绿**。注意 `prism/tests/` 与
-根 `tests/` 各有 `test_backtest.py`(同名), 需分开跑:
+全部离线(无真实网络、无需 QMT)**808 个测试全绿**(2026-09-15 结构归位后: datasource 的 123 个
+失联测试已纳入, tt/ 与根级测试一并跑)。注意 `prism/tests/` 与根 `tests/` 各有一个
+`test_backtest.py`(同名、不同对象), 同命令跑时由 importlib 模式按路径区分:
 
 ```bash
-python -m pytest prism/tests/ prism_web/tests/ -q   # 151: prism 引擎 + prism_web(新/旧路由)
-python -m pytest tests/ -q                           # 17: 根级回测/卖出规则回归
-python -m pytest strategy_web/tests/ -q              # 160: 旧实现兼容期保持绿(测旧模块)
+python -m pytest prism/tests prism_web/tests datasource/tests tt/tests tests -q   # 808: 全仓一次跑完
 python -m prism.factor_check                         # 因子体检: 26 因子全 PASS
 ```
 
@@ -264,4 +262,4 @@ python -m prism.factor_check                         # 因子体检: 26 因子�
   - **当日去重**:同一股票代码每个自然日最多下单一次(记录在 `D:/QMT_SIGNALS/real/placed_today.json`),防止重复发单;
   - `strategy_close_pick.py send` 会校验候选清单生成日期(默认 3 天内,覆盖周末;过期需 `--force` 强制发送)。
 - 数据源:个股K线 / 全市场盘口 / 行业板块来自 xtquant(miniQMT);N1/N3/N4 来自东方财富公开涨停池接口。
-- 手动因子存于 `strategy_web/manual_factors.json`;损坏的 JSON 会被保留为 `manual_factors.json.corrupt-<时间戳>` 并告警,不静默覆盖。
+- 手动因子存于 `runtime/state/manual_factors.json`;损坏的 JSON 会被保留为 `manual_factors.json.corrupt-<时间戳>` 并告警,不静默覆盖。

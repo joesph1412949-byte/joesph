@@ -15,17 +15,20 @@
 | `tt/` | **做 T 策略引擎**（日内 T+0：底仓 + 网格 + 风控） | 项目 |
 | `tt_web/` | 做 T 监控台（`http://127.0.0.1:5010`，只读） | 项目 |
 | `qmt_sync/` | miniQMT **成交/持仓同步**到本地 SQLite + 告警 | 项目 |
-| `strategy_web/` | v04 时代的选股网页（**legacy**，保留兼容） | 项目（旧） |
+| `datasource/` | **现役数据模块**（v04 网页被删后留下的数据层：DataSource/EastMoney/Fundamental/ManualStore/PerfStore；由 prism 与 prism_web 复用） | 项目 |
 | `qmt/` | **miniQMT 桥接与工具**（桥脚本 + 只读自检） | 桥接 |
-| `shared/` | **跨项目共享底座**（路径常量、日志、卖出规则） | 底座 |
+| `shared/` | **跨项目共享底座**（路径常量、日志、原子写、日期与代码工具、卖出规则） | 底座 |
 | `backtest/` | 离线回测：旧版引擎 + 命令行入口 | 工具 |
 | `legacy/` | v04 时代的独立脚本（收盘选股等） | 归档代码 |
-| `ops/` | 运维：一键启动、进程看门狗、桌面启动器 | 运维 |
-| `runtime/` | **运行期数据**：缓存 / 账本状态 / 日志（不入库） | 数据 |
-| `docs/` | 报告与设计文档 | 文档 |
+| `ops/` | 运维：启动器、进程看门狗、**交付冒烟自检 `smoke_check.py`、总结 PDF 生成器 `make_summary_pdf.py`** | 运维 |
+| `runtime/` | **运行期数据**：`cache/` 采集缓存 · `state/` 账本/绩效/状态 · `log/` 日志（不入库） | 数据 |
+| `docs/` | 报告与设计文档（含 `reports/` 体检与审计报告、`superpowers/` spec 与 plan） | 文档 |
 | `archive/` | 历史产物、一次性探针脚本、无关文件 | 归档 |
 | `tests/` | 根级测试（覆盖 `backtest/` 与 `shared/exit_rules`） | 测试 |
-| `scripts/` | 零散工具脚本 | 杂项 |
+
+> 2026-09-15 变更：`strategy_web/` → `datasource/`（只剩现役数据模块，v04 网页外壳已删）；
+> 绩效存档 `perf/` 与 `manual_factors.json` 迁入 `runtime/state/`；依赖清单提到根 `requirements.txt`；
+> `datasource/tests` 的 123 个测试纳入标准测试命令。
 
 ---
 
