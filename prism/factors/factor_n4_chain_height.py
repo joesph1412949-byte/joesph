@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """N4 连板高度: 最高连板≥5 或 昨日连板晋级率>25%(东财真数据); 兜底: 涨停家数+封板率。"""
 from prism.registry import factor
-from prism._utils import tick_key_for_em_code
+from shared.common import with_market_suffix
 
 
 @factor(id="N4", name="连板高度", category="node",
@@ -16,7 +16,7 @@ def compute(ctx):
         yesterday_boards = em.get("yesterday_boards") or []
         today_codes = {lu.get("code") for lu in limit_ups}
         advanced = sum(1 for c in yesterday_boards
-                       if tick_key_for_em_code(c) in today_codes)
+                       if with_market_suffix(c) in today_codes)
         if yesterday_boards:
             adv_ratio = advanced / len(yesterday_boards)
         else:

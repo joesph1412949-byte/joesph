@@ -14,8 +14,8 @@ def test_context_fields_default_none():
     assert ctx.float_mv is None
 
 
-def test_context_from_data():
-    ctx = FactorContext.from_data(code="000001.SZ", last=10.0, float_mv=1e8)
+def test_context_ctor_kwargs():
+    ctx = FactorContext(code="000001.SZ", last=10.0, float_mv=1e8)
     assert ctx.code == "000001.SZ"
     assert ctx.last == 10.0
     assert ctx.float_mv == 1e8

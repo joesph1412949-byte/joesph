@@ -130,6 +130,60 @@ def _merge_tail(old, rec, start_fmt):
             "pre": [t[2] for t in triples]}
 
 
+def _batch_download(codes, start, count, cache, apply_fn, progress=None,
+                    processed0=0, total=None, t0=None):
+    """批200 下载→看门狗读取→写入的共用骨架(build_cache/refresh_cache 复用)。
+
+    语义与原两个函数逐行一致: 批下载/批读取失败或超时 → 跳过该批(增量不丢),
+    每 5 批原子落盘(中断不留半个文件), 每批回调 progress。
+
+    codes: 待处理代码; start: download/read 的 start_time(8位串, ""=全量);
+    count: 单码读取 K 线根数(0=按 start_time 决定);
+    cache: 落盘用的缓存 dict(_atomic_pickle 直接写它);
+    apply_fn(code, df) 决定写入方式(全量赋值 / _merge_tail 尾部合并);
+    processed0/total: 进度起点与分母(build_cache 续建时起点=已有缓存数)。
+    """
+    from xtquant import xtdata
+    t0 = time.time() if t0 is None else t0
+    total = len(codes) if total is None else total
+    batch = 200
+    processed = processed0
+    for i in range(0, len(codes), batch):
+        chunk = codes[i:i + batch]
+        try:
+            _run_with_timeout(xtdata.download_history_data2,
+                              (chunk, "1d"),
+                              {"start_time": start, "end_time": ""})
+        except Exception as e:
+            logger.warning("第 %d 批下载失败/超时: %r (跳过该批)", i // batch, e)
+            processed += len(chunk)
+            if progress:
+                progress(processed, total)
+            continue
+        try:
+            data = _run_with_timeout(
+                xtdata.get_market_data_ex,
+                ([], chunk),
+                {"period": "1d", "start_time": start, "end_time": "",
+                 "count": count})
+        except Exception as e:
+            logger.warning("第 %d 批读取失败/超时: %r (跳过该批)", i // batch, e)
+            processed += len(chunk)
+            if progress:
+                progress(processed, total)
+            continue
+        for code, df in (data or {}).items():
+            apply_fn(code, df)
+        processed += len(chunk)
+        # 每 5 批增量保存一次
+        if (i // batch) % 5 == 4:
+            _atomic_pickle(CACHE_PATH, cache)
+            logger.info("增量保存: %d 只 (%.0f秒)", len(cache),
+                        time.time() - t0)
+        if progress:
+            progress(processed, total)
+
+
 def build_cache(progress=None):
     """下载全市场日K线并构建涨停判断缓存(增量保存, 中断不丢进度)。
 
@@ -148,45 +202,14 @@ def build_cache(progress=None):
     todo = [c for c in codes if c not in cache]
     logger.info("全市场 %d 只, 已缓存 %d, 待下载 %d...",
                 len(codes), len(cache), len(todo))
-    batch = 200
-    processed = len(cache)
-    for i in range(0, len(todo), batch):
-        chunk = todo[i:i + batch]
-        try:
-            _run_with_timeout(xtdata.download_history_data2,
-                              (chunk, "1d"),
-                              {"start_time": "", "end_time": ""})
-        except Exception as e:
-            logger.warning("第 %d 批下载失败/超时: %r (跳过该批)", i // batch, e)
-            processed += len(chunk)
-            if progress:
-                progress(processed, len(codes))
-            continue
-        try:
-            data = _run_with_timeout(
-                xtdata.get_market_data_ex,
-                ([], chunk),
-                {"period": "1d", "start_time": "", "end_time": "",
-                 "count": KLINE_COUNT})
-        except Exception as e:
-            logger.warning("第 %d 批读取失败/超时: %r (跳过该批)", i // batch, e)
-            processed += len(chunk)
-            if progress:
-                progress(processed, len(codes))
-            continue
-        for code, df in (data or {}).items():
-            rec = _df_to_records(df)
-            if rec is None:
-                continue
+
+    def _apply(code, df):
+        rec = _df_to_records(df)
+        if rec is not None:
             cache[code] = rec
-        processed += len(chunk)
-        # 每 5 批增量保存一次
-        if (i // batch) % 5 == 4:
-            _atomic_pickle(CACHE_PATH, cache)
-            logger.info("增量保存: %d 只 (%.0f秒)", len(cache),
-                        time.time() - t0)
-        if progress:
-            progress(processed, len(codes))
+
+    _batch_download(todo, "", KLINE_COUNT, cache, _apply, progress=progress,
+                    processed0=len(cache), total=len(codes), t0=t0)
     _atomic_pickle(CACHE_PATH, cache)
     logger.info("缓存构建完成: %d 只, %.1f MB, 耗时 %.0f 秒",
                 len(cache), CACHE_PATH.stat().st_size / 1e6,
@@ -198,7 +221,7 @@ def refresh_cache(progress=None, days=90):
     """增量刷新存量K线尾部: 重拉最近 days 天, 整体替换旧缓存 >=START 的尾巴。
 
     与 build_cache 的分工: build_cache 只补缓存里没有的代码(存量永不更新,
-    缓存会冻在首次构建日), 本函数反着干 — 复用 build_cache 的批处理骨架
+    缓存会冻在首次构建日), 本函数反着干 — 复用 _batch_download 批处理骨架
     (批200/看门狗/批失败跳过/每5批增量保存), 对所有沪深A股从
     START=今天-days 重拉, 旧记录 date<START 原样保留, >=START 用新拉替换。
 
@@ -215,42 +238,15 @@ def refresh_cache(progress=None, days=90):
     start_fmt = "%s-%s-%s" % (start[:4], start[4:6], start[6:8])
     logger.info("刷新 %d 只(>= %s 尾部重拉, 已缓存 %d)...",
                 len(codes), start_fmt, len(cache))
-    batch = 200
-    for i in range(0, len(codes), batch):
-        chunk = codes[i:i + batch]
-        try:
-            _run_with_timeout(xtdata.download_history_data2,
-                              (chunk, "1d"),
-                              {"start_time": start, "end_time": ""})
-        except Exception as e:
-            logger.warning("第 %d 批下载失败/超时: %r (跳过该批)", i // batch, e)
-            if progress:
-                progress(min(i + batch, len(codes)), len(codes))
-            continue
-        try:
-            data = _run_with_timeout(
-                xtdata.get_market_data_ex,
-                ([], chunk),
-                {"period": "1d", "start_time": start, "end_time": "",
-                 "count": 0})
-        except Exception as e:
-            logger.warning("第 %d 批读取失败/超时: %r (跳过该批)", i // batch, e)
-            if progress:
-                progress(min(i + batch, len(codes)), len(codes))
-            continue
-        for code, df in (data or {}).items():
-            rec = _df_to_records(df)
-            if rec is None:
-                continue
-            # ponytail: 新股也进但只有尾部(缺更早历史), 全量走 build_cache
-            cache[code] = _merge_tail(cache.get(code), rec, start_fmt)
-        # 每 5 批增量保存一次
-        if (i // batch) % 5 == 4:
-            _atomic_pickle(CACHE_PATH, cache)
-            logger.info("增量保存: %d 只 (%.0f秒)", len(cache),
-                        time.time() - t0)
-        if progress:
-            progress(min(i + batch, len(codes)), len(codes))
+
+    def _apply(code, df):
+        rec = _df_to_records(df)
+        if rec is None:
+            return
+        # ponytail: 新股也进但只有尾部(缺更早历史), 全量走 build_cache
+        cache[code] = _merge_tail(cache.get(code), rec, start_fmt)
+
+    _batch_download(codes, start, 0, cache, _apply, progress=progress, t0=t0)
     _atomic_pickle(CACHE_PATH, cache)
     last_date = max((d for rec in cache.values() for d in rec["dates"]),
                     default=None)
@@ -271,50 +267,6 @@ def _load_cache():
 def _limit_up_price(pre, ratio):
     """A股涨停价 = 前收 × (1+幅度), 四舍五入到分(0.01)。"""
     return round(pre * (1 + ratio), 2)
-
-
-def qmt_zt_feed(date_yyyymmdd, cache=None):
-    """按日期返回涨停池 [{code, boards, theme}]。无缓存/非交易日 → []。
-
-    判断: close >= round(pre × (1+幅度), 2)(四舍五入到分的真实涨停价)。
-    boards(连板数): 往前数连续涨停几天。
-    """
-    cache = cache if cache is not None else _load_cache()
-    if not cache:
-        return []
-    day = date_yyyymmdd  # "YYYYMMDD"
-    # 归一化成 YYYY-MM-DD 比对
-    if len(day) == 8:
-        day_fmt = "%s-%s-%s" % (day[:4], day[4:6], day[6:8])
-    else:
-        day_fmt = day
-    out = []
-    for code, rec in cache.items():
-        dates = rec["dates"]
-        try:
-            idx = dates.index(day_fmt)
-        except ValueError:
-            continue
-        close = rec["close"][idx]
-        pre = rec["pre"][idx]
-        if not pre or close <= 0:
-            continue
-        ratio = _limit_ratio(code)
-        limit_px = _limit_up_price(pre, ratio)
-        if close >= limit_px - 0.001:
-            # 连板数: 往前数连续涨停几天
-            boards = 1
-            j = idx - 1
-            while j >= 0:
-                c2 = rec["close"][j]
-                p2 = rec["pre"][j]
-                if p2 and c2 >= _limit_up_price(p2, ratio) - 0.001:
-                    boards += 1
-                    j -= 1
-                else:
-                    break
-            out.append({"code": code, "boards": boards, "theme": ""})
-    return out
 
 
 def build_index(cache=None):
@@ -452,14 +404,16 @@ def prev_day_pool(today=None):
         today_d = datetime.strptime(t, "%Y%m%d").date()
     except ValueError:
         return {"date": None, "codes": []}
-    latest = None
-    for d in index:
+
+    def _day8(s):
+        """索引键 → date; 非法键 → None(跳过)。"""
         try:
-            dd = datetime.strptime(_n8(d), "%Y%m%d").date()
+            return datetime.strptime(_n8(s), "%Y%m%d").date()
         except ValueError:
-            continue
-        if latest is None or dd > latest:
-            latest = dd
+            return None
+
+    parsed = [d for d in map(_day8, index) if d]
+    latest = max(parsed) if parsed else None
     if latest is None or (today_d - latest).days > STALE_DAYS:
         logger.warning("涨停池索引陈旧(最新 %s, 距今>%d 自然日) → "
                        "F9 昨日池停供(fail-closed); "

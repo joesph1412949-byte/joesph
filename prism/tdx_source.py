@@ -40,8 +40,6 @@ _HOSTS = [
 ]
 
 _CAT_DAILY = 9      # 日K
-_CAT_MIN1 = 8       # 1分钟K
-_CAT_MIN5 = 0       # 5分钟K
 _QUOTE_BATCH = 80   # get_security_quotes 每批上限
 
 _MKT_SH = 1
@@ -227,16 +225,6 @@ def get_kline(code, days=260):
     return _to_df(bars)
 
 
-def get_minute_kline(code, days=240, period="1m"):
-    """分钟K(1m/5m)。F2 首次封板时间可由 1 分钟K推导。"""
-    c, mkt = _split_code(code)
-    if mkt is None:
-        return None
-    cat = _CAT_MIN5 if period == "5m" else _CAT_MIN1
-    bars = _call("get_security_bars", cat, mkt, c, 0, int(days))
-    return _to_df(bars)
-
-
 def get_index_kline(code, days=60):
     """指数日K(上证/深成/科创50/沪深300 等)。F6 大盘配合用这个。"""
     c = (code or "").strip().upper().split(".")[0]
@@ -244,15 +232,6 @@ def get_index_kline(code, days=60):
         return None
     bars = _call("get_index_bars", _CAT_DAILY, _index_market(c), c, 0, int(days))
     return _to_df(bars)
-
-
-def get_sector_kline(code, days=250):
-    """板块/概念指数日K(880xxx 概念 / 881xxx 行业)。
-
-    **必须用 get_index_bars**: 用 get_security_bars 取板块代码不报错但返回
-    垃圾内存(日期如 "92735-92-44", close 达 1e80), 会静默污染 SEC 系因子。
-    """
-    return get_index_kline(code, days=days)
 
 
 # ---------------------------------------------------------------- 快照
@@ -325,14 +304,6 @@ def float_shares(code):
     return v if v > 0 else None
 
 
-def get_xdxr(code):
-    """除权除息记录(前复权自算用)。"""
-    c, mkt = _split_code(code)
-    if mkt is None:
-        return None
-    return _call("get_xdxr_info", mkt, c)
-
-
 # ---------------------------------------------------------------- 自检
 def self_check(verbose=True):
     """连通性自检: 返回 {项: (是否通过, 说明)}。不抛异常。"""
@@ -351,7 +322,7 @@ def self_check(verbose=True):
     n = len(idx) if idx is not None else 0
     res["大盘指数K"] = (n > 0, "%s 根(F6)" % n)
 
-    sec = get_sector_kline("880368", days=60)
+    sec = get_index_kline("880368", days=60)
     n = len(sec) if sec is not None else 0
     sane = False
     if sec is not None and n:

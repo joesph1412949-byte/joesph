@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """N3 首板溢价: 昨日涨停股今日平均涨幅>0(东财真数据); 兜底: 今日涨停池均价。"""
 from prism.registry import factor
-from prism._utils import tick_key_for_em_code
+from shared.common import with_market_suffix
 
 
 @factor(id="N3", name="首板溢价", category="node",
@@ -18,7 +18,7 @@ def compute(ctx):
         for code in yesterday_codes:
             # 东财返回裸6位代码(如 "002859"), 而 QMT ticks 键带交易所后缀("002859.SZ"),
             # 必须按前缀补后缀再查, 否则实盘永远命中不了 → N3 恒 0。找不到的代码跳过。
-            key = tick_key_for_em_code(code)
+            key = with_market_suffix(code)
             t = ticks.get(key) or ticks.get(code)
             if not t:
                 continue

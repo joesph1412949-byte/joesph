@@ -199,8 +199,3 @@ class DataProvider:
             em=self.get_market_stats() or {}, fund=fund, manual=manual,
             last=tick.get("lastPrice"), last_close=tick.get("lastClose"),
             up_price=up_price, sealed=sealed)
-
-
-# 模块级单例: 旧代码/脚本直接 `from prism.data import provider` 取用。
-# 构造只做轻量初始化(读两个 JSON 缓存), 无网络/无行情副作用。
-provider = DataProvider()

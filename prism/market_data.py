@@ -9,21 +9,19 @@
 设计对齐 prism/zt_history.py:
   * 采集结果落盘 pickle(.market_data_cache.pkl), 增量续传(已追平的板块跳过,
     尾部过期的重采——09-07 修复日期冻结);
-  * 按日索引(INDEX_PATH)供回测 O(1) 查询, 与 _pick(asof=) 防未来函数同机制;
   * 网络实现可注入(http_get), 离线测试用罐装 resp.
 
 数据源(东财公开接口, 免费, 实测可用):
-  * clist/get        行业板块列表 + 当日行情/资金(f3涨跌幅 f6成交额 f8换手 f62主力净流入)
+  * clist/get        行业板块列表(f12代码 f14名称)
   * stock/kline/get  板块历史K线(push2his, 可回溯任意日期)
   * fflow/daykline   板块资金流历史(push2his)
-  * ulist.np/get     全球指数(纳指/标普/道指/美元指数) 当日快照
   * stock/kline/get(secid=100.NDX 等) 全球指数历史K线(push2his)
 """
 import logging
 import pickle
 import sys
 import time
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 from shared.common import CACHE_DIR
@@ -37,7 +35,6 @@ logger = logging.getLogger(__name__)
 
 # 缓存路径: 统一收在 runtime/cache/ (已 gitignore, 见 shared/common.py)
 CACHE_PATH = CACHE_DIR / ".market_data_cache.pkl"
-INDEX_PATH = CACHE_DIR / ".market_data_index.pkl"
 
 # 回填起点(用户选定: 2026年初至今)
 BACKFILL_BEG = "20260101"
@@ -51,6 +48,8 @@ GLOBAL_INDICES = [
     ("100.DJIA", "DJIA", "道琼斯"),
     ("100.UDI", "UDI", "美元指数"),
 ]
+# 新浪美股符号(与东财 secid 不同名, 且无美元指数): secid → 新浪 symbol
+_SINA_SYMBOLS = {"100.NDX": ".IXIC", "100.SPX": ".INX", "100.DJIA": ".DJI"}
 # 资金流字段(f51日期 f52主力净流入 f54超大单 f53大单 f55中单 f56小单)
 FFLOW_FIELDS2 = "f51,f52,f53,f54,f55,f56"
 
@@ -84,7 +83,6 @@ class EastMoneyProbe:
     CLIST_URL = "https://push2.eastmoney.com/api/qt/clist/get"
     KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
     FFLOW_URL = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
-    ULIST_URL = "https://push2.eastmoney.com/api/qt/ulist.np/get"
 
     def __init__(self, http_get=None, timeout=10.0):
         self.http_get = http_get or _default_http_get
@@ -106,7 +104,7 @@ class EastMoneyProbe:
                 time.sleep(RETRY_SLEEP)
         raise MarketDataError("东财请求失败 %s: %r" % (url, last))
 
-    # ---------------- 行业板块列表 + 当日行情 ----------------
+    # ---------------- 行业板块列表 ----------------
     def fetch_sector_list(self, page_size=300):
         """行业板块列表 → [{code, name}]。失败 → 抛 MarketDataError。"""
         items = []
@@ -133,39 +131,16 @@ class EastMoneyProbe:
             pn += 1
         return items
 
-    def fetch_sector_quotes(self, codes, page_size=100):
-        """当日板块行情(涨跌幅/成交额/换手/主力净流入) → {code: {...}}。
-        f3涨跌幅 f6成交额 f8换手 f12代码 f14名称 f62主力净流入。"""
-        out = {}
-        for i in range(0, len(codes), page_size):
-            chunk = codes[i:i + page_size]
-            data = self._get_json(self.CLIST_URL, {
-                "pn": 1, "pz": len(chunk), "po": 1, "np": 1,
-                "fltt": 2, "invt": 2, "fid": "f3",
-                "fs": ",".join("b:%s" % c for c in chunk),
-                "fields": "f12,f3,f6,f8,f62"})
-            diff = ((data or {}).get("data") or {}).get("diff") or []
-            for it in diff:
-                if not isinstance(it, dict):
-                    continue
-                code = it.get("f12")
-                if not code:
-                    continue
-                out[str(code)] = {
-                    "pct": it.get("f3"),
-                    "amount": it.get("f6"),
-                    "turnover": it.get("f8"),
-                    "main_net_in": it.get("f62"),
-                }
-        return out
-
     # ---------------- 历史K线 ----------------
-    def fetch_kline(self, secid, beg, end, fields2="f51,f53,f57"):
-        """历史日K → [{date, close, amount?}]。升序。失败 → 抛。"""
-        data = self._get_json(self.KLINE_URL, {
-            "secid": secid, "klt": 101, "fqt": 1,
-            "beg": beg, "end": end,
-            "fields1": "f1,f2,f3", "fields2": fields2})
+    def fetch_kline(self, secid, beg, end, fields2="f51,f53,f57", lmt=None):
+        """历史日K → [{date, close, amount?}]。升序。失败 → 抛。
+        lmt: 只取最近 N 根(全球指数通道用, 不传则按 beg/end 区间)。"""
+        params = {"secid": secid, "klt": 101, "fqt": 1,
+                  "beg": beg, "end": end,
+                  "fields1": "f1,f2,f3", "fields2": fields2}
+        if lmt:
+            params["lmt"] = lmt
+        data = self._get_json(self.KLINE_URL, params)
         klines = ((data or {}).get("data") or {}).get("klines") or []
         out = []
         for line in klines:
@@ -177,6 +152,10 @@ class EastMoneyProbe:
                 rec["amount"] = _f(parts[2])
             out.append(rec)
         return out
+
+    def fetch_global_kline(self, secid, beg, end, lmt=600):
+        """全球指数历史K线 → [{date, close}]。升序(只取收盘, 无 amount)。"""
+        return self.fetch_kline(secid, beg, end, fields2="f51,f53", lmt=lmt)
 
     # ---------------- 板块资金流历史 ----------------
     def fetch_sector_flow(self, secid, lmt=600):
@@ -197,39 +176,6 @@ class EastMoneyProbe:
                             "mid_net_in": _f(parts[4]),
                             "small_net_in": _f(parts[5])})
             out.append(rec)
-        return out
-
-    # ---------------- 全球指数 ----------------
-    def fetch_global_indices(self):
-        """全球指数当日快照 → {code: {name, close, pct}}。失败 → 抛。"""
-        secids = ",".join(s for s, _, _ in GLOBAL_INDICES)
-        data = self._get_json(self.ULIST_URL, {
-            "fltt": 2, "invt": 2, "fields": "f2,f3,f4,f12,f14",
-            "secids": secids})
-        diff = ((data or {}).get("data") or {}).get("diff") or []
-        out = {}
-        for it in diff:
-            if not isinstance(it, dict):
-                continue
-            code = it.get("f12")
-            if code:
-                out[str(code)] = {"name": str(it.get("f14") or ""),
-                                  "close": it.get("f2"),
-                                  "pct": it.get("f3")}
-        return out
-
-    def fetch_global_kline(self, secid, beg, end, lmt=600):
-        """全球指数历史K线 → [{date, close}]。升序(与 fetch_kline 同语义)。"""
-        data = self._get_json(self.KLINE_URL, {
-            "secid": secid, "klt": 101, "fqt": 1,
-            "beg": beg, "end": end, "lmt": lmt,
-            "fields1": "f1,f2,f3", "fields2": "f51,f53"})
-        klines = ((data or {}).get("data") or {}).get("klines") or []
-        out = []
-        for line in klines:
-            parts = str(line).split(",")
-            if len(parts) >= 2:
-                out.append({"date": parts[0], "close": _f(parts[1])})
         return out
 
     # ---------------- 板块资金惯性(当日快照, 前向累积) ----------------
@@ -320,9 +266,8 @@ class SWIndexFeed:
     def fetch_sector_kline(self, code, beg=None, end=None):
         """申万指数日K → [{date, close, amount}]。升序。失败 → 抛。
 
-        beg/end 支持 YYYYMMDD 或 YYYY-MM-DD(内部统一为 YYYY-MM-DD 比较)。"""
-        beg_fmt = _norm_day(beg)
-        end_fmt = _norm_day(end)
+        取全量(增量门在 build_sector_cache 的 _tail_stale 缓存层做, 这里不过滤
+        日期); beg/end 仅为签名兼容保留。"""
         try:
             df = self._ak().index_hist_sw(symbol=code, period="day")
         except Exception as e:
@@ -343,10 +288,6 @@ class SWIndexFeed:
             except Exception:
                 continue
             if len(d_str) != 10:
-                continue
-            if beg_fmt and d_str < beg_fmt:
-                continue
-            if end_fmt and d_str > end_fmt:
                 continue
             out.append({"date": d_str, "close": _f(row[close_col]),
                         "amount": _f(row[amount_col])})
@@ -543,19 +484,6 @@ def _save_cache(cache):
     CACHE_PATH.write_bytes(pickle.dumps(merged, protocol=4))
 
 
-def _load_index():
-    if INDEX_PATH.exists():
-        try:
-            return pickle.loads(INDEX_PATH.read_bytes())
-        except Exception:
-            return {}
-    return {}
-
-
-def _save_index(index):
-    INDEX_PATH.write_bytes(pickle.dumps(index, protocol=4))
-
-
 # ---------------------------------------------------------------- 采集
 
 def _tail_stale(rec, end):
@@ -629,25 +557,18 @@ def build_sector_cache(probe=None, beg=BACKFILL_BEG, end=None,
     # 2. 板块历史K线 + 资金流(增量: 已有完整数据的跳过)
     total = len(sectors)
     done = 0
-    has_fetch_kline = hasattr(feed, "fetch_kline")
-    has_fetch_sector_kline = hasattr(feed, "fetch_sector_kline")
     for code, info in sectors.items():
         need_kline = _tail_stale(kline.get(code), end)
         need_flow = flow_enabled and _tail_stale(flow.get(code), end)
         if need_kline or need_flow:
             try:
-                if source == "sw" and has_fetch_sector_kline:
+                if source == "sw":
                     kl = feed.fetch_sector_kline(code)
-                elif has_fetch_kline:
-                    secid = "90.%s" % code
-                    kl = feed.fetch_kline(secid, beg, end,
+                else:
+                    kl = feed.fetch_kline("90.%s" % code, beg, end,
                                           fields2="f51,f53,f57")
-                else:
-                    kl = None
-                if flow_enabled and hasattr(feed, "fetch_sector_flow"):
-                    fl = feed.fetch_sector_flow("90.%s" % code)
-                else:
-                    fl = None
+                fl = feed.fetch_sector_flow("90.%s" % code) if flow_enabled \
+                    else None
             except MarketDataError as e:
                 logger.warning("板块 %s 采集失败: %r (跳过)", code, e)
                 done += 1
@@ -694,10 +615,9 @@ def build_global_cache(probe=None, beg=BACKFILL_BEG, end=None,
     """
     if source == "sina":
         feed = probe or SinaUSIndexFeed()
-        # 新浪可用的: .IXIC 纳指 / .INX 标普 / .DJI 道指 (无 .UDI 美元指数)
-        index_map = [(".IXIC", "NDX", "纳斯达克"),
-                     (".INX", "SPX", "标普500"),
-                     (".DJI", "DJIA", "道琼斯")]
+        # 新浪可用的三个(无 UDI 美元指数): secid → 新浪符号
+        index_map = [(_SINA_SYMBOLS[s], c, n) for s, c, n in GLOBAL_INDICES
+                     if s in _SINA_SYMBOLS]
     elif source == "fred":
         feed = probe or FREDFeed()
         # FRED series_id → (缓存key, 名称): 美债收益率/VIX
@@ -705,7 +625,7 @@ def build_global_cache(probe=None, beg=BACKFILL_BEG, end=None,
                      ("VIXCLS", "VIX", "VIX恐慌指数")]
     else:
         feed = probe or EastMoneyProbe()
-        index_map = [(s, c, n) for s, c, n in GLOBAL_INDICES]
+        index_map = GLOBAL_INDICES
     end = end or date.today().strftime("%Y%m%d")
     cache = _load_cache()
     globald = cache.get("global") or {}
@@ -747,7 +667,7 @@ COMMODITY_BY_NAME = {
 # 多晶硅)。详证 .superpowers/sdd/task-v04-1-report.md。
 
 _FUTURES_NAMES = {
-    "MA0": "甲醇", "TA0": "PTA", "ZC0": "动力煤", "JM0": "焦煤",
+    "MA0": "甲醇", "TA0": "PTA", "JM0": "焦煤",
     "RB0": "螺纹钢", "HC0": "热卷", "CU0": "铜", "AL0": "铝",
     "SC0": "原油", "LH0": "生猪", "M0": "豆粕", "Y0": "豆油",
     "SR0": "白糖", "FG0": "玻璃", "LC0": "碳酸锂", "SI0": "工业硅",
@@ -1020,22 +940,9 @@ def build_sector_map(feed=None, progress=None):
         if progress:
             progress(done, total)
     if smap:
-        cache = _load_cache()
-        cache["sector_map"] = smap
-        # sectores 段同时刷新名称(与板块K线对齐)
+        # 尾部统一落盘(行业数 <10 时循环内的增量保存不会触发)
         _save_cache({"sector_map": smap})
     return {"stocks": len(smap)}
-
-
-def stock_sector(code):
-    """个股(带后缀/裸代码) → 所属申万一级行业代码。无 → None。"""
-    cache = _load_cache()
-    smap = cache.get("sector_map") or {}
-    c6 = _code6(code)
-    if not c6:
-        return None
-    rec = smap.get(c6)
-    return (rec or {}).get("sector")
 
 
 def _code6(s):
@@ -1048,96 +955,6 @@ def _code6(s):
     return None
 
 
-def _by_date(rec, day):
-    """rec(dates/values...) 中取某日索引; 无 → -1。"""
-    try:
-        return rec["dates"].index(day)
-    except ValueError:
-        return -1
-
-
-def sector_close_on(sector_code, day, cache=None):
-    """板块某日收盘。day: "YYYY-MM-DD"。无 → None。"""
-    cache = cache if cache is not None else _load_cache()
-    rec = (cache.get("kline") or {}).get(sector_code)
-    if not rec:
-        return None
-    i = _by_date(rec, day)
-    if i < 0:
-        return None
-    return rec["close"][i]
-
-
-def sector_flow_on(sector_code, day, cache=None):
-    """板块某日主力净流入。无 → None。"""
-    cache = cache if cache is not None else _load_cache()
-    rec = (cache.get("flow") or {}).get(sector_code)
-    if not rec:
-        return None
-    i = _by_date(rec, day)
-    if i < 0:
-        return None
-    return rec["main_net_in"][i]
-
-
-def index_close_on(index_code, day, cache=None):
-    """全球指数某日收盘(NDX/SPX/DJIA/UDI)。无 → None。"""
-    cache = cache if cache is not None else _load_cache()
-    rec = (cache.get("global") or {}).get(index_code)
-    if not rec:
-        return None
-    i = _by_date(rec, day)
-    if i < 0:
-        return None
-    return rec["close"][i]
-
-
-def build_index():
-    """从采集缓存构建按日索引(与 zt_history.build_index 同模式):
-      {"YYYY-MM-DD": {"sector_close": {code: v}, "sector_flow": {code: v},
-                      "global": {code: v}}}
-    """
-    cache = _load_cache()
-    index = {}
-    kline = cache.get("kline") or {}
-    flow = cache.get("flow") or {}
-    globald = cache.get("global") or {}
-    for code, rec in kline.items():
-        for i, d in enumerate(rec["dates"]):
-            day = index.setdefault(d, {"sector_close": {},
-                                       "sector_flow": {},
-                                       "global": {}})
-            day["sector_close"][code] = rec["close"][i]
-    for code, rec in flow.items():
-        for i, d in enumerate(rec["dates"]):
-            day = index.setdefault(d, {"sector_close": {},
-                                       "sector_flow": {},
-                                       "global": {}})
-            day["sector_flow"][code] = rec["main_net_in"][i]
-    for code, rec in globald.items():
-        for i, d in enumerate(rec["dates"]):
-            day = index.setdefault(d, {"sector_close": {},
-                                       "sector_flow": {},
-                                       "global": {}})
-            day["global"][code] = rec["close"][i]
-    if index:
-        _save_index(index)
-    return index
-
-
-def day_snapshot(day):
-    """某日市场数据快照(回测/实盘共用, asof 语义)。
-    day: "YYYY-MM-DD" / "YYYYMMDD"。无 → {"sector_close": {}, ...}。"""
-    if len(day) == 8:
-        day = "%s-%s-%s" % (day[:4], day[4:6], day[6:8])
-    index = _load_index()
-    snap = index.get(day)
-    if snap:
-        return snap
-    # 退化: 直接查缓存
-    return {"sector_close": {}, "sector_flow": {}, "global": {}}
-
-
 # ---------------------------------------------------------------- CLI
 
 def build_cli():
@@ -1147,8 +964,6 @@ def build_cli():
                     help="采集行业板块K线+资金流(增量)")
     ap.add_argument("--build-global", action="store_true",
                     help="采集全球指数历史K线(增量)")
-    ap.add_argument("--build-index", action="store_true",
-                    help="从缓存构建按日索引(查询加速)")
     ap.add_argument("--build-sector-map", action="store_true",
                     help="构建个股→申万行业映射(成分股采集)")
     ap.add_argument("--build-flow-rank", action="store_true",
@@ -1162,8 +977,8 @@ def build_cli():
                     help="板块/指数数据源: eastmoney(默认) / sw(申万) / sina(新浪美股)")
     ap.add_argument("--rebuild", action="store_true",
                     help="清空 kline/flow 后全量重采(切换数据源时用, 避免混杂)")
-    ap.add_argument("--stats", action="store_true", help="显示缓存统计")
-    ap.add_argument("--day", default="", help="查询某日快照 YYYYMMDD")
+    ap.add_argument("--stats", action="store_true",
+                    help="显示缓存统计(无采集动作时同效)")
     args = ap.parse_args()
 
     def prog(done, total):
@@ -1174,25 +989,14 @@ def build_cli():
         r = build_sector_cache(beg=args.beg, progress=prog,
                                source=args.source, rebuild=args.rebuild)
         print("\n板块采集完成(source=%s):" % args.source, r)
-        if args.build_index or True:
-            idx = build_index()
-            print("按日索引: %d 天" % len(idx))
         return
     if args.build_global:
         g = build_global_cache(beg=args.beg, source=args.source)
         print("全球指数采集完成(source=%s): %d 个" % (args.source, len(g)))
-        if args.build_index or True:
-            idx = build_index()
-            print("按日索引: %d 天" % len(idx))
-        return
-    if args.build_index:
-        idx = build_index()
-        print("按日索引: %d 天" % len(idx))
         return
     if args.build_sector_map:
         r = build_sector_map(progress=prog)
         print("\n个股→行业映射完成: %d 只" % r["stocks"])
-        print("示例查询: 600519 →", stock_sector("600519"))
         return
     failures = []
     if args.build_flow_rank:
@@ -1216,21 +1020,16 @@ def build_cli():
         raise SystemExit("market_data: %s 采集失败(东财可能封禁), 稍后重试"
                          % "+".join(failures))
     cache = _load_cache()
-    if args.stats or not args.day:
-        print("板块数:", len(cache.get("sectors") or {}))
-        print("K线板块数:", len(cache.get("kline") or {}))
-        print("资金流板块数:", len(cache.get("flow") or {}))
-        print("全球指数:", {k: len(v.get("dates") or [])
-                            for k, v in (cache.get("global") or {}).items()})
-        bench = cache.get("benchmark") or {}
-        fr = cache.get("flow_rank") or {}
-        print("上证基准:", len(bench.get("dates") or []), "日")
-        print("资金惯性:", len(fr.get("dates") or []), "日快照")
-        return
-    snap = day_snapshot(args.day)
-    print("%s 快照: 板块收盘 %d, 板块资金 %d, 全球 %d" % (
-        args.day, len(snap["sector_close"]), len(snap["sector_flow"]),
-        len(snap["global"])))
+    # 无采集动作(或显式 --stats) → 打印缓存统计
+    print("板块数:", len(cache.get("sectors") or {}))
+    print("K线板块数:", len(cache.get("kline") or {}))
+    print("资金流板块数:", len(cache.get("flow") or {}))
+    print("全球指数:", {k: len(v.get("dates") or [])
+                        for k, v in (cache.get("global") or {}).items()})
+    bench = cache.get("benchmark") or {}
+    fr = cache.get("flow_rank") or {}
+    print("上证基准:", len(bench.get("dates") or []), "日")
+    print("资金惯性:", len(fr.get("dates") or []), "日快照")
 
 
 if __name__ == "__main__":

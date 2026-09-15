@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 """因子上下文: 所有因子收到的统一数据包。字段取不到时一律 None(fail-open)。"""
-import inspect
 
 
 class FactorContext:
@@ -25,19 +24,6 @@ class FactorContext:
         self.up_price = up_price
         self.sealed = sealed
         self._extra = kwargs
-
-    @classmethod
-    def from_data(cls, **kwargs):
-        return cls(**kwargs)
-
-    @classmethod
-    def from_provider(cls, provider, code, **kwargs):
-        """从 DataProvider 构建单股因子上下文(薄委托)。
-
-        不在此 import prism.data(顶层会循环依赖); provider 为鸭子类型,
-        调用时需已注入。数据缺失由 provider 保证 fail-open。
-        """
-        return provider.build_stock_context(code, **kwargs)
 
     def get(self, name):
         """按名字取字段, 缺失返回 None。支持因子取自定义扩展字段。"""

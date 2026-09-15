@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""market_data 单元测试 — 采集解析/缓存/查询/索引, 全离线(注入假 http_get)。"""
+"""market_data 单元测试 — 采集解析/缓存/查询, 全离线(注入假 http_get)。"""
 import sys
-from datetime import date as _date, timedelta as _timedelta
+from datetime import date as _date
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -116,15 +116,6 @@ class FakeGetter2:
         return FakeResp(self.responses.pop(0))
 
 
-def test_fetch_sector_quotes():
-    data = _resp({"diff": [{"f12": "BK0475", "f3": 2.31, "f6": 1.2e10,
-                            "f8": 3.4, "f62": 5.6e8}]})
-    p, _ = _fake_probe({md.EastMoneyProbe.CLIST_URL: data})
-    q = p.fetch_sector_quotes(["BK0475"])
-    assert q["BK0475"]["pct"] == 2.31
-    assert q["BK0475"]["main_net_in"] == 5.6e8
-
-
 def test_fetch_kline():
     data = _resp({"klines": ["2026-07-01,4147.72,30064854350.00",
                              "2026-07-02,4160.67,32598801572.00"]})
@@ -149,15 +140,6 @@ def test_fetch_sector_flow():
     assert fl[0]["big_net_in"] == 824968448.0
 
 
-def test_fetch_global_indices():
-    data = _resp({"diff": [{"f12": "NDX", "f14": "纳斯达克",
-                            "f2": 26180.45, "f3": 0.43}]})
-    p, _ = _fake_probe({md.EastMoneyProbe.ULIST_URL: data})
-    g = p.fetch_global_indices()
-    assert g["NDX"]["close"] == 26180.45
-    assert g["NDX"]["pct"] == 0.43
-
-
 def test_fetch_global_kline():
     data = _resp({"klines": ["2026-07-01,18000.00", "2026-07-02,18100.00"]})
     p, _ = _fake_probe({md.EastMoneyProbe.KLINE_URL: data})
@@ -179,7 +161,6 @@ def test_fetch_fail_after_retries():
 
 def test_build_sector_cache_and_query(_ws_tmp, monkeypatch):
     monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
-    monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "mkt_idx.pkl")
 
     clist = _resp({"total": 1,
                    "diff": [{"f12": "BK0475", "f14": "银行"}]})
@@ -195,23 +176,17 @@ def test_build_sector_cache_and_query(_ws_tmp, monkeypatch):
     assert r["kline_codes"] == 1
     assert r["flow_codes"] == 1
 
-    # 查询接口
-    assert md.sector_close_on("BK0475", "2026-07-01") == 100.0
-    assert md.sector_close_on("BK0475", "2026-07-02") == 101.0
-    assert md.sector_close_on("BK0475", "2026-07-03") is None     # 无此日
-    assert md.sector_flow_on("BK0475", "2026-07-01") == 50.0
-    assert md.sector_flow_on("BK9999", "2026-07-01") is None      # 无此板块
-    # 索引
-    idx = md.build_index()
-    assert "2026-07-01" in idx
-    assert idx["2026-07-01"]["sector_close"]["BK0475"] == 100.0
-    assert idx["2026-07-01"]["sector_flow"]["BK0475"] == 50.0
+    # 落盘内容(查询侧由 _load_cache 直接读段)
+    cache = md._load_cache()
+    assert cache["kline"]["BK0475"]["dates"] == ["2026-07-01", "2026-07-02"]
+    assert cache["kline"]["BK0475"]["close"] == [100.0, 101.0]
+    assert cache["flow"]["BK0475"]["main_net_in"] == [50.0, 60.0]
+    assert cache["sectors"]["BK0475"]["name"] == "银行"
 
 
 def test_build_sector_cache_skips_existing(_ws_tmp, monkeypatch):
     """增量: 已采集的板块不再重复请求。"""
     monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
-    monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "mkt_idx.pkl")
     clist = _resp({"total": 1, "diff": [{"f12": "BK0475", "f14": "银行"}]})
     p, g = _fake_probe({md.EastMoneyProbe.CLIST_URL: clist})
     r1 = md.build_sector_cache(probe=p, beg="20260101", end="20260823")
@@ -228,7 +203,6 @@ def test_build_sector_cache_refreshes_stale_tail(_ws_tmp, monkeypatch):
     与 zt_history ④ 同类病。)
     """
     monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
-    monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "mkt_idx.pkl")
     clist = _resp({"total": 1, "diff": [{"f12": "BK0475", "f14": "银行"}]})
     p, g = _fake_probe({
         md.EastMoneyProbe.CLIST_URL: clist,
@@ -268,7 +242,6 @@ def test_build_sector_cache_refreshes_stale_tail(_ws_tmp, monkeypatch):
 def test_build_sector_cache_keeps_old_on_shorter_refetch(_ws_tmp, monkeypatch):
     """重采结果变短但末日期未回退 → 可疑截断, 保留旧段(M-1 守卫)。"""
     monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
-    monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "mkt_idx.pkl")
     clist = _resp({"total": 1, "diff": [{"f12": "BK0475", "f14": "银行"}]})
     k3 = _resp({"klines": ["2026-07-01,100.0,1000.0",
                            "2026-07-02,101.0,1100.0",
@@ -301,41 +274,9 @@ def test_build_global_cache(_ws_tmp, monkeypatch):
     kline = _resp({"klines": ["2026-07-01,18000.0", "2026-07-02,18100.0"]})
     p, _ = _fake_probe({md.EastMoneyProbe.KLINE_URL: kline})
     g = md.build_global_cache(probe=p, beg="20260101", end="20260823")
-    assert "NDX" in g
-    assert md.index_close_on("NDX", "2026-07-02") == 18100.0
-    assert md.index_close_on("NDX", "2026-07-03") is None
-
-
-def test_day_snapshot_asof(_ws_tmp, monkeypatch):
-    """asof 语义: 只返回该日及之前的数据(防未来函数)。"""
-    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
-    monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "mkt_idx.pkl")
-    clist = _resp({"total": 1, "diff": [{"f12": "BK0475", "f14": "银行"}]})
-    kline = _resp({"klines": ["2026-07-01,100.0,1000.0",
-                              "2026-07-02,101.0,1100.0"]})
-    flow = _resp({"klines": ["2026-07-01,50.0,1.0,2.0,3.0,4.0",
-                             "2026-07-02,60.0,1.0,2.0,3.0,4.0"]})
-    p, _ = _fake_probe({md.EastMoneyProbe.CLIST_URL: clist,
-                        md.EastMoneyProbe.KLINE_URL: kline,
-                        md.EastMoneyProbe.FFLOW_URL: flow})
-    md.build_sector_cache(probe=p, beg="20260101", end="20260823")
-    md.build_index()
-    snap = md.day_snapshot("20260701")
-    assert snap["sector_close"]["BK0475"] == 100.0
-    sn2 = md.day_snapshot("20260703")   # 无此日 → 空快照(不掺未来)
-    assert sn2["sector_close"] == {}
-    assert "BK0475" not in sn2["sector_close"]
-
-
-def test_no_cache_returns_empty(_ws_tmp, monkeypatch):
-    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "none.pkl")
-    monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "none_idx.pkl")
-    assert md.sector_close_on("BK0475", "2026-07-01") is None
-    assert md.sector_flow_on("BK0475", "2026-07-01") is None
-    assert md.index_close_on("NDX", "2026-07-01") is None
-    assert md.day_snapshot("20260701") == {"sector_close": {},
-                                           "sector_flow": {},
-                                           "global": {}}
+    assert set(g) == {"NDX", "SPX", "DJIA", "UDI"}
+    assert g["NDX"]["dates"] == ["2026-07-01", "2026-07-02"]
+    assert g["NDX"]["close"] == [18000.0, 18100.0]
 
 
 # ---------------------------------------------------------------- 申万通道(非东财备用)
@@ -396,18 +337,15 @@ def test_sw_feed_kline():
 def test_build_sector_cache_sw_source(_ws_tmp, monkeypatch):
     """source=sw: 用申万通道建缓存, flow 留空(申万无资金流)。"""
     monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
-    monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "mkt_idx.pkl")
     f = md.SWIndexFeed(ak=FakeSWAK())
     r = md.build_sector_cache(probe=f, beg="20260101", end="20260823",
                               source="sw")
     assert r["sectors"] == 2
     assert r["kline_codes"] == 1       # 只有 801010 有K线
     assert r["flow_codes"] == 0        # 申万无资金流
-    assert md.sector_close_on("801010", "2026-07-01") == 1005.0
-    assert md.sector_flow_on("801010", "2026-07-01") is None
-    # 索引也构建成功
-    idx = md.build_index()
-    assert idx["2026-07-01"]["sector_close"]["801010"] == 1005.0
+    kl = md._load_cache()["kline"]["801010"]
+    assert kl["dates"] == ["2026-07-01", "2026-07-02"]
+    assert kl["close"] == [1005.0, 1018.0]
 
 
 # ---------------------------------------------------------------- 新浪美股通道
@@ -448,8 +386,8 @@ def test_build_global_cache_sina_source(_ws_tmp, monkeypatch):
     g = md.build_global_cache(probe=f, beg="20260701", end="20260823",
                               source="sina")
     assert set(g.keys()) == {"NDX", "SPX", "DJIA"}   # 新浪无美元指数
-    assert md.index_close_on("NDX", "2026-07-02") == 17180.0
-    assert md.index_close_on("UDI", "2026-07-02") is None
+    assert g["NDX"]["close"] == [17050.0, 17180.0]
+    assert "UDI" not in g
 
 
 # ---------------------------------------------------------------- 个股→行业映射
@@ -483,23 +421,20 @@ def test_build_sector_map_and_query(_ws_tmp, monkeypatch):
     f = md.SWIndexFeed(ak=FakeMapAK())
     r = md.build_sector_map(feed=f)
     assert r["stocks"] == 2
-    # 查询: 带后缀/裸代码都命中
-    assert md.stock_sector("000019.SZ") == "801010"
-    assert md.stock_sector("000019") == "801010"
-    assert md.stock_sector("600519") is None       # 不在映射
-    assert md._code6("bad") is None
+    # 落盘段(消费方 backtest/cli.py 与 prism/data.py 读 cache["sector_map"])
+    smap = md._load_cache()["sector_map"]
+    assert smap["000019"] == {"sector": "801010", "name": "深粮控股"}
+    assert smap["300999"]["sector"] == "801010"
+    # 带后缀/裸代码都归一成 6 位
     assert md._code6("000019.SZ") == "000019"
-
-
-def test_stock_sector_no_cache(_ws_tmp, monkeypatch):
-    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "none.pkl")
-    assert md.stock_sector("000019") is None
+    assert md._code6("000019") == "000019"
+    assert md._code6("600519") == "600519"
+    assert md._code6("bad") is None
 
 
 def test_rebuild_clears_old_kline(_ws_tmp, monkeypatch):
     """rebuild=True: 切换数据源时清空旧体系K线/资金流。"""
     monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
-    monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "mkt_idx.pkl")
     # 先建申万缓存(旧体系)
     sw = md.SWIndexFeed(ak=FakeSWAK())
     md.build_sector_cache(probe=sw, beg="20260101", end="20260823",
@@ -513,7 +448,6 @@ def test_rebuild_clears_old_kline(_ws_tmp, monkeypatch):
                               source="eastmoney", rebuild=True)
     assert r["kline_codes"] <= 1          # 没有申万801010了
     assert "801010" not in (md._load_cache().get("kline") or {})
-    assert md.sector_close_on("801010", "2026-07-01") is None
 
 
 # ---------------------------------------------------------------- FRED 通道
@@ -578,8 +512,8 @@ def test_build_global_cache_fred_source(_ws_tmp, monkeypatch):
     out = md.build_global_cache(probe=f, beg="20260701", end="20260823",
                                 source="fred")
     assert set(out.keys()) == {"US10Y", "VIX"}
-    assert md.index_close_on("US10Y", "2026-07-01") == 4.25
-    assert md.index_close_on("VIX", "2026-07-02") == 4.28
+    assert out["US10Y"]["close"] == [4.25, 4.28]
+    assert out["VIX"]["name"] == "VIX恐慌指数"
 
 
 # ---------------------------------------------------------------- 资金惯性/基准
@@ -598,7 +532,6 @@ def test_fetch_flow_rank_parses():
 
 def test_build_flow_rank_idempotent(_ws_tmp, monkeypatch):
     monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
-    monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "mkt_idx.pkl")
     d1 = _resp({"total": 2, "diff": [
         {"f12": "BK0486", "f14": "传媒", "f62": 1e9},
         {"f12": "BK0433", "f14": "农林牧渔", "f62": 5e8}]})
@@ -620,7 +553,6 @@ def test_build_flow_rank_idempotent(_ws_tmp, monkeypatch):
 def test_build_flow_rank_skips_empty_snapshot(_ws_tmp, monkeypatch):
     """全 '-' 快照(盘前/非交易日) → 不落盘, dates 不增长。"""
     monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
-    monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "mkt_idx.pkl")
     data = _resp({"total": 2, "diff": [
         {"f12": "BK0001", "f14": "甲", "f62": "-"},
         {"f12": "BK0002", "f14": "乙", "f62": "-"}]})
@@ -632,7 +564,6 @@ def test_build_flow_rank_skips_empty_snapshot(_ws_tmp, monkeypatch):
 
 def test_build_benchmark(_ws_tmp, monkeypatch):
     monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
-    monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "mkt_idx.pkl")
     data = _resp({"klines": ["2026-07-01,4147.72,30064854350.00",
                              "2026-07-02,4160.67,32598801572.00"]})
     p, _ = _fake_probe({md.EastMoneyProbe.KLINE_URL: data})
@@ -643,7 +574,6 @@ def test_build_benchmark(_ws_tmp, monkeypatch):
 
 def test_build_benchmark_keeps_old_on_failure(_ws_tmp, monkeypatch):
     monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
-    monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "mkt_idx.pkl")
     md._save_cache({"benchmark": {"dates": ["2026-07-01"], "close": [4000.0],
                                   "amount": [1e10]}})
     p, _ = _fake_probe({}, fail_urls=[md.EastMoneyProbe.KLINE_URL])
@@ -654,7 +584,6 @@ def test_build_benchmark_keeps_old_on_failure(_ws_tmp, monkeypatch):
 
 def test_mkt_snapshot_new_segments(_ws_tmp, monkeypatch):
     monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
-    monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "mkt_idx.pkl")
     monkeypatch.setattr(md, "futures_snapshot", lambda: {})
     md._save_cache({
         "kline": {"801010": {"dates": ["2026-09-05"], "close": [100.0],
@@ -675,7 +604,6 @@ def test_mkt_snapshot_new_segments(_ws_tmp, monkeypatch):
 def test_cli_build_flags_run_both(_ws_tmp, monkeypatch):
     """--build-benchmark --build-flow-rank 组合: 两个都执行(终审 I-1 回归锁)。"""
     monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
-    monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "mkt_idx.pkl")
     monkeypatch.setattr("sys.argv", ["market_data.py", "--build-benchmark",
                                      "--build-flow-rank"])
     calls = []
@@ -694,7 +622,6 @@ def test_cli_flow_rank_failure_does_not_block_benchmark(_ws_tmp, monkeypatch,
                                                         capsys):
     """flow_rank 被封(抛 MarketDataError) → benchmark 照常执行(终审 I-1 补强)。"""
     monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
-    monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "mkt_idx.pkl")
     monkeypatch.setattr("sys.argv", ["market_data.py", "--build-benchmark",
                                      "--build-flow-rank"])
 
@@ -715,7 +642,6 @@ def test_cli_flow_rank_failure_does_not_block_benchmark(_ws_tmp, monkeypatch,
 def test_cli_single_flag_failure_exits_nonzero(_ws_tmp, monkeypatch):
     """只点名 flow_rank 且失败 → 非零退出(不静默吞, 自动化可感知)。"""
     monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
-    monkeypatch.setattr(md, "INDEX_PATH", _ws_tmp / "mkt_idx.pkl")
     monkeypatch.setattr("sys.argv", ["market_data.py", "--build-flow-rank"])
 
     def boom(probe=None):

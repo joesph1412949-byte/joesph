@@ -3,7 +3,6 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from prism.context import FactorContext
 from prism.data import DataProvider
 
 
@@ -135,14 +134,6 @@ def test_invalidate_clears_caches():
     p.invalidate()
     assert p._limit_ups_cache is None
     assert p._em_stats is None
-
-
-def test_context_from_provider_delegates():
-    """FactorContext.from_provider 薄委托给 provider.build_stock_context。"""
-    p = FakeProvider()
-    ctx = FactorContext.from_provider(p, "600000.SH")
-    assert ctx.code == "600000.SH"
-    assert ctx.kline is None
 
 
 class _F3DS(FakeDS):
