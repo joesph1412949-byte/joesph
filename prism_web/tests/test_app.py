@@ -959,3 +959,68 @@ def test_stock_kline_both_sources_down(client, monkeypatch):
     assert r.status_code == 503
     body = r.get_json()
     assert body["ok"] is False and "行情源不可用" in body["error"]
+
+
+# ---------------- 分级写护栏(spec 2026-09-15-tiered-guard) ----------------
+
+_REMOTE_ENV = {"REMOTE_ADDR": "127.0.0.1", "HTTP_CF_CONNECTING_IP": "203.0.113.7"}
+
+
+def test_guard_is_local_request():
+    """判据唯一真相: CF头→远程; loopback/RFC1918→本机; 其他公网→远程。"""
+    assert app_module.is_local_request(None, "127.0.0.1") is True
+    assert app_module.is_local_request(None, "::1") is True
+    assert app_module.is_local_request(None, "192.168.1.50") is True
+    assert app_module.is_local_request(None, "10.0.0.3") is True
+    assert app_module.is_local_request(None, "172.20.1.5") is True
+    assert app_module.is_local_request(None, "172.32.1.5") is False   # 边界
+    assert app_module.is_local_request(None, "100.64.1.2") is False
+    assert app_module.is_local_request(None, "203.0.113.7") is False
+    assert app_module.is_local_request("1.2.3.4", "127.0.0.1") is False
+
+
+def test_guard_unit_matrix():
+    """钩子判定矩阵(纯单元, 不发真实请求——test_request_context 只定
+    endpoint 不执行路由): 敏感四路径×远程→403; 放行清单/GET/本机/局域网→None。"""
+    sensitive = {  # 真实路径 → 函数名(endpoint)
+        "/api/strategies/full_factor_v1/activate": "api_strategy_activate",
+        "/api/stock/600519/manual": "manual",
+        "/api/automation": "api_automation",
+        "/api/perf/backfill": "perf_backfill",
+    }
+    allowed = ("/api/screen", "/api/strategies/create", "/api/market/limitup")
+    for path, fn in sensitive.items():
+        with appmod_ctx("POST", path, "203.0.113.7"):
+            assert app_module.request.endpoint == fn       # 路径→函数名核对
+            assert app_module._local_only_guard() is not None, fn
+        with appmod_ctx("POST", path, None, "127.0.0.1"):
+            assert app_module._local_only_guard() is None, fn
+        with appmod_ctx("POST", path, None, "192.168.1.50"):
+            assert app_module._local_only_guard() is None, fn
+    for path in allowed:
+        with appmod_ctx("POST", path, "203.0.113.7"):
+            assert app_module._local_only_guard() is None, path  # 远程放行
+        with appmod_ctx("POST", path, None, "127.0.0.1"):
+            assert app_module._local_only_guard() is None, path  # 本机放行
+    # GET 永远放行(即使敏感路径+远程)
+    with appmod_ctx("GET", "/api/automation", "203.0.113.7"):
+        assert app_module._local_only_guard() is None
+
+
+def appmod_ctx(method, path, cf_ip, remote="203.0.113.7"):
+    """护栏单元测试用请求上下文(真实路径 → 解析出真实 endpoint)。"""
+    return app_module.app.test_request_context(
+        path, method=method,
+        environ_base={"REMOTE_ADDR": remote or ""},
+        headers={} if cf_ip is None else {"CF-Connecting-IP": cf_ip})
+
+
+def test_guard_integration_remote_sensitive_403(client):
+    """集成抽查: 远程 POST 敏感路由经 client → 403 + 文案(钩子直拦, 不走路由)。"""
+    r = client.post("/api/strategies/full_factor_v1/activate", json={},
+                    environ_base=_REMOTE_ENV)
+    assert r.status_code == 403
+    assert "仅限本机" in r.get_json()["error"]
+    r = client.post("/api/automation", json={"paused": True},
+                    environ_base=_REMOTE_ENV)
+    assert r.status_code == 403

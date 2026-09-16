@@ -275,6 +275,32 @@ def _ensure_qmt():
         _qmt_reconnect_lock.release()
 
 
+# ================= 分级写护栏(2026-09-15, spec tiered-guard) =================
+# 远程(经 CF 隧道/公网)可选股/新建策略/刷新涨停池; 交易闸门类写操作仅本机。
+# 判据唯一真相在 shared.common.is_local_request(有 CF-Connecting-IP 头=经
+# 隧道=远程; 无头且 loopback/RFC1918=本机)。将来切 CF Access 邮箱白名单只改
+# 那个函数。白名单方向: 默认全放行, 仅下列函数名收本机(新增写路由默认可用)。
+from shared.common import is_local_request  # noqa: E402
+
+_LOCAL_ONLY = frozenset({"api_strategy_activate", "manual",
+                         "api_automation", "perf_backfill"})
+
+
+@app.before_request
+def _local_only_guard():
+    if request.method not in ("POST", "PUT", "DELETE", "PATCH"):
+        return None
+    if is_local_request(request.headers.get("CF-Connecting-IP"),
+                        request.remote_addr):
+        return None
+    if request.endpoint in _LOCAL_ONLY:
+        logger.warning("远程拦截敏感写: %s %s (CF-IP=%s)", request.method,
+                       request.path, request.headers.get("CF-Connecting-IP"))
+        return jsonify({"ok": False,
+                        "error": "此操作仅限本机执行(交易闸门类)"}), 403
+    return None
+
+
 @app.route("/")
 def index():
     return render_template("index.html")

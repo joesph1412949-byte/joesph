@@ -144,3 +144,28 @@ def next_weekday(d):
     while nxt.weekday() >= 5:
         nxt += timedelta(days=1)
     return nxt.isoformat() if as_str else nxt
+
+
+# ---------------------------------------------------------------- guard
+def _is_rfc1918(ip):
+    """RFC1918 private ranges (LAN = trusted local tier)."""
+    if ip.startswith(("10.", "192.168.")):
+        return True
+    if ip.startswith("172."):
+        try:
+            return 16 <= int(ip.split(".")[1]) <= 31
+        except (IndexError, ValueError):
+            return False
+    return False
+
+
+def is_local_request(cf_ip, remote_addr):
+    """Tiered-write guard predicate (spec 2026-09-15-tiered-guard).
+
+    CF-Connecting-IP present  -> public tunnel origin -> NOT local.
+    No CF header and loopback/RFC1918 remote  -> local machine.
+    Future: switch to CF Access email allowlist by editing this only."""
+    if cf_ip:
+        return False
+    ra = remote_addr or ""
+    return ra in ("127.0.0.1", "::1") or _is_rfc1918(ra)
