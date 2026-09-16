@@ -1,0 +1,7 @@
+# tt_solo 依赖(实测: ttcore/ 只用标准库, dashboard/ 只用 Flask)
+#
+# 刻意不列 xtquant: 它由 QMT 客户端安装提供, PyPI 上没有这个包,
+# 写进来会让 `pip install -r requirements.txt` 直接失败。ttcore 对它的
+# import 全部是惰性的(broker/market/executor 内), 缺了也能跑离线演练与测试。
+Flask>=3.0
+pytest>=8.0
