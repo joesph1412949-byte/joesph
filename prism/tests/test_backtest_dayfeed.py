@@ -10,6 +10,10 @@
   ⑥ 6 元组契约下成交价取收盘价(不是开盘价)
   ⑦ day_feed 缺键 / 返回 None → 静态参数兜底, 不崩
   ⑧ _day_payload(纯函数装配): em/ticks/指数/个股口径(离线夹具, 不连 QMT)
+  ⑨ 审查 I-1: 昨日池样本进 ticks(否则 N3 只统计连板样本 → 近乎恒 1)
+  ⑩ 审查 I-2: 缺失判定三处同源(键存在且非 None; 空 dict 也算已提供)
+  ⑪ 审查 I-3: 静态 em 与 day_feed em 同时非空 → day_feed 胜出 + 每日调用计数
+  ⑫ build_day_feed 惰性构造(按需取数 + 每日缓存 + 返回值契约不变)
 
 全离线: 不调 QMT/网络(真 QMT 取数只在 backtest/cli.py 的取数函数里)。
 """
@@ -438,3 +442,229 @@ def test_batch_klines_normalizes_suffix_but_keeps_pool_key(monkeypatch):
     out = cli._batch_klines(["600000", "300001.SZ"])
     assert seen == ["600000.SH", "300001.SZ"]     # QMT 侧补后缀
     assert sorted(out) == ["300001.SZ", "600000"]  # 键 = 池条目原样 code
+
+
+# ---------------- ⑨ 审查 I-1: 昨日池样本必须进 ticks ----------------
+# 改前: ticks 只装当日涨停池 → N3(首板溢价 = 昨日涨停股今日表现)只看得到
+# "昨涨停且今仍涨停"的连板样本, 均涨幅恒正 → N3 近乎恒 1(门控形同虚设)。
+
+def test_day_payload_prev_pool_codes_reach_ticks_not_stock():
+    """I-1: 昨日涨停、今日未涨停的股票 → 进 ticks(N3 样本), 不进 stock(F1)。"""
+    prev, day = CAL[2], CAL[3]                 # prev_pool 独有的 688888.SH
+    pools = {prev: [{"code": "688888.SH", "boards": 1}],
+             day: [{"code": "600000.SH", "boards": 1}]}
+    klines = {"600000.SH": _kline6([10.0, 11.0], start=prev),
+              "688888.SH": _kline6([10.0, 9.0], start=prev)}
+    p = _day_payload(day, pools, [prev, day], klines, {}, {})
+    # N3 样本: 昨涨停股今日 -10%(未涨停) → 必须在 ticks 里, 否则 N3 只看连板样本
+    assert p["ticks"]["688888.SH"] == {"lastPrice": 9.0, "lastClose": 10.0}
+    # stock 只服务 F1(今日涨停), 昨池独有股不能进(否则 F1 假命中)
+    assert "688888.SH" not in p["stock"]
+    assert p["stock"]["600000.SH"]["last"] == 11.0
+
+
+def _n3_case(move_pct, shared=False):
+    """当日池 [600000.SH]; 昨日池 = 昨池独有股 300002.SZ(今日 move_pct)
+    [+ 当日池那只 600000.SH(昨涨停今仍涨停, shared=True)]。"""
+    prev, day = date(2026, 7, 8), date(2026, 7, 9)
+    cal = [prev, day]
+    prev_pool = [{"code": "300002.SZ", "boards": 1}]
+    if shared:                       # 昨日涨停 + 今日仍涨停(连板样本)
+        prev_pool.append({"code": "600000.SH", "boards": 1})
+    pools = {prev: prev_pool, day: [{"code": "600000.SH", "boards": 1}]}
+    klines = {"600000.SH": _kline6([10.0, 11.0, 11.5], start=prev),
+              "300002.SZ": _kline6([10.0, 10.0 * (1 + move_pct),
+                                    10.0 * (1 + move_pct)], start=prev)}
+    return prev, day, pools, cal, klines
+
+
+def _n3_run(pools, cal, klines, day):
+    """N3 门控 + 真实因子, day_feed 由 _day_payload 装配(与 build_day_feed 同口径)。"""
+    s = _mk_strategy(scoring=("N1",), gate=("N3",), threshold=1, min_model=1)
+    bt = _bt(s, _pool_zt({_day8(day)}),
+             lambda c: klines.get(c) or [])
+    feed = lambda d: (_day_payload(d, pools, cal, klines, {}, {})  # noqa: E731
+                      if d in cal else None)
+    return bt.run(day, day, day_feed=feed)
+
+
+def test_prev_pool_only_sample_opens_n3_gate():
+    """I-1: 昨涨停股今日 +5%(涨但没涨停) → N3 命中 → 门开(改前: ticks 里没有它 → 0)。"""
+    prev, day, pools, cal, klines = _n3_case(+0.05)
+    rep = _n3_run(pools, cal, klines, day)
+    assert rep["trades"] == 1
+    assert rep["filter_stats"]["gate_blocked_days"] == 0
+
+
+def test_prev_pool_losers_flip_n3_negative():
+    """I-1 系统性高估: 昨池里"今未涨停"的亏钱样本反转均涨幅 → 门关。
+
+    改前只统计连板样本(600000.SH +10%) → avg>0 → N3=1 → 门开(假信号);
+    改后 300002.SZ -12% 进样本 → avg<0 → N3=0 → 门关。
+    """
+    prev, day, pools, cal, klines = _n3_case(-0.12, shared=True)
+    rep = _n3_run(pools, cal, klines, day)
+    assert rep["trades"] == 0
+    assert rep["filter_stats"]["gate_blocked_days"] == 1
+
+
+# ---------------- ⑩ 审查 I-2: 缺失判定三处同源 ----------------
+
+def test_day_feed_empty_em_is_provided_not_missing():
+    """I-2: day_feed 给 em={} → 视为"已提供"(门控用空 em 算), 不报"缺 em 数据"。
+
+    改前: _pick 用 `is None`(空 dict 算有)、note_em 用真值(空 dict 算无)
+    → 门控按空 em 判定, 归因却报"N4 缺em数据 → 0"(与实际不符)。
+    """
+    @reg.factor(id="T1", name="t", category="test", description="")
+    def f_t(ctx):
+        return {"score": 1, "note": ""}
+
+    s = _mk_strategy(scoring=("T1",), gate=("N4",))
+    closes = [10.0 * (1.02 ** i) for i in range(10)]
+    bt = _bt(s, _pool_zt({_day8(LIMIT_DAY)}), lambda c: _kline2(closes))
+    rep = bt.run(LIMIT_DAY, date(2026, 7, 8), day_feed=lambda d: {"em": {}})
+    assert rep["trades"] == 0
+    assert rep["filter_stats"]["gate_blocked_days"] == 1
+    assert rep["gate_notes"] == [], "空 em 已提供, 不该归因为缺数据"
+
+
+def test_day_feed_empty_em_beats_static_em():
+    """I-2: 空 dict 也算已提供 → 静态 em 不顶替(判据 = 键存在且非 None)。"""
+    @reg.factor(id="T1", name="t", category="test", description="")
+    def f_t(ctx):
+        return {"score": 1, "note": ""}
+
+    s = _mk_strategy(scoring=("T1",), gate=("N4",))
+    closes = [10.0 * (1.02 ** i) for i in range(10)]
+    bt = _bt(s, _pool_zt({_day8(LIMIT_DAY)}), lambda c: _kline2(closes))
+    rep = bt.run(LIMIT_DAY, date(2026, 7, 8), em={"max_boards": 5},
+                 day_feed=lambda d: {"em": {}})
+    # 静态 em 5 板本会开门; day_feed 给空 em → 无连板数据 → N4 兜底 0 → 门关
+    assert rep["trades"] == 0
+    assert rep["filter_stats"]["gate_blocked_days"] == 1
+    assert rep["gate_notes"] == []
+
+
+# ---------------- ⑪ 审查 I-3: 优先性 + 每日调用计数 ----------------
+
+def test_day_feed_em_wins_over_static_when_both_non_empty():
+    """I-3①: 静态 em 与 day_feed em 都非空且值不同 → day_feed 胜出(两向都验)。"""
+    @reg.factor(id="T1", name="t", category="test", description="")
+    def f_t(ctx):
+        return {"score": 1, "note": ""}
+
+    s = _mk_strategy(scoring=("T1",), gate=("N4",))
+    closes = [10.0 * (1.02 ** i) for i in range(10)]
+    bt = _bt(s, _pool_zt({_day8(LIMIT_DAY)}), lambda c: _kline2(closes))
+    # 静态 5 板(开门) + day_feed 2 板(关门) → 门关 ⇒ 门控按 day_feed 判
+    assert bt.run(LIMIT_DAY, date(2026, 7, 8), em={"max_boards": 5},
+                  day_feed=lambda d: {"em": {"max_boards": 2}})["trades"] == 0
+    # 反向: 静态 2 板(关门) + day_feed 5 板(开门) → 成交 ⇒ 静态没把 day_feed 顶掉
+    rep = bt.run(LIMIT_DAY, date(2026, 7, 8), em={"max_boards": 2},
+                 day_feed=lambda d: {"em": {"max_boards": 5}})
+    assert rep["trades"] == 1
+
+
+def test_day_feed_called_once_per_pool_day():
+    """I-3②: day_feed 每日取用一次 —— 计数 == 有池交易日数(防将来改回静态仍绿)。"""
+    @reg.factor(id="T1", name="t", category="test", description="")
+    def f_t(ctx):
+        return {"score": 1, "note": ""}
+
+    days = [date(2026, 7, 6), date(2026, 7, 7), date(2026, 7, 8)]
+    s = _mk_strategy(scoring=("T1",), gate=("N1",))
+    closes = [10.0 * (1.02 ** i) for i in range(10)]
+    calls = []
+    bt = _bt(s, _pool_zt({_day8(d) for d in days}), lambda c: _kline2(closes))
+    rep = bt.run(days[0], days[-1],
+                 day_feed=lambda d: calls.append(d) or {"em": {"max_boards": 5}})
+    assert calls == days, "每个回放日都要按日取一次上下文"
+    assert len(calls) == rep["trading_days"] == 3
+
+
+# ---------------- ⑫ build_day_feed 惰性构造 ----------------
+
+def _lazy_io(monkeypatch):
+    """离线桩掉 build_day_feed 的四类 IO(交易日历/指数/涨停池/日线), 记录调用。"""
+    import backtest.cli as cli
+    calls = {"pool": [], "kline": [], "float": []}
+    iso_by_d8 = {_day8(d): d.strftime("%Y-%m-%d") for d in CAL}
+    pools_by_iso = {d.strftime("%Y-%m-%d"): v for d, v in _pools().items()}
+    kl = _klines()
+
+    monkeypatch.setattr(cli, "_get_zt_index",
+                        lambda: {_day8(d): 1 for d in CAL})
+    monkeypatch.setattr(cli, "_index_daily", lambda *a, **k: list(IDX[a[0]]))
+
+    def fake_zt(d8):
+        calls["pool"].append(d8)
+        return [dict(s) for s in pools_by_iso.get(iso_by_d8.get(d8), [])]
+
+    def fake_klines(codes):
+        calls["kline"].append(list(codes))
+        return {c: kl[c] for c in codes if c in kl}
+
+    monkeypatch.setattr(cli, "zt_feed", fake_zt)
+    monkeypatch.setattr(cli, "_batch_klines", fake_klines)
+    monkeypatch.setattr(cli, "_float_volumes",
+                        lambda codes: calls["float"].append(list(codes)) or {})
+    return cli, calls
+
+
+def test_build_day_feed_is_lazy_and_caches(monkeypatch):
+    """⑫ 装配返回时不取任何逐日数据(大窗口不预计算); 首次请求某日才算, 之后命中缓存。"""
+    cli, calls = _lazy_io(monkeypatch)
+    progress = []
+    feed = cli.build_day_feed(
+        CAL[0], CAL[3],
+        progress=lambda done, total: progress.append((done, total)))
+    assert calls["pool"] == [] and calls["kline"] == []
+    assert progress == [], "惰性: 装配阶段不该报进度"
+    ctx = feed(CAL[3])
+    # 返回值契约与"全量预计算版"逐字段一致(同 _day_payload 口径)
+    expected = _day_payload(CAL[3], _pools(), CAL, _klines(), {}, IDX)
+    assert ctx == expected
+    assert progress == [(1, 4)]          # progress(done, total): 已构造 / 区间交易日
+    n_pool, n_kline = len(calls["pool"]), len(calls["kline"])
+    assert n_pool and n_kline
+    assert feed(CAL[3]) == ctx           # 同日再次请求 → 命中缓存
+    assert len(calls["pool"]) == n_pool and len(calls["kline"]) == n_kline
+    assert progress == [(1, 4)]
+    assert feed(date(2026, 6, 30)) is None       # 区间外 → 静态参数兜底
+    assert feed(date(2026, 7, 5)) is None        # 区间内非交易日(无池无指数) → None
+
+
+def test_build_day_feed_fetches_prev_pool_before_start(monkeypatch):
+    """⑫ 区间开始日的"昨日池"按需补取(区间前一日只作上下文, 本身返回 None)。"""
+    cli, calls = _lazy_io(monkeypatch)
+    feed = cli.build_day_feed(CAL[1], CAL[3])
+    assert feed(CAL[0]) is None
+    ctx = feed(CAL[1])
+    assert ctx["em"]["yesterday_codes"] == ["600000.SH", "300001.SZ"]  # CAL[0] 的池
+    assert _day8(CAL[0]) in calls["pool"]        # 区间前一日被按需取用
+    assert calls["pool"].count(_day8(CAL[1])) == 1
+
+
+def test_build_day_feed_offline_no_calendar_returns_none_feed(monkeypatch):
+    """⑫ 无交易日历也无指数日线 → 恒 None 的 feed(等于不注入, 静态参数照常生效)。"""
+    import backtest.cli as cli
+    monkeypatch.setattr(cli, "_get_zt_index", lambda: {})
+    monkeypatch.setattr(cli, "_index_daily", lambda *a, **k: [])
+    feed = cli.build_day_feed(CAL[0], CAL[3])
+    assert feed(CAL[0]) is None and feed(CAL[3]) is None
+
+
+def test_build_day_feed_single_day_io_failure_does_not_kill_run(monkeypatch):
+    """⑫ 惰性取数把 IO 挪进了 callable → 单日失败不能炸整段回测
+    (该日退回静态参数; 失败不缓存, 下次请求可重试)。"""
+    cli, calls = _lazy_io(monkeypatch)
+
+    def boom(codes):
+        raise RuntimeError("QMT 挂了")
+
+    monkeypatch.setattr(cli, "_batch_klines", boom)
+    feed = cli.build_day_feed(CAL[2], CAL[3])
+    assert feed(CAL[3]) is None           # 当天降级, 不抛
+    assert feed(CAL[3]) is None           # 仍可再试(失败不入缓存)
+    assert feed(CAL[2]) is None

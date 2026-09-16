@@ -218,6 +218,67 @@ def test_backtest_market_data_missing_flagged(client, monkeypatch):
     assert any("市场数据缓存为空" in n for n in rep["gate_notes"])
 
 
+def test_backtest_injects_day_feed(client, monkeypatch):
+    """网页回测必须接按日上下文(与 CLI 同一装配 build_day_feed):
+    不接则 N3/N4/N5/F1/F6 恒 0 —— 网页与 CLI 口径不一致。"""
+    from datetime import date
+    captured = {}
+    sentinel = object()
+
+    class FakeBT:
+        def __init__(self, strategy, zt_feed=None, kline_feed=None):
+            pass
+
+        def run(self, s, e, sell_rules=None, progress=None, **kw):
+            captured.update(kw)
+            return {"trades": 1, "trading_days": 1, "gate_notes": [],
+                    "filter_stats": {}}
+
+    def fake_build(start, end, **kw):
+        captured["feed_range"] = (start, end)
+        return sentinel
+
+    monkeypatch.setattr("prism.backtest.Backtester", FakeBT)
+    monkeypatch.setattr(app_module, "build_day_feed", fake_build)
+    monkeypatch.setattr(app_module, "load_market_data",
+                        lambda: (None, None, None))
+    r = client.get(
+        "/api/backtest?strategy=first_board_v04&start=20260101&end=20260105")
+    assert r.status_code == 200
+    assert captured["feed_range"] == (date(2026, 1, 1), date(2026, 1, 5))
+    assert captured["day_feed"] is sentinel, "day_feed 必须传给 run()"
+    assert r.get_json()["report"]["day_feed"] is True
+
+
+def test_backtest_day_feed_failure_degrades_with_note(client, monkeypatch):
+    """按日上下文装配失败 → 不阻塞回测(退化为无 day_feed) + 报告带 note。"""
+    captured = {}
+
+    class FakeBT:
+        def __init__(self, strategy, zt_feed=None, kline_feed=None):
+            pass
+
+        def run(self, s, e, sell_rules=None, progress=None, **kw):
+            captured.update(kw)
+            return {"trades": 0, "trading_days": 1, "gate_notes": [],
+                    "filter_stats": {}}
+
+    def boom(start, end, **kw):
+        raise RuntimeError("QMT 挂了")
+
+    monkeypatch.setattr("prism.backtest.Backtester", FakeBT)
+    monkeypatch.setattr(app_module, "build_day_feed", boom)
+    monkeypatch.setattr(app_module, "load_market_data",
+                        lambda: (None, None, None))
+    r = client.get(
+        "/api/backtest?strategy=first_board_v04&start=20260101&end=20260105")
+    assert r.status_code == 200, "装配失败不该把回测打成 500"
+    assert captured["day_feed"] is None
+    rep = r.get_json()["report"]
+    assert rep["day_feed"] is False
+    assert any("按日上下文" in n for n in rep["gate_notes"])
+
+
 # ---------------- 旧路由保留: 冒烟 ----------------
 
 def test_health(client):

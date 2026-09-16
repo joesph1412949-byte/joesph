@@ -64,12 +64,14 @@ app = Flask(__name__)
 
 # 回测数据源(东财, backtest_cli): 导入失败 → /api/backtest 返回 500
 try:
-    from backtest.cli import zt_feed, kline_feed, load_market_data  # noqa: F401
+    from backtest.cli import (zt_feed, kline_feed, load_market_data,   # noqa: F401
+                              build_day_feed)
     _BACKTEST_FEEDS_OK = True
 except Exception:
     zt_feed = None
     kline_feed = None
     load_market_data = None
+    build_day_feed = None
     _BACKTEST_FEEDS_OK = False
 
 
@@ -720,11 +722,26 @@ def api_backtest():
         # full_factor_v1 门控(N6-N8)永不达标 → 三策略静默零交易。
         mkt, sector_map, md_note = (load_market_data()
                                     if load_market_data else (None, None, None))
+        # 按日上下文(2026-09-16): 与 CLI **同一装配**(backtest.cli.build_day_feed)。
+        # 不接则 N3/N4/N5/F1/F6 恒 0 —— 网页回测成了残废版, 与已复活的 CLI 口径
+        # 不一致。惰性构造(首次请求某日才算那天), 装配失败不阻塞回测: 退化为无
+        # day_feed(= 旧行为), 报告 gate_notes 带原因(不静默)。
+        day_feed, feed_note = None, None
+        if build_day_feed is not None:
+            try:
+                day_feed = build_day_feed(s, e, use_intraday=False)
+            except Exception as exc:
+                logger.warning("按日上下文装配失败: %r", exc, exc_info=True)
+                feed_note = ("按日上下文装配失败 → N3/N4/N5/F1/F6 按静态参数"
+                             "空转: %r" % exc)
         bt = Backtester(strategy, zt_feed=zt_feed, kline_feed=kline_feed)
-        rep = bt.run(s, e, mkt=mkt, sector_map=sector_map)
+        rep = bt.run(s, e, mkt=mkt, sector_map=sector_map, day_feed=day_feed)
         rep["market_data"] = mkt is not None
+        rep["day_feed"] = day_feed is not None
         if md_note:
             rep.setdefault("gate_notes", []).append(md_note)
+        if feed_note:
+            rep.setdefault("gate_notes", []).append(feed_note)
     except Exception as e:
         logger.error("回测失败: %r", e, exc_info=True)
         return jsonify({"ok": False, "error": "回测失败: %r" % e}), 500

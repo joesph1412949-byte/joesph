@@ -456,6 +456,8 @@ def _day_payload(d, pools, cal, klines, floats, indices):
     用来算"昨日池"); cal: 交易日(date, 升序); klines: {code: [(iso,...)...]};
     floats: {code: 流通股本}; indices: {指数代码: [(iso, close, vol, amount)]}。
     只读 <= d 的数据(指数/个股序列都按日切片), 无未来函数。
+    ticks 的个股条 = 今日池 ∪ 昨日池(只 lastPrice/lastClose, 供 N3 首板溢价);
+    stock 只装今日池(供 F1 首板确认: 必须今日涨停)。
     """
     d8 = d.strftime("%Y-%m-%d")
     pool = pools.get(d) or []
@@ -467,24 +469,37 @@ def _day_payload(d, pools, cal, klines, floats, indices):
     prev_counts = [c for _x, c in counts[:-1]][-5:][::-1]   # 近→远, 与东财同序
 
     # ---- 个股: 当日收盘 / 昨收 / 涨停价 / 流通股本(只回看 <= d 的K线) ----
+    # 遍历**今日池 ∪ 昨日池**: 今日池供 F1(stock)/N3; 昨日池独有股只进 ticks ——
+    # N3(首板溢价 = 昨日涨停股今日表现)必须拿到"昨涨停、今未涨停"的样本, 否则
+    # 只剩"昨涨停且今仍涨停"的连板样本, 均涨幅恒正 → N3 近乎恒 1(门控形同虚设)。
+    today_codes = {s.get("code") for s in pool}
     stock = {}
-    for s in pool:
+    quotes = {}          # code → (今收, 昨收): ticks 的 N3 样本
+    for s in list(pool) + list(prev_pool):
         code = s.get("code")
+        if not code or code in quotes:
+            continue
         rows = _upto(klines.get(code), d8)
         if len(rows) < 2:
             continue        # 无昨收 → 算不出涨停价, 宁缺勿假
         close, prev_close = rows[-1][4], rows[-2][4]
         if not close or not prev_close or close <= 0 or prev_close <= 0:
             continue
-        item = {"last": close, "last_close": prev_close,
-                # 涨停价 = 昨收 ×(1+档位), 四舍五入两位(同 zt_history 口径)
-                "up_price": round(prev_close
-                                  * (1 + limit_ratio_for_code(code)), 2)}
-        fv = (floats or {}).get(code)
-        if fv:
-            item["float_vol"] = float(fv)
-            item["float_mv"] = float(fv) * close     # 同实盘口径: 股本 × 现价
-        stock[code] = item
+        if code not in today_codes and rows[-1][0] != d8:
+            # 昨池独有股今日无行情(停牌/缺数据) → 不拿旧K线充"今日溢价"
+            # (与实盘 ticks 同口径: 没有今日报价的股票不进 N3 样本)
+            continue
+        quotes[code] = (close, prev_close)
+        if code in today_codes:
+            item = {"last": close, "last_close": prev_close,
+                    # 涨停价 = 昨收 ×(1+档位), 四舍五入两位(同 zt_history 口径)
+                    "up_price": round(prev_close
+                                      * (1 + limit_ratio_for_code(code)), 2)}
+            fv = (floats or {}).get(code)
+            if fv:
+                item["float_vol"] = float(fv)
+                item["float_mv"] = float(fv) * close   # 同实盘口径: 股本 × 现价
+            stock[code] = item
 
     # ---- 门控 em: 今日最高连板 + 昨日池(N3/N4 口径同东财 get_market_stats) ----
     em = {"max_boards": max([int(s.get("boards") or 0) for s in pool],
@@ -497,16 +512,15 @@ def _day_payload(d, pools, cal, klines, floats, indices):
     if len(prev_counts) >= 3:      # 不足 3 天视为不可用(与东财 stats 同口径)
         em["daily_counts"] = prev_counts
 
-    # ---- ticks: 指数条只带 amount(N5 求和), 池内股只带 lastPrice/lastClose(N3)
-    #      —— 池内股**不带 amount**: 个股成交额已含在两市成交额里, 再叠加会重复计算。
+    # ---- ticks: 指数条只带 amount(N5 求和), 个股只带 lastPrice/lastClose(N3)
+    #      —— 个股**不带 amount**: 个股成交额已含在两市成交额里, 再叠加会重复计算。
     ticks = {}
     for code in _INDEX_CODES:
         rows = _upto((indices or {}).get(code), d8)
         if rows and rows[-1][3]:
             ticks[code] = {"amount": rows[-1][3]}
-    for code, item in stock.items():
-        ticks[code] = {"lastPrice": item["last"],
-                       "lastClose": item["last_close"]}
+    for code, (close, prev_close) in quotes.items():
+        ticks[code] = {"lastPrice": close, "lastClose": prev_close}
 
     # ---- 指数序列: 上证 30 根(≤d) 供 F6; 涨停家数序列供 N1 兜底 ----
     sh = _upto((indices or {}).get("000001.SH"), d8)[-_SH_INDEX_BARS:]
@@ -519,12 +533,16 @@ def _day_payload(d, pools, cal, klines, floats, indices):
 def build_day_feed(start, end, *, use_intraday=False, progress=None):
     """装配回测的按日上下文 → day_feed(d) -> dict|None(规格 2026-09-16 §4)。
 
+    **惰性构造**: 返回的 callable 首次被问到某日 d 时才取该日(及"昨日池"/近 5 日
+    家数的回看窗口)的涨停池与日线, 之后命中缓存 —— 大窗口不再预先跑满全程
+    (25 天预计算 8.5s → 254 天要 90s+, 网页请求会长时间阻塞), 也不预占内存。
+
     每字段都只含 <= 当日的本地数据(QMT 日线 + zt 涨停池历史), 防未来函数由
     _day_payload 的逐日切片保证。区间外的日子返回 None → run() 退回静态参数。
 
     use_intraday: 1 分钟特征层(封板时间/封单代理, Task 2 实现) —— 本版只保留
     接口, 传 True 暂不改变输出。
-    progress(done, total): 逐日装配进度回调(可选)。
+    progress(done, total): 已构造的区间交易日数 / 区间交易日总数(可选)。
     QMT 离线且无 zt 索引(无交易日历) → 返回恒 None 的 callable(等于不注入,
     静态参数照常生效), 并打印一行原因(不静默)。
     """
@@ -541,32 +559,75 @@ def build_day_feed(start, end, *, use_intraday=False, progress=None):
               "N3/N4/N5/F1/F6 仍按静态参数空转", file=sys.stderr)
         return lambda d: None
     cal_dates = [_parse_kline_date(x) for x in cal]
-    pools = {}
-    for x, dd in zip(cal, cal_dates):
-        try:
-            pools[dd] = zt_feed(x.replace("-", "")) or []
-        except Exception:
-            pools[dd] = []
-    codes = sorted({s.get("code") for p in pools.values() for s in p
-                    if s.get("code")})
-    klines = _batch_klines(codes)
-    floats = _float_volumes(codes)
+    pos_of = {x: i for i, x in enumerate(cal)}
     start_iso = start.strftime("%Y-%m-%d")
-    ctx_by_day = {}
-    for i, (x, dd) in enumerate(zip(cal, cal_dates)):
-        if progress:
-            progress(i + 1, len(cal))
-        if x < start_iso:
-            continue        # 区间外的日子只用于"昨日池"/近5日家数
-        ctx_by_day[x] = _day_payload(dd, pools, cal_dates, klines, floats,
-                                     indices)
+    replay_total = sum(1 for x in cal if x >= start_iso)
+    # 惰性缓存的全部状态: 池/日线/股本都按需取, 取过就记(空池、无数据也不重取)
+    cache = {"pools": {}, "klines": {}, "floats": {}, "ctx": {},
+             "tried_k": set(), "tried_f": set(), "done": 0}
+
+    def _pools_at(i):
+        """cal[i] 当日的涨停池(按需取 + 缓存)。"""
+        iso = cal[i]
+        if iso not in cache["pools"]:
+            try:
+                cache["pools"][iso] = zt_feed(iso.replace("-", "")) or []
+            except Exception:
+                cache["pools"][iso] = []
+        return cache["pools"][iso]
+
+    def _need_klines(codes):
+        todo = [c for c in codes if c and c not in cache["tried_k"]]
+        if todo:
+            cache["klines"].update(_batch_klines(todo))
+            cache["tried_k"].update(todo)   # 取过(含"确实没数据")才记账
+        return cache["klines"]
+
+    def _need_floats(codes):
+        todo = [c for c in codes if c and c not in cache["tried_f"]]
+        if todo:
+            cache["floats"].update(_float_volumes(todo))
+            cache["tried_f"].update(todo)
+        return cache["floats"]
+
+    def feed(d):
+        """按需装配 d 当日的上下文; 区间外/非交易日 → None(退回静态参数)。
+
+        单日取数失败也不炸整段回测: 打印原因 + 该日返回 None(退回静态参数),
+        失败不入缓存(下次请求可重试)。
+        """
+        iso = d.strftime("%Y-%m-%d")
+        i = pos_of.get(iso)
+        if i is None or iso < start_iso:
+            return None
+        if iso not in cache["ctx"]:
+            try:
+                # 该日 + 回看窗口(近 11 天家数 / 昨日池): 区间前的日子只作上下文
+                win = list(range(max(0, i - 10), i + 1))
+                day_pools = {cal_dates[j]: _pools_at(j) for j in win}
+                pool = day_pools[cal_dates[i]]
+                prev = (day_pools.get(cal_dates[i - 1]) or []) if i else []
+                cache["ctx"][iso] = _day_payload(
+                    cal_dates[i], day_pools, cal_dates,
+                    _need_klines([s.get("code")
+                                  for s in list(pool) + list(prev)]),
+                    _need_floats([s.get("code") for s in pool]), indices)
+            except Exception as exc:
+                print("警告: 按日上下文装配失败 %s: %r → 该日退回静态参数"
+                      % (iso, exc), file=sys.stderr)
+                return None
+            cache["done"] += 1
+            if progress:
+                progress(cache["done"], replay_total)
+        return cache["ctx"][iso]
+
     n_idx = sum(1 for c in _INDEX_CODES if indices.get(c))
-    print("按日上下文: %d 天 / 池内股 %d 只(有日线 %d) / 指数 %d/2 / "
-          "1m特征%s" % (
-              len(ctx_by_day), len(codes), len(klines), n_idx,
+    print("按日上下文: 惰性构造 %d 个交易日(首次请求某日才取该日池/日线, 之后命中"
+          "缓存) / 指数 %d/2 / 1m特征%s" % (
+              replay_total, n_idx,
               "未实现(Task2, use_intraday 本次不生效)" if use_intraday
               else "未启用"), file=sys.stderr)
-    return lambda d: ctx_by_day.get(d.strftime("%Y-%m-%d"))
+    return feed
 
 
 # ---------------------------------------------------------------- main

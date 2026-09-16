@@ -113,10 +113,19 @@ def _as_index_df(idx):
                         index=[r[0] for r in rows])
 
 
+def _day_provided(day_ctx, key):
+    """day_feed 是否提供了该字段: **键存在且非 None** 即视为已提供。
+
+    空 dict(如 em={})算"已提供"(数据为空 ≠ 没给数据)。缺键/显式 None 才算缺失
+    → 退回静态参数。取用(_day_field)/gate_notes 归因(_gate_notes 的 `is None`)
+    必须与本判据同源: 否则门控按空 em 判定、归因却报"缺 em 数据"(与实际不符)。
+    """
+    return key in day_ctx and day_ctx[key] is not None
+
+
 def _day_field(day_ctx, key, static):
-    """按日上下文取字段: 缺键/值为 None → 静态参数兜底(向后兼容旧调用)。"""
-    val = day_ctx.get(key)
-    return static if val is None else val
+    """按日上下文取字段: 未提供(缺键/值为 None) → 静态参数兜底(兼容旧调用)。"""
+    return day_ctx[key] if _day_provided(day_ctx, key) else static
 
 
 # 门槛因子 → 依赖的回测可注入数据源(缺失时该因子无法命中, 记入 gate_notes)。
@@ -468,6 +477,8 @@ class Backtester:
 
         只归因"缺注入数据"可解释的 0(N1 兜底靠池子、N2 只靠池子不归因),
         让回测空报告时用户知道该注入什么数据, 而非静默 fail-open。
+        "缺失"判据与 _day_field/_day_provided 同源: **值为 None 才算缺失**
+        —— 显式给到的空 dict(em={}/ticks={})是"数据为空", 不算缺数据。
         """
         notes = []
         gate = self.strategy.get("market_gate") or {}
@@ -476,7 +487,7 @@ class Backtester:
             if not need_sources:
                 continue
             lack = [s for s in need_sources
-                    if (s == "em" and not em) or (s == "ticks" and not ticks)]
+                    if (s == "em" and em is None) or (s == "ticks" and ticks is None)]
             if lack:
                 notes.append("%s 缺%s数据 → 0" % (fid, "+".join(lack)))
         return notes
@@ -518,7 +529,7 @@ class Backtester:
         self._filter_stats = self._new_filter_stats()   # 每次 run 重置诊断计数
         # gate_notes 归因用: 未注入 em/ticks 时才提示缺数据。按日注入时以
         # "当日实际给到过"为准(静态参数全 None 但 day_feed 天天给 em 时,
-        # 不该再报"缺 em 数据")。
+        # 不该再报"缺 em 数据"); 空 dict 也算给到(_day_provided 同判据)。
         note_em, note_ticks = em, ticks
         # 第一步: 预取区间内全部涨停股K线(并发 + 缓存), 避免逐日串行请求
         all_codes = set()
@@ -537,9 +548,9 @@ class Backtester:
             if progress:
                 progress(d)
             day_ctx = (day_feed(d) or {}) if day_feed else {}
-            if day_ctx.get("em"):
+            if _day_provided(day_ctx, "em"):
                 note_em = day_ctx["em"]
-            if day_ctx.get("ticks"):
+            if _day_provided(day_ctx, "ticks"):
                 note_ticks = day_ctx["ticks"]
             pool = self._pool_for(d)
             if pool:
