@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-cd /d D:\cc-joesph
+cd /d D:\cc-joesph\tt_solo
 set PYTHONIOENCODING=utf-8
 title TT Daemon - DIRECT LIVE (REAL ORDERS!)
 echo ================================================================
@@ -17,5 +17,5 @@ echo.
 echo   按 Ctrl+C 或关闭窗口 = 停止
 echo ================================================================
 timeout /t 8 /nobreak >nul
-python -m tt.daemon --direct --live --interval 5
+python -m ttcore.daemon --direct --live --interval 5
 pause

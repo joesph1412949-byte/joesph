@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-cd /d D:\cc-joesph
+cd /d D:\cc-joesph\tt_solo
 set PYTHONIOENCODING=utf-8
 title TT Daemon - DRY RUN (no orders)
 echo ============================================
@@ -17,5 +17,5 @@ echo       D:/QMT_SIGNALS/real/armed.txt
 echo.
 echo  Closing this window = stopping the daemon
 echo ============================================
-python -m tt.daemon --interval 5
+python -m ttcore.daemon --interval 5
 pause

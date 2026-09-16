@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-cd /d D:\cc-joesph
+cd /d D:\cc-joesph\tt_solo
 set PYTHONIOENCODING=utf-8
 title TT Daemon - DIRECT (dry-run, no real orders)
 echo ================================================================
@@ -17,5 +17,5 @@ echo  ---------------------------------------------------------------
 echo   想真正下单? 改用: 启动做T实盘直连.bat  (需先跑 做T-今日放行.bat)
 echo  ---------------------------------------------------------------
 echo ================================================================
-python -m tt.daemon --direct --interval 5
+python -m ttcore.daemon --direct --interval 5
 pause

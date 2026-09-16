@@ -11,6 +11,6 @@ echo        昨天的条今天自动失效 -- 相当于每天一道人工确认�
 echo.
 echo  同时确保急停开关 D:/QMT_SIGNALS/paused 不存在。
 echo ================================================================
-python "D:\cc-joesph\tt\arm_today.py" %*
+python "D:\cc-joesph\tt_solo\ttcore\arm_today.py" %*
 echo.
 pause
