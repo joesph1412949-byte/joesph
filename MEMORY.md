@@ -14,7 +14,7 @@
 
 | 维度 | 状态 |
 |---|---|
-| 测试基线 | **837 绿**（六路径一条命令跑完，2026-09-15 精简重构后）：`python -m pytest prism/tests prism_web/tests datasource/tests tt/tests qmt_sync/tests tests -q --import-mode=importlib --basetemp=...` = prism 471 + prism_web 51 + datasource 123 + tt 148 + qmt_sync 27 + 根 17。比 09-14 的 887 少 50：**随死代码一起删掉的用例**（v04 网页外壳 40 个 + 幽灵功能 20 个），另补 2 个降级用例 |
+| 测试基线 | **840 绿**（六路径一条命令跑完，2026-09-16 分级护栏后）：`python -m pytest prism/tests prism_web/tests datasource/tests tt/tests qmt_sync/tests tests -q --import-mode=importlib --basetemp=...` = prism 471 + prism_web 54 + datasource 123 + tt 148 + qmt_sync 27 + 根 17。比 09-14 的 887 少 47：**随死代码一起删掉的用例**（v04 网页外壳 40 个 + 幽灵功能 20 个），另补 9 个（K线降级 2 + 分级护栏 7） |
 | 模拟盘 | 运行中，但 09-08~09-13 有 5 个交易日空窗（守护进程停摆），账本仍 1,000,000 现金、**零持仓** |
 | 实盘（prism 主策略） | **未上线**。代码已通（`prism/live_daemon.py`），三步验收一步未做 |
 | 实盘（tt 做T策略） | **已接 miniQMT 外部直连**（09-14 晚决策，见「路线回退」节）。代码/测试/闸门就绪，**放行条需每日重写**，`dry_run` 默认仍 True，`--live` 才真报单 |
@@ -85,6 +85,7 @@
 - tdx 自检：`python -m prism.tdx_source`（6 项：连接/个股日K/大盘指数/板块指数/快照/流通股本）
 - QMT 数据/守护可并发读；守护日志看 job_output
 - **Tailscale 私享分享**（09-09）：朋友经 tailnet **全功能**访问 5000（装客户端+邀请即可；用户拍板不上护栏不上 ACL——"我这边什么样朋友见什么样"；远程只读护栏 26b648f 已撤销）；你关机=朋友不可用（已接受）；免费档 3 用户/100 设备
+- **分级写护栏**（09-15/16，d75b1b3+852c1be，为公网部署准备）：**判据唯一真相 = `shared.common.is_local_request(cf_ip, remote_addr)`**——请求头有 `CF-Connecting-IP`（只有 CF 边缘会注入）→ 远程档；无头且 remote_addr 为 loopback/RFC1918 → 本机档（**坑：cloudflared 在本机回环转发，直接看 remote_addr 会把隧道请求误判成本机**）。远程可：选股/新建策略/刷新涨停池+全部看板；远程禁（403「此操作仅限本机执行(交易闸门类)」）：prism_web 设默认策略/手填因子/模拟盘暂停恢复/绩效回填 + tt_web 做T急停/每日放行。`_LOCAL_ONLY` 按函数名集合（白名单方向：新增写路由默认可用）。将来切 CF Access 邮箱白名单只改 is_local_request 一个函数
 - **DSH × OpenCode Go（09-08）**：opencode.ai/zen/go 网关 09-05 起强制 `x-opencode-session` 头，缺失返 400 MissingSessionID（"Console Go"）；DSH 官方已知问题（discussion 5495 未修）。本机已修：`C:\Users\28037\.dsh\settings.yaml` → `llm-pi-ai.providers` 6 个 opencode 供应商补 `headers: { 'x-opencode-session': 'dsh-opencode-go-joesph' }`（备份 .bak-20260908；llm-pi-ai 适配器逐请求读配置，通常免重启）。**09-08 当天实测生效**（下一条消息即不再 400）。若 aux 路径仍 400 需动 deepseek-harness 仓库 llm-pi-ai 代码（重建 profile）
 - **DSH 接入 OpenCode Go 的 DeepSeek V4.1 Flash（09-15）**：官方 Go 文档确认该型号 **Go 专属**（Zen 端点表里没有），model ID `deepseek-v4.1-flash`，端点 `https://opencode.ai/zen/go/v1/chat/completions`（OpenAI 兼容）；线上实证 `GET https://opencode.ai/zen/go/v1/models` 返回该 id。**坑：只改 settings.yaml 会 fail-closed 报错**——DSH 内置 pi-ai 目录快照（08-24）没有这个型号，`resolveRouteModels` 里 `api = request.api ?? base?.api ?? routeApi` 全为 undefined（该路由目录同时含 anthropic-messages/openai-completions/openai-responses 三种协议 → `sharedCatalogApi` 返回 undefined），而 schema 的 `modelProfile` **不允许逐模型写 `api`**、路由级 `api` 又会把 minimax-m3/grok-4.5 一起改协议（不可行）。**修法两处**：① `…\pi-ai\dist\providers\data\opencode-go.json` 的 `openai-completions` 段补一条（照抄 deepseek-v4-flash 的 compat：`thinkingFormat:deepseek` / `maxTokensField:max_tokens` / `requiresReasoningContentOnAssistantMessages:true`；`.manifest.json` 只被读生成时间戳，**不校验哈希**）② `settings.yaml` 的 opencode-go models 列表加一条（备份 `.bak-20260915`）。**该 JSON 是进程启动静态 import → 必须重启 DSH 一次才生效**（settings 逐请求读，目录不是）。DSH 升级会覆盖 node_modules 补丁 → 需重打（新版目录通常已含该型号）
 
