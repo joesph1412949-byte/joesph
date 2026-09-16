@@ -17,6 +17,8 @@
 - **`TT_SIGNAL_ROOT` 默认 `D:/QMT_SIGNALS` 不变** —— 那是与外部 QMT 的契约，不属于本项目数据。
 - **测试命令**：`$env:PYTHONIOENCODING='utf-8'; python -m pytest <paths> -q --import-mode=importlib --basetemp=D:/cc-joesph/pt_btNN`（NN 递增，下一个可用 **250**）。
 - **沙箱注意**：沙箱内 pytest 会假失败（safe-delete 守卫 + 网络拦截），验证一律脱沙箱跑。
+- **搜索命令**：本机**没有 `rg`**（实测 `where.exe rg` 找不到），一律用 PowerShell 原生
+  `Select-String`（或用 agent 的 grep 工具）。计划里所有搜索命令均按 `Select-String` 给出。
 - **基线**：`tt/tests` + `tt_web/tests` = **150 passed**。`tt_solo` 目标 ≥ 150 且全绿。
 - **commit 随意，push 必须先问用户。**
 - 每个子代理 dispatch 注入 ponytail 约束；`# ponytail:` 标记刻意取舍。
@@ -321,7 +323,7 @@ Expected: PASS — grid 23 + risk 29 = 52 例（含参数化，以实际数为�
 
 - [ ] **Step 5: 确认无外部依赖**
 
-Run: `rg "shared|prism" tt_solo/ttcore/grid.py tt_solo/ttcore/risk.py`
+Run: `Select-String -Path tt_solo\ttcore\grid.py, tt_solo\ttcore\risk.py -Pattern 'shared|prism'`
 Expected: 无输出
 
 - [ ] **Step 6: Commit**
@@ -1081,7 +1083,7 @@ Expected: PASS — engine 27 + executor 22 例（含参数化以实际为准）
 
 - [ ] **Step 4: 确认 engine 不再引用 prism**
 
-Run: `rg "prism|shared" tt_solo/ttcore/engine.py tt_solo/ttcore/executor.py`
+Run: `Select-String -Path tt_solo\ttcore\engine.py, tt_solo\ttcore\executor.py -Pattern 'prism|shared'`
 Expected: 无输出
 
 - [ ] **Step 5: Commit**
@@ -1242,7 +1244,12 @@ Expected: PASS（2 passed）。若第一条失败，按报错逐个清理残留 
 
 - [ ] **Step 3: 独立 grep 复核（不依赖测试）**
 
-Run: `rg "^(from|import) (prism|shared|qmt_sync|backtest|legacy)" tt_solo/`
+Run:
+```powershell
+Get-ChildItem tt_solo -Recurse -Include *.py |
+  Where-Object { $_.FullName -notmatch '__pycache__' } |
+  Select-String -Pattern '^\s*(from|import)\s+(prism|shared|qmt_sync|backtest|legacy)\b'
+```
 Expected: 无输出
 
 - [ ] **Step 4: 脱沙箱跑全套 tt_solo 测试**
@@ -1925,7 +1932,7 @@ Expected: 中文不乱码，`--status` 正确报告 armed 状态与退出码
 
 - [ ] **Step 3: 确认无残留指向 tt/ 或 tt_web/ 的引用**
 
-Run: `rg "tt_web|tt\.daemon|tt\.arm_today|tt_web\\\\app" --glob "*.bat" .`
+Run: `Select-String -Path *.bat -Pattern 'tt_web|tt\.daemon|tt\.arm_today'`
 Expected: 无输出
 
 - [ ] **Step 4: Commit**
@@ -2226,7 +2233,9 @@ git commit -m "docs(tt_solo): README + requirements"
 Run:
 ```powershell
 cd D:\cc-joesph
-rg -n "tt_web|from tt\.|import tt\b|tt\.daemon|tt\.arm_today" --glob "!tt/**" --glob "!tt_web/**" --glob "!pt_bt*/**" --glob "!.git/**" .
+Get-ChildItem . -Recurse -Include *.py,*.bat,*.ps1,*.md |
+  Where-Object { $_.FullName -notmatch '\\(tt|tt_web|pt_bt[^\\]*|\.git|__pycache__|node_modules)\\' } |
+  Select-String -Pattern 'tt_web|from tt\.|import tt\b|tt\.daemon|tt\.arm_today'
 ```
 Expected: 只应剩下 `tt_solo/tests/test_parity.py`（即将移除）与文档提及。**任何运维脚本/看门狗/启动器的引用都必须先改完。**
 
@@ -2302,7 +2311,9 @@ git commit -m "refactor: 删除 tt/ + tt_web/, tt_solo 成为唯一实现"
 
 ```powershell
 # 自包含护栏
-rg "^(from|import) (prism|shared|qmt_sync|backtest|legacy)" tt_solo/
+Get-ChildItem tt_solo -Recurse -Include *.py |
+  Where-Object { $_.FullName -notmatch '__pycache__' } |
+  Select-String -Pattern '^\s*(from|import)\s+(prism|shared|qmt_sync|backtest|legacy)\b'
 
 # tt_solo 全套
 $env:PYTHONIOENCODING='utf-8'; python -m pytest tt_solo/tests tt_solo/dashboard/tests -q --import-mode=importlib --basetemp=D:/cc-joesph/pt_bt251

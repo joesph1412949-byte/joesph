@@ -253,7 +253,7 @@ def calc_buy_volume(price, total_asset, position_ratio=0.15, lot=100)
 
 | 项 | 通过条件 |
 |---|---|
-| 依赖剥离 | `rg "^(from\|import) (prism\|shared\|qmt_sync\|backtest\|legacy)" tt_solo/` 无输出（ripgrep/Rust 正则：`\|` 即或运算） |
+| 依赖剥离 | `Get-ChildItem tt_solo -Recurse -Include *.py \| Select-String -Pattern '^\s*(from\|import)\s+(prism\|shared\|qmt_sync\|backtest\|legacy)\b'` 无输出（本机无 `rg`，统一用 PowerShell `Select-String`） |
 | 测试 | `pytest tt_solo/tests` 全绿，用例数 ≥ 150 |
 | 无回归 | 步骤 5 双跑对照：同输入下 Intent 列表逐字段一致 |
 | 仪表盘 | 6+2 个接口全 200；`pause`/`arm` 无 `confirm` 返 400、带 `confirm` 生效；远程请求返 403 |
