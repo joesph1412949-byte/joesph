@@ -451,6 +451,14 @@ def _print_bj_evidence(ev):
 
 
 def main():
+    # 非 UTF-8 控制台(Windows GBK/cp936)编码不了 ⇒(U+21D2), print 会抛
+    # UnicodeEncodeError —— 而它发生在成功摘要**之后**, 于是一次通过的对照变成
+    # 退出码 1 的假失败。让输出流容错(不可编码的字符替换为 ?, 而非抛错)。
+    # hasattr 守卫: pytest 等替换过的流可能没有 reconfigure。
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+
     import tempfile
     with tempfile.TemporaryDirectory() as t:
         res_main = compare_main(Path(t) / "main")

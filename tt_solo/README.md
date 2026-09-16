@@ -230,16 +230,16 @@ python -m pytest tt_solo -q --import-mode=importlib --basetemp=D:/cc-joesph/pt_b
 与主项目 `tt/` 的行为对照（搬家后差异必须**恰好**是 §1 那一条已批准例外）：
 
 ```powershell
-$env:PYTHONIOENCODING='utf-8'
-python tt_solo\tools\compare_legacy.py     # 退出码 0 = 除该例外外一致
+python tt_solo\tools\compare_legacy.py     # 退出码 0 = 除该例外外一致(与控制台编码无关)
 ```
 
 > ⚠️ **必须在沙箱外跑。** 在受限沙箱里跑 pytest 会出现**假失败** —— 安全删除守卫拦掉
 > `--basetemp` 的清理、网络被拦截导致行情相关用例失败。这是环境问题，不是代码缺陷。
 > 见到一半用例莫名失败，先确认是不是在沙箱里。
 >
-> 同理，`compare_legacy.py` 在 GBK 控制台上会因输出 `⇒` 抛 `UnicodeEncodeError` 而退 1 ——
-> 那是输出编码问题，不是对照失败。设了 `PYTHONIOENCODING=utf-8` 就正常退 0。
+> `compare_legacy.py` 则**不受控制台编码影响**：脚本自己把 stdout/stderr 设成容错
+> （`errors="replace"`），GBK 控制台上也照样退 0，只是输出里的 `⇒` 会退化成 `?`，
+> 其余中文摘要完整可读。`PYTHONIOENCODING=utf-8` 现在是**可选**的，只为让 `⇒` 原样显示。
 
 ## 9. 安全边界
 
