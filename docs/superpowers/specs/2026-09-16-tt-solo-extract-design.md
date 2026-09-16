@@ -169,6 +169,19 @@ def calc_buy_volume(price, total_asset, position_ratio=0.15, lot=100)
 
 **新增接口必须沿用现有安全约束**：只读、不发单、异常不白屏（catch → `{ok:false,error}` + 500）。
 
+> **规划期发现的缺口（本 spec 初稿遗漏，已补入计划 Task 3）**
+>
+> `runtime/state/tt_state.json` 是**单日账本** —— `Ledger.load()` 在日期不符时直接
+> `_empty_state()` 覆盖，`roll_if_new_day()` 也只是重置。**前一日数据被丢弃，从未归档。**
+>
+> 因此 `/api/ledger/history` 一开始**没有数据源**，收益曲线无从画起。同时这也是一个
+> 既有缺陷：做T的当日战果过夜即永久丢失。
+>
+> **对策**：在 `state.py` 里加 append-only 日终归档 `tt_history.jsonl`（约 20 行），
+> 重置前写入一行当日摘要（日期/卖出总量/买入总量/往返次数/实现盈亏/笔数）。
+> 约束：归档失败必须被吞掉（fail-safe），**绝不允许影响交易主流程**；空账本不写行；
+> 同日幂等。归档不触碰 `plan()` 输出，由双跑对照证明零回归。
+
 #### 前端：一屏决策面板
 
 替换现有 27KB 单页。五个区块，自上而下即决策顺序：
