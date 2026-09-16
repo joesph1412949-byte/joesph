@@ -2,12 +2,19 @@
 """miniQMT 实盘账户适配层(只读): 资产 / 持仓 / T+1 可卖量 / 可用资金。
 
 ponytail: 整体搬自 prism/live_account.py @2026-09-16 —— 该模块本就不依赖
-原引擎内部, 搬过来即可让 tt_solo 自包含。
+prism 内部, 搬过来即可让 tt_solo 自包含。
 
 安全边界:
   - 只做 query_* 查询, 绝不调用 order_stock / cancel_order_stock 等下单接口;
   - 全部 fail-open: 未连接/查询异常 → None / {}, 由调用方 fail-closed 决策;
   - 后端可注入(backend 参数), 离线测试无需 QMT 终端。
+
+用法:
+    acc = LiveAccount()              # 自动枚举已登录资金账号
+    if acc.connect():
+        acc.asset()                  # {'total_asset':..., 'cash':...}
+        acc.positions()              # {code: {'volume':..,'can_use_volume':..}}
+        calc_buy_volume(10.55, acc.total_asset(), 0.15)
 """
 import time
 
