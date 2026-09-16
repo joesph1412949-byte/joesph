@@ -3,7 +3,8 @@
 
 这是本次重构的完成定义 —— 用测试固化, 防止将来有人顺手 import 回去。
 """
-import importlib
+import subprocess
+import sys
 from pathlib import Path
 
 from ._import_scan import FORBIDDEN_ROOT_IMPORTS, forbidden_imports
@@ -38,10 +39,39 @@ def test_no_forbidden_imports_anywhere():
     assert bad == [], "tt_solo 出现外部依赖: %s" % bad
 
 
+CORE_MODULES = ("ttcore._vendor", "ttcore.grid", "ttcore.risk",
+                "ttcore.state", "ttcore.config", "ttcore.broker",
+                "ttcore.market", "ttcore.engine", "ttcore.executor",
+                "ttcore.daemon")
+
+
 def test_core_modules_importable_without_qmt():
-    """核心模块必须能在没有 xtquant 的环境导入(惰性加载)。"""
-    for name in ("ttcore._vendor", "ttcore.grid", "ttcore.risk",
-                 "ttcore.state", "ttcore.config", "ttcore.broker",
-                 "ttcore.market", "ttcore.engine", "ttcore.executor",
-                 "ttcore.daemon"):
-        importlib.import_module(name)
+    """核心模块必须能在没有 xtquant 的环境导入(惰性加载)。
+
+    必须在【子进程里屏蔽 xtquant】验证 —— 本机装了 xtquant, 直接在当前进程
+    import 的话这个测试恒过, 抓不到"把 xtquant 提到模块顶层"的回归。
+    """
+    code = "\n".join([
+        "import sys",
+        "class _Blocker:",
+        "    def find_spec(self, name, path=None, target=None):",
+        "        if name == 'xtquant' or name.startswith('xtquant.'):",
+        "            raise ImportError('xtquant blocked for test')",
+        "        return None",
+        "sys.meta_path.insert(0, _Blocker())",
+        # 负控: 屏蔽必须真的生效, 否则本测试又变成恒过
+        "try:",
+        "    import xtquant",
+        "except ImportError:",
+        "    pass",
+        "else:",
+        "    raise SystemExit('blocker ineffective: xtquant still importable')",
+        "import %s" % ", ".join(CORE_MODULES),
+        "print('OK')",
+    ])
+    # cwd=tt_solo/ 让 sys.path[0] 指向它, 与 conftest 的 sys.path 注入同源
+    r = subprocess.run([sys.executable, "-c", code], cwd=str(ROOT),
+                       capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    assert r.returncode == 0, "无 xtquant 环境下核心模块导入失败:\n%s" % r.stderr
+    assert "OK" in r.stdout
