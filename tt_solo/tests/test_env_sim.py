@@ -24,6 +24,10 @@ FIXED_TODAY = "20260914"
 # ---------------------------------------------------------------- config 层
 
 def test_env_defaults_to_real(cfg):
+    """出厂默认必须是 real。cfg 夹具**故意**钉住 env(隔离用户改盘上配置), 所以
+    对 cfg 的断言只是复述那根钉子 —— 真正要守的默认值得直接查 DEFAULT_CONFIG,
+    否则默认值哪天被改成 sim, 本测试照样绿。"""
+    assert tt_config.DEFAULT_CONFIG["env"] == "real"
     assert cfg["env"] == "real"
 
 
@@ -90,7 +94,8 @@ def test_sim_writes_to_sim_queue_only(cfg, tmp_path, now_fn, fake_feed,
     (root / "sim" / "armed.txt").write_text(FIXED_TODAY, encoding="utf-8")
 
     d = tt_daemon.TTDaemon(c, ledger=led, engine=eng, dry_run=False,
-                           now_fn=now_fn, signal_root=root)
+                           now_fn=now_fn, signal_root=root,
+                           runtime_path=tmp_path / "tt_runtime.json")
     rt = d.run_once()
 
     assert rt["env"] == "sim"
@@ -111,7 +116,8 @@ def test_sim_still_requires_armed(cfg, tmp_path, now_fn, fake_feed,
     (root / "sim").mkdir(parents=True)          # 故意不写 armed.txt
 
     d = tt_daemon.TTDaemon(c, ledger=led, engine=eng, dry_run=False,
-                           now_fn=now_fn, signal_root=root)
+                           now_fn=now_fn, signal_root=root,
+                           runtime_path=tmp_path / "tt_runtime.json")
     rt = d.run_once()
 
     assert rt["armed"] is False
@@ -129,7 +135,8 @@ def test_sim_armed_with_wrong_date_is_blocked(cfg, tmp_path, now_fn,
     (root / "sim" / "armed.txt").write_text("20200101", encoding="utf-8")
 
     d = tt_daemon.TTDaemon(c, ledger=led, engine=eng, dry_run=False,
-                           now_fn=now_fn, signal_root=root)
+                           now_fn=now_fn, signal_root=root,
+                           runtime_path=tmp_path / "tt_runtime.json")
     rt = d.run_once()
 
     assert rt["armed"] is False
@@ -147,7 +154,8 @@ def test_pause_switch_blocks_sim_too(cfg, tmp_path, now_fn, fake_feed,
     (root / "paused").write_text("stop", encoding="utf-8")
 
     d = tt_daemon.TTDaemon(c, ledger=led, engine=eng, dry_run=False,
-                           now_fn=now_fn, signal_root=root)
+                           now_fn=now_fn, signal_root=root,
+                           runtime_path=tmp_path / "tt_runtime.json")
     rt = d.run_once()
 
     assert rt["paused"] is True
@@ -165,7 +173,8 @@ def test_dry_run_beats_armed_in_any_env(cfg, tmp_path, now_fn, fake_feed,
     (root / "sim" / "armed.txt").write_text(FIXED_TODAY, encoding="utf-8")
 
     d = tt_daemon.TTDaemon(c, ledger=led, engine=eng, dry_run=True,
-                           now_fn=now_fn, signal_root=root)
+                           now_fn=now_fn, signal_root=root,
+                           runtime_path=tmp_path / "tt_runtime.json")
     rt = d.run_once()
 
     assert rt["blocked"] == "dry_run"

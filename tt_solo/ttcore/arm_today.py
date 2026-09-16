@@ -7,11 +7,11 @@
     程序可以常驻, 但每天必须有人点头。本工具就是那个"点头"按钮。
 
 用法:
-    python tt/arm_today.py             # 写今日放行条(并确保无急停)
-    python tt/arm_today.py --status    # 只看状态, 不动
-    python tt/arm_today.py --pause     # 按急停(创建 paused 文件)
-    python tt/arm_today.py --resume    # 解除急停(删 paused 文件)
-    python tt/arm_today.py --disarm    # 撤销今日放行条(删 armed.txt)
+    python tt_solo/ttcore/arm_today.py             # 写今日放行条(并确保无急停)
+    python tt_solo/ttcore/arm_today.py --status    # 只看状态, 不动
+    python tt_solo/ttcore/arm_today.py --pause     # 按急停(创建 paused 文件)
+    python tt_solo/ttcore/arm_today.py --resume    # 解除急停(删 paused 文件)
+    python tt_solo/ttcore/arm_today.py --disarm    # 撤销今日放行条(删 armed.txt)
 
 安全:
     - 本工具**绝不下单**, 只读写两个闸门文件;
@@ -69,7 +69,7 @@ def arm():
     t = _today()
     if PAUSE_FILE.exists():
         print("!! 急停开关处于按下状态, 先解除再放行: %s" % PAUSE_FILE)
-        print("   运行: python tt/arm_today.py --resume")
+        print("   运行: python tt_solo/ttcore/arm_today.py --resume")
         return 2
     _atomic_write(ARM_FILE, "%s\n" % t)
     print("已写入今日放行条: %s -> %s" % (ARM_FILE, t))

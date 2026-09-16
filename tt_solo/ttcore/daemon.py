@@ -11,11 +11,11 @@
 账本按挂单价做"理论成交"记账(theoretical), 真实成交以券商回报为准 ——
 面板与日志里都明确标注, 不假装它是实际成交。
 
-用法:
-    python -m tt.daemon              # 演练(默认, 零副作用)
-    python -m tt.daemon --live       # 真实写信号(需 paused 不存在 + armed 就绪)
-    python -m tt.daemon --once       # 只跑一轮并打印
-    python -m tt.daemon --sample     # 用离线样本行情演示(非交易时段可跑)
+用法(在 tt_solo/ 目录下运行):
+    python -m ttcore.daemon              # 演练(默认, 零副作用)
+    python -m ttcore.daemon --live       # 真实写信号(需 paused 不存在 + armed 就绪)
+    python -m ttcore.daemon --once       # 只跑一轮并打印
+    python -m ttcore.daemon --sample     # 用离线样本行情演示(非交易时段可跑)
 """
 import argparse
 import json
