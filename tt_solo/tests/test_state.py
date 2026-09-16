@@ -299,3 +299,106 @@ def test_fresh_instance_does_not_re_archive(tmp_path, now_fn):
     assert b.archive_current() is False
     assert len((tmp_path / "tt_history.jsonl").read_text(
         encoding="utf-8").strip().splitlines()) == 1
+
+
+# ---------------- 复审修复(Task 3 review findings) ----------------
+
+def _hist_rows(tmp_path):
+    """读归档行(下面几个用例共用)。"""
+    p = tmp_path / "tt_history.jsonl"
+    if not p.exists():
+        return []
+    return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines()
+            if l.strip()]
+
+
+def test_same_day_version_mismatch_does_not_pin_date(tmp_path):
+    """同日但版本不符的账本不得归档 —— 否则半日行钉死今天, 日终真行永不落盘。
+
+    触发场景: 盘中 STATE_VERSION 升版 / 手工修过 state 文件。
+    """
+    t = {"now": datetime(2026, 9, 14, 10, 0)}
+    p = tmp_path / "tt_state.json"
+    p.write_text(json.dumps({
+        "version": 2, "date": "2026-09-14",              # 同日, 仅版本不符
+        "updated_at": "2026-09-14T10:00:00",
+        "symbols": {"600900.SH": {"sold_today": 999, "bought_today": 0,
+                                  "trips": 9, "realized_pnl": 9.99}},
+        "events": [],
+    }), encoding="utf-8")
+
+    led = Ledger(path=p, now_fn=lambda: t["now"])
+    led.load()
+    assert led.state["date"] == "2026-09-14"
+    led.record_fill("600900.SH", "SELL", 28.5, 100, hhmm="10:30",
+                    reason="档位1", order_id="TT_1")
+
+    t["now"] = datetime(2026, 9, 15, 10, 0)              # 收盘 → 跨日
+    assert led.roll_if_new_day() is True
+
+    same = [r for r in _hist_rows(tmp_path) if r["date"] == "2026-09-14"]
+    assert len(same) == 1                                # 只有一行, 且是真行
+    assert same[0]["sold_total"] == 100                  # 不是 999 的半日行
+
+
+def test_same_day_manual_reset_does_not_pin_date(tmp_path):
+    """同日手动 reset_day 不归档 —— 今天还没完结, 归档位不能被提前占掉。"""
+    t = {"now": datetime(2026, 9, 14, 10, 0)}
+    led = Ledger(path=tmp_path / "tt_state.json", now_fn=lambda: t["now"])
+    led.load()
+    led.record_fill("600900.SH", "SELL", 28.5, 100, hhmm="10:00", reason="档位1")
+    led.reset_day()                                      # 同日手动重置
+    led.record_fill("600900.SH", "SELL", 28.5, 40, hhmm="11:00", reason="档位1")
+
+    t["now"] = datetime(2026, 9, 15, 10, 0)
+    assert led.roll_if_new_day() is True
+    same = [r for r in _hist_rows(tmp_path) if r["date"] == "2026-09-14"]
+    assert len(same) == 1
+    assert same[0]["sold_total"] == 40
+
+
+def test_load_archives_stale_day_with_events_only(tmp_path):
+    """load() 的"非空账本"口径须与 archive_current 一致: 只有 events 也算有料。"""
+    p = tmp_path / "tt_state.json"
+    p.write_text(json.dumps({
+        "version": 1, "date": "2026-09-14", "updated_at": "2026-09-14T15:00:00",
+        "symbols": {},
+        "events": [{"hhmm": "10:00", "code": "600900.SH", "side": "SELL",
+                    "price": 28.5, "volume": 100, "pnl": 0.0}],
+    }), encoding="utf-8")
+
+    led = Ledger(path=p, now_fn=lambda: datetime(2026, 9, 15, 10, 0))
+    led.load()
+    assert led.state["date"] == "2026-09-15"
+    row = _hist_rows(tmp_path)[0]
+    assert row["date"] == "2026-09-14"
+    assert row["trades"] == 1
+
+
+def test_read_history_survives_corrupt_archive(tmp_path):
+    """归档文件损坏(非 UTF-8)时 read_history 返回 [] —— 与 _load_archived_dates 同款 fail-safe。"""
+    (tmp_path / "tt_history.jsonl").write_bytes(b"\xff\xfe\x00 not utf8")
+    assert Ledger.read_history(tmp_path / "tt_state.json") == []
+
+
+def test_archive_row_payload_values(tmp_path):
+    """归档行的字段值须与账本事实一致(仪表盘收益曲线直接消费这些值)。"""
+    led = Ledger(path=tmp_path / "tt_state.json",
+                 now_fn=lambda: datetime(2026, 9, 14, 10, 0))
+    led.load()
+    # 600900.SH 反T: 买 300@27.90 → 卖 300@28.30, 配对 300, pnl=(28.30-27.90)*300=120.0
+    led.record_fill("600900.SH", "BUY", 27.90, 300, hhmm="10:00", reason="档位1")
+    led.record_fill("600900.SH", "SELL", 28.30, 300, hhmm="10:30", reason="档位1")
+    # 601398.SH 只卖 500@5.00, 未配对 → pnl 0
+    led.record_fill("601398.SH", "SELL", 5.00, 500, hhmm="11:00", reason="档位2")
+
+    assert led.archive_current() is True
+    row = _hist_rows(tmp_path)[0]
+    assert row["date"] == "2026-09-14"
+    assert row["sold_total"] == 800                  # 300 + 500
+    assert row["bought_total"] == 300
+    assert row["trips"] == 1                         # 仅 600900.SH 配对上
+    assert row["realized_pnl"] == 120.0
+    assert row["trades"] == 3                        # events 条数
+    assert row["symbols"] == {"600900.SH": 120.0, "601398.SH": 0.0}
+    assert row["archived_at"]                        # 时间戳存在即可(非本用例重点)

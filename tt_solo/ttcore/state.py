@@ -98,8 +98,12 @@ class Ledger:
                     self.state = raw
                     self._loaded = True
                     return self.state
-                # 旧日/旧版本: 先把存量数据归档, 否则永久丢失
-                if isinstance(raw, dict) and raw.get("symbols"):
+                # 旧日/旧版本: 先把存量数据归档, 否则永久丢失。
+                # 只归档"已完结的日"(date != today): 同日仅版本不符的文件不归档 ——
+                # 否则会给今天写半日行并占掉归档位, 日终真正的汇总行再也写不出来。
+                # "非空"口径与 archive_current 对齐: 只有 events 也算有料。
+                if (isinstance(raw, dict) and raw.get("date") != today
+                        and (raw.get("symbols") or raw.get("events"))):
                     self.state = raw
                     self.archive_current()
             except (ValueError, OSError):
@@ -110,8 +114,11 @@ class Ledger:
         return self.state
 
     def reset_day(self, day=None):
-        self.archive_current()                # 重置前留档(幂等, 失败不影响)
-        self.state = _empty_state(_today_str(day or self.now_fn()))
+        target = _today_str(day or self.now_fn())
+        # 只归档已完结的日: 同日手动 reset 不归档(否则半日行钉死今天, 见 load())
+        if self.state.get("date") != target:
+            self.archive_current()
+        self.state = _empty_state(target)
         self.save()
         return self.state
 
@@ -210,7 +217,9 @@ class Ledger:
                     continue
             rows.sort(key=lambda r: str(r.get("date") or ""))
             return rows[-int(limit):] if limit else rows
-        except OSError:
+        # 与 _load_archived_dates 同款 fail-safe: 归档文件损坏(如非 UTF-8)只让
+        # 读者拿到 [], 不把 UnicodeDecodeError 抛给调用方(BaseException 仍上抛)。
+        except Exception:                 # noqa: BLE001 - 见上
             return []
 
     # ---------------- 读写 ----------------
