@@ -14,7 +14,7 @@
 
 | 维度 | 状态 |
 |---|---|
-| 测试基线 | **840 绿**（六路径一条命令跑完，2026-09-16 分级护栏后）：`python -m pytest prism/tests prism_web/tests datasource/tests tt/tests qmt_sync/tests tests -q --import-mode=importlib --basetemp=...` = prism 471 + prism_web 54 + datasource 123 + tt 148 + qmt_sync 27 + 根 17。比 09-14 的 887 少 47：**随死代码一起删掉的用例**（v04 网页外壳 40 个 + 幽灵功能 20 个），另补 9 个（K线降级 2 + 分级护栏 7） |
+| 测试基线 | **844 绿**（六路径一条命令跑完）：`python -m pytest prism/tests prism_web/tests datasource/tests tt/tests qmt_sync/tests tests -q --import-mode=importlib --basetemp=...` = prism 473 + prism_web 56 + datasource 123 + tt 148 + qmt_sync 27 + 根 17（09-16 网页回测修复后，比 840 多 4 个新用例） |
 | 模拟盘 | 运行中，但 09-08~09-13 有 5 个交易日空窗（守护进程停摆），账本仍 1,000,000 现金、**零持仓** |
 | 实盘（prism 主策略） | **未上线**。代码已通（`prism/live_daemon.py`），三步验收一步未做 |
 | 实盘（tt 做T策略） | **已接 miniQMT 外部直连**（09-14 晚决策，见「路线回退」节）。代码/测试/闸门就绪，**放行条需每日重写**，`dry_run` 默认仍 True，`--live` 才真报单 |
@@ -42,6 +42,10 @@
 
 **prism**：A股量化系统。选股引擎（36 因子 / 3 策略 / JSON 策略文件）+ 回测 + Flask 网页 GUI（5000 端口）+ 模拟盘守护。Windows + Python 3.12 + QMT miniQMT（xtquant：`C:\Users\28037\AppData\Local\Programs\Python\Python312\Lib\site-packages`）+ **通达信 pytdx 1.72（同目录，09-05 装）**。
 
+- **网页回测静默零交易修复**（09-16，用户报"三个策略回测全无交易"）：**不是选股条件苛刻**——根因是 `prism_web/app.py` 的 `/api/backtest` **从未注入市场数据**（mkt/sector_map），而 `backtest/cli.py` 默认注入 → 依赖它们的 10 个因子（N6-N8/F8/F9/SEC1-4/SEC6）恒 0：v04 候选**全 0 分**被 `candidate_min_model=3` 全过滤；full_factor_v1 门控 N6-N8 恒 0 → 最多 2 分 < 3 → **门永远不开**。证据：同区间 CLI 注入=30/124 笔、CLI `--no-market-data`=0/0 笔、网页=0/0 笔（gate_notes 与"关注入"逐字相同）。
+  · 修法：CLI 的市场数据装配抽成 **`backtest/cli.py: load_market_data()`**（网页与 CLI 共用，消除双份实现）→ 网页端点复用；回测报告新增 **`filter_stats`**（门控拦截天数/候选数/被模型分过滤/被板块过滤）+ **`market_data`** 标志，前端零交易时把归因摊开（不再静默）。
+  · 实测（20260801–20260904）：v04 **30 笔 / +11.4%**、full_factor_v1 **124 笔 / +28.3%**（网页与 CLI 逐字一致）。**v03 仍 0 笔属设计**——它是 v04 的对照组（仅 F1-F7），回测内核里只有 F4 算得出 → 1894 只候选 100% 被模型分门槛过滤；需实时盘口数据（实盘/模拟盘）才有意义，已在界面上如实标注。
+  · 全量 **844 绿**（840+4 新测试：回测诊断 2 + 网页注入/警示 2）。
 - **ponytail 全仓精简 + 结构归位**（2026-09-15，commit 9bb567a..，**生产代码净 -824 行**）：三块并行审计（数据/交易/网页层）后逐条 `git grep` 证死再删——
   · 删：market_data 整套「按日索引」死子系统、zt_history 重复定义的 `qmt_zt_feed`、旧买入路径 `buy_from_screen`、`composite mode="max"` 幽灵模式、trader 四个零调用钩子、tdx 三个死函数、`_report` 里带 `sharpe=7.07` 常数的死分支等；
   · 抽：`prism/schedule.py`（两守护共用调度）、`engine.resolve_strategy/gate_evaluate`、`shared.common.atomic_write/next_weekday`（**升级为 mkdir+fsync 最强版**，tt 的三份副本归并过来）、`_batch_download`、`_strategy_path`、`_cut`；

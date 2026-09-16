@@ -64,11 +64,12 @@ app = Flask(__name__)
 
 # 回测数据源(东财, backtest_cli): 导入失败 → /api/backtest 返回 500
 try:
-    from backtest.cli import zt_feed, kline_feed  # noqa: F401
+    from backtest.cli import zt_feed, kline_feed, load_market_data  # noqa: F401
     _BACKTEST_FEEDS_OK = True
 except Exception:
     zt_feed = None
     kline_feed = None
+    load_market_data = None
     _BACKTEST_FEEDS_OK = False
 
 
@@ -714,8 +715,16 @@ def api_backtest():
         return jsonify({"ok": False, "error": "回测数据源不可用"}), 500
     try:
         strategy = load_strategy(p)
+        # 市场数据注入(2026-09-04 修复): 与 CLI 一致。
+        # 缺注入时 N6-N8/F8/F9/SEC 共 10 个因子恒 0 → v04 候选全 0 分被过滤、
+        # full_factor_v1 门控(N6-N8)永不达标 → 三策略静默零交易。
+        mkt, sector_map, md_note = (load_market_data()
+                                    if load_market_data else (None, None, None))
         bt = Backtester(strategy, zt_feed=zt_feed, kline_feed=kline_feed)
-        rep = bt.run(s, e)
+        rep = bt.run(s, e, mkt=mkt, sector_map=sector_map)
+        rep["market_data"] = mkt is not None
+        if md_note:
+            rep.setdefault("gate_notes", []).append(md_note)
     except Exception as e:
         logger.error("回测失败: %r", e, exc_info=True)
         return jsonify({"ok": False, "error": "回测失败: %r" % e}), 500

@@ -161,6 +161,14 @@ class Backtester:
         self._kline_cache = {}
         # 涨停池缓存: run() 预取阶段与回放阶段各查一次, 缓存避免重复请求
         self._pool_cache = {}
+        # 过滤统计(2026-09-04): 零交易时能分辨"门控没过"还是"候选被过滤"
+        # ——网页回测曾缺市场数据注入导致三个策略静默零交易, 无从归因。
+        self._filter_stats = self._new_filter_stats()
+
+    @staticmethod
+    def _new_filter_stats():
+        return {"days": 0, "gate_blocked_days": 0, "candidates": 0,
+                "filtered_min_model": 0, "filtered_sector": 0}
 
     def _pool_for(self, d):
         key = d.strftime("%Y%m%d")
@@ -293,6 +301,7 @@ class Backtester:
             except Exception:
                 pass
         if gate_score < threshold:
+            self._filter_stats["gate_blocked_days"] += 1
             return []
         min_model = (self.strategy.get("filters") or {}).get(
             "candidate_min_model", 3)
@@ -311,6 +320,7 @@ class Backtester:
             scores = compute_model_scores(ctx, self.strategy)
             best = max([scores[m["id"]]
                         for m in self.strategy["scoring_models"]], default=0)
+            self._filter_stats["candidates"] += 1
             if best >= min_model:
                 sec_score = None
                 if score_cfg["enabled"]:
@@ -323,9 +333,12 @@ class Backtester:
                     sec_score = rec["score"] if rec else None
                     # fail-closed: 无评分/低分板块不买(设计 §4.2)
                     if sec_score is None or sec_score <= score_cfg["threshold"]:
+                        self._filter_stats["filtered_sector"] += 1
                         continue
                 out.append((code, s.get("boards", 0), s.get("theme", ""),
                             scores["composite"], sec_score))
+            else:
+                self._filter_stats["filtered_min_model"] += 1
         out.sort(key=lambda x: x[3], reverse=True)
         # 每日选股上限: 与净值模拟的 max_positions 一致(每天最多买 N 只,
         # 否则一天 50+ 只候选会把资金抽干, 净值模拟里几乎全部跳过)
@@ -395,6 +408,7 @@ class Backtester:
         gate_notes = self._gate_notes(em, ticks)
         trades = []
         dates = []
+        self._filter_stats = self._new_filter_stats()   # 每次 run 重置诊断计数
         # 第一步: 预取区间内全部涨停股K线(并发 + 缓存), 避免逐日串行请求
         all_codes = set()
         d = start_date
@@ -414,6 +428,7 @@ class Backtester:
             pool = self._pool_for(d)
             if pool:
                 dates.append(d)
+                self._filter_stats["days"] += 1
                 for code, boards, theme, composite, sec_score in self._pick(
                         pool, asof=d, em=em, ticks=ticks, mkt=mkt,
                         sector_map=sector_map, prev_pool=prev_pool):
@@ -441,7 +456,8 @@ class Backtester:
         curve, skipped = self._simulate_equity(trades)
         eq_stats = self._equity_stats(curve, self.initial_capital)
         return self._report(trades, dates, gate_notes=gate_notes,
-                            equity_stats=eq_stats, skipped_cash=skipped)
+                            equity_stats=eq_stats, skipped_cash=skipped,
+                            filter_stats=self._filter_stats)
 
     # ---------------- 交易模拟 ----------------
     def _simulate_trade(self, code, kline, entry_date, rules):
@@ -608,14 +624,18 @@ class Backtester:
 
     # ---------------- 统计 ----------------
     @staticmethod
-    def _report(trades, dates, gate_notes, equity_stats, skipped_cash=0):
+    def _report(trades, dates, gate_notes, equity_stats, skipped_cash=0,
+                filter_stats=None):
         """汇总回测报告。
 
         equity_stats: _equity_stats 的结果(基于资金模拟净值曲线), 含
-        total_return_pct/max_drawdown_pct/sharpe_ratio。"""
+        total_return_pct/max_drawdown_pct/sharpe_ratio。
+        filter_stats: 过滤统计(门控拦了几天/候选被 min_model/板块过滤多少只)——
+        零交易时用于归因, 避免"静默零交易"。"""
         n = len(trades)
         base = {"trading_days": len(dates), "trades": n,
-                "gate_notes": gate_notes or [], "skipped_cash": skipped_cash}
+                "gate_notes": gate_notes or [], "skipped_cash": skipped_cash,
+                "filter_stats": filter_stats or {}}
         if n == 0:
             base.update({"win_rate": None, "avg_return_pct": None,
                          "profit_loss_ratio": None, "max_drawdown_pct": None,
@@ -644,6 +664,7 @@ class Backtester:
         return {
             "trading_days": len(dates), "trades": n,
             "gate_notes": gate_notes or [], "skipped_cash": skipped_cash,
+            "filter_stats": filter_stats or {},
             "win_rate": round(win_rate, 4),
             "avg_return_pct": round(avg_ret, 2),
             "profit_loss_ratio": round(pl_ratio, 2) if pl_ratio else None,

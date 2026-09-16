@@ -267,6 +267,35 @@ def _parse_date(s):
     return datetime.strptime(s, "%Y%m%d").date()
 
 
+def load_market_data():
+    """市场数据缓存装配(网页回测与 CLI 共用, 2026-09-04 修复):
+
+    N6-N8/F8/F9/SEC1-4/SEC6 等 10 个因子依赖 mkt/sector_map; 不注入则恒 0
+    ——网页回测端点曾漏注入, 导致三个策略全部"静默零交易"(v04 候选全 0 分
+    被 candidate_min_model 过滤; full_factor_v1 门控 N6-N8 恒 0 永不达标)。
+
+    返回 (mkt, sector_map, note): 缓存为空时 mkt/sector_map 为 None, note 说明原因。
+    """
+    from prism import market_data as _md
+    cache = _md._load_cache()
+    if not cache:
+        return None, None, (
+            "市场数据缓存为空 → N6-N8/F8/F9/SEC 因子失效, 回测结果不可用于"
+            "评估这些因子(先采集: python -m prism.market_data "
+            "--build-sectors / --build-global)")
+    mkt = {"sector": cache.get("kline") or {},
+           "global": cache.get("global") or {},
+           "sector_flow": cache.get("flow") or {},
+           "futures": _md.futures_snapshot()}
+    smap = cache.get("sector_map") or {}
+    sector_map = {}
+    for c6, rec in smap.items():
+        if rec and rec.get("sector"):
+            suffix = ".SH" if c6.startswith("6") else ".SZ"
+            sector_map[c6 + suffix] = rec["sector"]
+    return mkt, sector_map, None
+
+
 def main():
     ap = argparse.ArgumentParser(description="Prism 回测 CLI(QMT本地数据, 可回测约1.5年)")
     ap.add_argument("--start", required=True, help="开始日期 YYYYMMDD")
@@ -312,28 +341,13 @@ def main():
     mkt = None
     sector_map = None
     if args.use_market_data:
-        from prism import market_data as _md
-        cache = _md._load_cache()
-        if cache:
-            # 组装 market_data 结构: sector(板块K线) + global(全球指数)
-            # + sector_flow(板块资金流, SEC3 用) + futures(商品期货, F8 用)
-            mkt = {"sector": cache.get("kline") or {},
-                   "global": cache.get("global") or {},
-                   "sector_flow": cache.get("flow") or {},
-                   "futures": _md.futures_snapshot()}
-            smap = cache.get("sector_map") or {}
-            # sector_map 期望 {code: 行业代码}, stock_sector 返回行业代码
-            sector_map = {}
-            for c6, rec in smap.items():
-                if rec and rec.get("sector"):
-                    suffix = ".SH" if c6.startswith("6") else ".SZ"
-                    sector_map[c6 + suffix] = rec["sector"]
+        mkt, sector_map, md_note = load_market_data()
+        if md_note:
+            print("警告: %s" % md_note, file=sys.stderr)
+        else:
             print("市场数据注入: 板块 %d, 全球指数 %d, 个股映射 %d" % (
                 len(mkt["sector"]), len(mkt["global"]), len(sector_map)),
                 file=sys.stderr)
-        else:
-            print("警告: 市场数据缓存为空(--build-sectors/--build-global 先采集)",
-                  file=sys.stderr)
 
     if args.oos:
         res = bt.run_oos(start, end, sell_rules=sell or None, progress=progress,

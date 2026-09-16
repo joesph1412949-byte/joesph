@@ -537,3 +537,39 @@ def test_backtest_no_lookahead_in_factor_evaluation():
                   if _parse_kline_date(dt) <= date(2026, 7, 2)]
     assert max(px for _dt, px in kline_0702) < 13.0, \
         "选股日K线包含未来数据(未来函数)!"
+
+
+# ---------------- 诊断统计(2026-09-04 网页回测零交易根因修复) ----------------
+
+def test_report_filter_stats_explain_zero_trades():
+    """零交易时报告要能分辨: 门控没过 vs 候选被 min_model 过滤。"""
+    s = load_strategy(_mk_strategy())
+    s["filters"]["candidate_min_model"] = 5     # 候选分(1)永远达不到 5 → 全过滤
+    zf, kf = _feeds()
+    bt = backtest.Backtester(s, zt_feed=zf, kline_feed=kf)
+    rep = bt.run(date(2026, 7, 1), date(2026, 7, 3))
+    assert rep["trades"] == 0
+    fs = rep["filter_stats"]
+    assert fs["gate_blocked_days"] == 0
+    assert fs["candidates"] == 1 and fs["filtered_min_model"] == 1
+
+
+def test_report_filter_stats_gate_blocked():
+    """门控不过 → gate_blocked_days 计数(网页 full_factor_v1 曾经的情形)。"""
+    reg.reset()
+
+    @reg.factor(id="N1", name="n", category="node", description="")
+    def f_n(ctx):
+        return {"score": 0, "note": ""}
+
+    @reg.factor(id="A1", name="a", category="通用", description="")
+    def f_a(ctx):
+        return {"score": 1, "note": ""}
+
+    s = load_strategy(_mk_strategy())
+    zf, kf = _feeds()
+    bt = backtest.Backtester(s, zt_feed=zf, kline_feed=kf)
+    rep = bt.run(date(2026, 7, 1), date(2026, 7, 3))
+    assert rep["trades"] == 0
+    assert rep["filter_stats"]["gate_blocked_days"] == 1
+    assert rep["filter_stats"]["candidates"] == 0

@@ -172,6 +172,52 @@ def test_backtest_feeds_unavailable_500(client, monkeypatch):
     assert "回测数据源不可用" in r.get_json()["error"]
 
 
+def test_backtest_injects_market_data(client, monkeypatch):
+    """网页回测必须注入市场数据(与 CLI 一致)——缺注入曾致三策略静默零交易。"""
+    captured = {}
+
+    class FakeBT:
+        def __init__(self, strategy, zt_feed=None, kline_feed=None):
+            pass
+
+        def run(self, s, e, sell_rules=None, progress=None, **kw):
+            captured.update(kw)
+            return {"trades": 1, "trading_days": 1, "gate_notes": [],
+                    "filter_stats": {}}
+
+    monkeypatch.setattr("prism.backtest.Backtester", FakeBT)
+    monkeypatch.setattr(app_module, "load_market_data",
+                        lambda: ({"sector": {"880368": 1}},
+                                 {"600000.SH": "S1"}, None))
+    r = client.get(
+        "/api/backtest?strategy=first_board_v04&start=20260101&end=20260105")
+    assert r.status_code == 200
+    assert captured["mkt"] == {"sector": {"880368": 1}}
+    assert captured["sector_map"] == {"600000.SH": "S1"}
+    assert r.get_json()["report"]["market_data"] is True
+
+
+def test_backtest_market_data_missing_flagged(client, monkeypatch):
+    """缓存空 → 报告带警示 note + market_data=False(不再静默零交易)。"""
+
+    class FakeBT:
+        def __init__(self, *a, **kw):
+            pass
+
+        def run(self, s, e, **kw):
+            return {"trades": 0, "trading_days": 1, "gate_notes": [],
+                    "filter_stats": {}}
+
+    monkeypatch.setattr("prism.backtest.Backtester", FakeBT)
+    monkeypatch.setattr(app_module, "load_market_data",
+                        lambda: (None, None, "市场数据缓存为空 → 因子失效"))
+    r = client.get(
+        "/api/backtest?strategy=first_board_v04&start=20260101&end=20260105")
+    rep = r.get_json()["report"]
+    assert rep["market_data"] is False
+    assert any("市场数据缓存为空" in n for n in rep["gate_notes"])
+
+
 # ---------------- 旧路由保留: 冒烟 ----------------
 
 def test_health(client):

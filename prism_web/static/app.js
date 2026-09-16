@@ -501,8 +501,19 @@ async function runBacktest() {
 function renderBacktest(r) {
   const box = document.getElementById("backtest-result");
   if (!r || r.trades === 0 || r.trades == null) {
-    box.innerHTML = `<div class="hint">回测完成: 无交易(可能区间内环境不达标或数据不足)。
-      <br>提示: 东财历史涨停池约保留最近 20 个交易日, 可尝试更近的日期。</div>`;
+    // 零交易归因(2026-09-04): 不再只给模糊提示——门控/过滤/数据缺失摊开
+    const fs = (r && r.filter_stats) || {};
+    const notes = ((r && r.gate_notes) || [])
+      .map(n => `<div>· ${n}</div>`).join("");
+    const why = `<div>· 门控未过关 ${fs.gate_blocked_days || 0} 天 · 候选 ${fs.candidates || 0} 只`
+      + ` · 被"模型分不足"过滤 ${fs.filtered_min_model || 0} 只`
+      + ` · 被板块分过滤 ${fs.filtered_sector || 0} 只</div>`;
+    const warn = (r && r.market_data === false)
+      ? `<div style="color:#e67e22">· ⚠ 市场数据未注入(板块/全球指数缓存为空): N6-N8/F8/F9/SEC 共 10 个因子失效, 结果不可用于评估它们</div>`
+      : "";
+    box.innerHTML = `<div class="hint">回测完成: 无交易。<div style="margin-top:6px;font-size:12px">${warn}${why}${notes}</div>
+      <br>提示: 东财历史涨停池约保留最近 20 个交易日, 可尝试更近的日期；<br>
+      若"被模型分不足过滤"占多数, 说明该策略依赖实时盘口因子, 回测内核里算不出来(如 v03 对照组)。</div>`;
     return;
   }
   const pct = v => v == null ? "-" : (v * 100).toFixed(1) + "%";
