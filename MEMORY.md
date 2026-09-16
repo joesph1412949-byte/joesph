@@ -14,7 +14,7 @@
 
 | 维度 | 状态 |
 |---|---|
-| 测试基线 | **844 绿**（六路径一条命令跑完）：`python -m pytest prism/tests prism_web/tests datasource/tests tt/tests qmt_sync/tests tests -q --import-mode=importlib --basetemp=...` = prism 473 + prism_web 56 + datasource 123 + tt 148 + qmt_sync 27 + 根 17（09-16 网页回测修复后，比 840 多 4 个新用例） |
+| 测试基线 | **做T侧 265 绿**：`python -m pytest tt_solo/tests tt_solo/dashboard/tests qmt_sync/tests tests -q --import-mode=importlib` = tt_solo 198 + dashboard 23 + qmt_sync 27 + 根 17。**`tt/` 已于 09-16 删除**（见「tt_solo 批次」节）→ 原六路径命令里的 `tt/tests` 换成 `tt_solo/tests tt_solo/dashboard/tests`（变七路径）。prism 473→486 等数字**不作基线**：09-16 晚有并发会话在改 `prism/backtest.py` 等，实测两次运行 2↔9 failed 波动 |
 | 模拟盘 | 运行中，但 09-08~09-13 有 5 个交易日空窗（守护进程停摆），账本仍 1,000,000 现金、**零持仓** |
 | 实盘（prism 主策略） | **未上线**。代码已通（`prism/live_daemon.py`），三步验收一步未做 |
 | 实盘（tt 做T策略） | **已接 miniQMT 外部直连**（09-14 晚决策，见「路线回退」节）。代码/测试/闸门就绪，**放行条需每日重写**，`dry_run` 默认仍 True，`--live` 才真报单 |
@@ -41,6 +41,17 @@
 ## 项目现状（截至 2026-09-15）
 
 **prism**：A股量化系统。选股引擎（36 因子 / 3 策略 / JSON 策略文件）+ 回测 + Flask 网页 GUI（5000 端口）+ 模拟盘守护。Windows + Python 3.12 + QMT miniQMT（xtquant：`C:\Users\28037\AppData\Local\Programs\Python\Python312\Lib\site-packages`）+ **通达信 pytdx 1.72（同目录，09-05 装）**。
+
+- **tt_solo 批次：做T策略抽成自包含项目 + 仪表盘重建**（09-16，spec/plan 见 `docs/superpowers/{specs,plans}/2026-09-16-tt-solo-extract*`）：`tt/`（24 文件/4362 行）+ `tt_web/` → **`tt_solo/`（唯一实现，旧目录已删）**。
+  · **结构**：`tt_solo/ttcore/`（11 模块：`_vendor`/grid/risk/state/broker/market/config/engine/executor/daemon/arm_today）+ `tt_solo/dashboard/`（Flask + 前端，**:5011**）+ `tests/`（**221 绿**）+ `tools/compare_legacy.py`。
+  · **依赖剥离（自包含的硬定义）**：只把 5 个符号内联进 `ttcore/_vendor.py`（`atomic_write`/`limit_ratio_for_code`/`is_local_request` + 路径根），把 `prism.live_account` 吸收为 `ttcore/broker.py` → **零 prism/shared import**（AST 扫描护栏常驻，恶意注入实测会红）。
+  · **路径归属**：运行数据自带 `tt_solo/runtime/`（`TT_RUNTIME_DIR` 可覆盖）；`TT_SIGNAL_ROOT`（默认 `D:/QMT_SIGNALS`）**是与外部 QMT 桥的契约，刻意不改**。
+  · **两个新增功能**（非纯搬家，均经评审）：①**日终归档** `tt_history.jsonl` —— 原 `load()` 遇跨日直接覆盖、前一日永久丢失；现重置前 append（fsync），且 `Ledger(writable=False)` 只读模式让面板能读盘而不写盘。②仪表盘两新接口 `/api/rejections`（按原因码聚合被拦）+ `/api/ledger/history`（收益曲线）。
+  · **搬家零回归的证据**：`python tt_solo\tools\compare_legacy.py` exit 0 —— 新旧引擎同输入下 plan 518 字段 / snapshot 92 / state 100 / history 10 全等，且账本非空（6 笔成交、往返 2、盈亏 630.00）。**唯一例外且已钉为断言**：北交所 `920xxx` 涨跌停比例 0.10 → **0.30**（旧代码经 `shared.common` 少了 `"92"` 段会误拒合法单，属修 bug；当前标的池无 920xxx，故潜伏）。
+  · **仪表盘**：五区块一屏决策面板（状态条三道闸门 `dry_run→paused→armed` / 账户卡 / 档位阶梯含 ▶现价 / 今日战果 / 被拦原因排行）+ 收益曲线；ECharts **走本地**（无 CDN）；急停/放行双重确认；只监听 `127.0.0.1`；**只能关闸不能下单**。
+  · **`.bat` 入口**：6 个做T启动器已改指 tt_solo（daemon 必须以 `tt_solo` 为工作目录，否则 `python -m ttcore.daemon` 找不到模块）。
+  · **踩坑（重要）**：①**判断文件编码只看原始字节或 `read` 工具，别信 pwsh 的 stdout** —— 它会把正常 UTF-8 中文显示成乱码；本次曾据此误判「`.bat` 与 `tt_config.json` 是 GBK 需重写」，用字节核验后推翻（`做T` = `e5 81 9a 54`），差点把好文件改坏。②**本机没有 `rg`** → 用 `Select-String` 或 grep 工具。③**测试会改写真实运行数据**：`test_env_sim` 5 处构造 `TTDaemon` 未传 `runtime_path` → 用假快照覆盖面向运维的 `tt_runtime.json`（仪表盘正是读它）；已修（两侧都补 `runtime_path=tmp_path`）。④**护栏最容易空转**：负控只测 `import prism` 而不测 `from prism.x import y` 时，把整个 `ImportFrom` 分支删掉 190 个测试仍全绿 —— 已补正向断言（本仓原有违规全是 ImportFrom 形态）。
+  · **并发会话事故（09-16 晚）**：另一会话在同一仓库改 `prism/`、`prism_web/`、`backtest/`，并**把本批 5 个 tt_solo 提交一并推送到 origin/master**（`17ca025`/`182db70`/`26d8af9`/`b7b014f`/`6e9bc55`），绕过了"push 必须先问"的规矩。未回滚（已推送，回滚风险更大）。
 
 - **网页回测静默零交易修复**（09-16，用户报"三个策略回测全无交易"）：**不是选股条件苛刻**——根因是 `prism_web/app.py` 的 `/api/backtest` **从未注入市场数据**（mkt/sector_map），而 `backtest/cli.py` 默认注入 → 依赖它们的 10 个因子（N6-N8/F8/F9/SEC1-4/SEC6）恒 0：v04 候选**全 0 分**被 `candidate_min_model=3` 全过滤；full_factor_v1 门控 N6-N8 恒 0 → 最多 2 分 < 3 → **门永远不开**。证据：同区间 CLI 注入=30/124 笔、CLI `--no-market-data`=0/0 笔、网页=0/0 笔（gate_notes 与"关注入"逐字相同）。
   · 修法：CLI 的市场数据装配抽成 **`backtest/cli.py: load_market_data()`**（网页与 CLI 共用，消除双份实现）→ 网页端点复用；回测报告新增 **`filter_stats`**（门控拦截天数/候选数/被模型分过滤/被板块过滤）+ **`market_data`** 标志，前端零交易时把归因摊开（不再静默）。
@@ -83,7 +94,9 @@
 
 ## 环境备忘
 
-- 测试：`$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests prism_web/tests strategy_web/tests tests tt/tests -q --import-mode=importlib --basetemp=D:/cc-joesph/pt_btNN`（NN 递增，下一个 **201**；当前基线 **808 绿**（五路径，09-13 晚，含 tt 做T 88 例 + 实盘守护 22 例）/ 四路径 720 绿（**09-14 目录重组后复测仍 720，零回归**）/ tt+qmt_sync 两路径 134 绿 / 三套件 703 绿——09-13 体检时三套件 681）。**basetemp 用正斜杠**：Git Bash 里传 `D:\cc-joesph\pt_btNN` 会被转义拼歪，在仓库根生成 `cc-joesphpt_btNN` 垃圾目录（踩过一次，已删）。**注意沙箱**：后台运行的命令在沙箱内跑，会因①safe-delete 批量删除守卫（teardown 清理 700+ 临时文件、或命令里 `rm -rf` 多个目录，如 `rm -rf pt_tt01 pt_tt02` 直接报 `SAFE_DELETE_BULK_CONFIRM_REQUIRED`；改用 `python -c "shutil.rmtree(...,ignore_errors=True)"` 可绕）②网络被拦（market_data 相关断言失败）→ 表现为 21~22 failed/15~177 errors，**不是代码问题**；脱沙箱（escalation）即全绿。诊断时优先用非后台调用。
+- **判断文件编码只看原始字节或 `read` 工具，绝不信 `pwsh` 的 stdout**（09-16 血泪）：PowerShell 输出通道会把**正常的 UTF-8 中文显示成乱码**，据此曾误判「6 个 `.bat` + `tt_config.json` 是 GBK 需重写」，差点重写坏好文件。核验法：`[System.IO.File]::ReadAllBytes()` 看字节（`做T` = `e5 81 9a 54` = 正确 UTF-8），或用 `read` 工具。**`chcp 65001` + UTF-8 文件本就是正确配对**。
+- **本机没有 `rg`**（`where.exe rg` 找不到）→ 搜索用 PowerShell `Select-String`，或直接用 agent 的 grep/glob 工具。grep 的**锚定**写法（`^\s*(from|import)\s+...`）不会被散文误伤，裸词搜索会。
+- 测试：`$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests prism_web/tests datasource/tests tt_solo/tests tt_solo/dashboard/tests qmt_sync/tests tests -q --import-mode=importlib --basetemp=D:/cc-joesph/pt_btNN`（NN 递增，下一个 **300**；`tt/tests` 与 `tt_web/tests` **已于 09-16 删除**，换成 `tt_solo/tests tt_solo/dashboard/tests`。做T侧基线 **265 绿** = tt_solo 198 + dashboard 23 + qmt_sync 27 + 根 17）。**basetemp 用正斜杠**：Git Bash 里传 `D:\cc-joesph\pt_btNN` 会被转义拼歪，在仓库根生成 `cc-joesphpt_btNN` 垃圾目录（踩过一次，已删）。**注意沙箱**：后台运行的命令在沙箱内跑，会因①safe-delete 批量删除守卫（teardown 清理 700+ 临时文件、或命令里 `rm -rf` 多个目录，如 `rm -rf pt_tt01 pt_tt02` 直接报 `SAFE_DELETE_BULK_CONFIRM_REQUIRED`；改用 `python -c "shutil.rmtree(...,ignore_errors=True)"` 可绕）②网络被拦（market_data 相关断言失败）→ 表现为 21~22 failed/15~177 errors，**不是代码问题**；脱沙箱（escalation）即全绿。诊断时优先用非后台调用。
 - **诊断技巧**：pytest 全量跑出现"整片同类失败"时，用 `@pytest.fixture`/hook 打印状态边界（如注册表 `len(reg.FACTORS)`）比逐个二分快得多；autouse fixture 实例化顺序可能导致"取快照晚于污染"这类隐蔽 bug
 - xtquant 直连探测：`from xtquant import xtdata; xtdata.connect()`（系统 python 即可）
 - tdx 自检：`python -m prism.tdx_source`（6 项：连接/个股日K/大盘指数/板块指数/快照/流通股本）
@@ -211,8 +224,7 @@
 |---|---|---|---|
 | `prism/` | **主策略引擎**：36 因子、回测、模拟盘、实盘信号守护 | `python -m prism.paper_daemon` / `python -m prism.live_daemon` | 生产可用 |
 | `prism_web/` | prism 网页控制台（策略编辑、选股、回测、绩效） | `:5000` | 运行中（09-13 重启过） |
-| `tt/` | **做T策略引擎**（底仓+浮仓 日内高抛低吸） | `python -m tt.daemon --direct [--live]` | **已接 miniQMT 直连**（默认 DRY-RUN） |
-| `tt_web/` | 做T监控台（只读，能暂停不能下单） | `:5010` | 可用 |
+| `tt_solo/` | **做T策略（自包含项目）**：策略核心 `ttcore/` + 一屏决策仪表盘 `dashboard/` | `cd tt_solo; python -m ttcore.daemon --direct [--live]`；面板 `:5011` | **09-16 从 `tt/` 抽出，已删除旧 `tt/`+`tt_web/`**（默认 DRY-RUN） |
 | `qmt_sync/` | miniQMT 成交/持仓 → 本地 SQLite + 告警 | `python -m qmt_sync --once` | 可用，供 Vibe-Trading 查询 |
 | `strategy_web/` | v04 时代选股网页 | — | **legacy**，保留兼容 |
 | `qmt/` | **miniQMT 桥接与工具**（桥脚本 + 只读自检） | `python -m qmt.tools.live_check` | 桥已就位 |

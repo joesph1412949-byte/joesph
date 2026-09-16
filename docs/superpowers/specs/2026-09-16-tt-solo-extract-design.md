@@ -1,7 +1,10 @@
 # tt_solo —— 做T策略自包含化 + 仪表盘重建（设计）
 
 - 日期：2026-09-16
-- 状态：待用户评审
+- 状态：**✅ 已执行完毕（2026-09-16 晚）** —— 14 个任务全部完成并通过独立子代理评审；终审 "Ready to merge: With fixes" 的 4 个 Important 已修。
+  `tt/` + `tt_web/` **已删除**（用户 09-16 明确同意），`tt_solo/` 为唯一实现。`tt_solo/tests` + `tt_solo/dashboard/tests` = **221 绿**；
+  双跑对照 `python tt_solo\tools\compare_legacy.py` = **exit 0**（唯一例外：北交所 `920xxx` 涨跌停 0.10→0.30，已钉为断言）。
+  执行台账见 `.superpowers/sdd/progress.md`。
 - 决策来源：用户于 2026-09-16 拍板「脱离 prism 依赖，做真正自包含的独立项目」+「在现有 tt_web 上重做/大幅升级成仪表盘」
 
 ---
