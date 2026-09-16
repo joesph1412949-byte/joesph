@@ -109,3 +109,6 @@ scripts/
 
 # 默认策略指针(本地运行时状态, 绝不提交)
 prism/strategies/.active.json
+
+# tt_solo 运行期数据(账本/日志, 绝不提交)
+tt_solo/runtime/
