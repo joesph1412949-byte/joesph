@@ -28,15 +28,19 @@ def cfg():
 
     tt_config.load() 的顺序是 DEFAULT_CONFIG → 盘上 tt_config.json →
     overrides 逐层深合并, 所以没钉的键仍从盘上文件继承(用户可改)。
-    这里钉住的每个键都对齐部署值 ttcore/tt_config.json —— 测试因此跑在生产配置下,
-    又不受用户改那份文件影响。
+    钉住的键**除 paper_positions 外**都对齐部署值 ttcore/tt_config.json —— 测试因此
+    跑在生产配置下, 又不受用户改那份文件影响。
     当前没钉的顶层键只剩 version(没有任何代码读它; 状态文件里的 version 是另一码事)。
     grid / risk / session 三个子块已逐叶子钉全。其中 grid 的 n_units=5 配
     max_units=3 就是部署值, 也是 config 校验里写明的**故意解耦**: n_units 定阶梯
     深度与每档金额分母, max_units 定日内实际用几档 —— 底仓只够 3 档时留 n_units=5,
     每档金额才维持 1/5。
-    paper_positions 只钉了 600900.SH(测试唯一用到的代码); 600938.SH 那个钉子没有
-    测试读, 其余代码(601088.SH 等)继承自 DEFAULT_CONFIG。
+    paper_positions **故意不对齐部署值**: 部署有效值是 DEFAULT_CONFIG 的 1000/700
+    (两份 JSON 都没写这个键), 这里钉 5000/3000, 使纸面底仓 ≈ 单档 600 股的 8 倍,
+    免得 can_use 把卖出量裁成缩量单。这只是余量, 不是现有测试的硬需求 ——
+    实际去掉这条钉子改用 1000/700, 154 项仍全过。
+    它钉了两个代码: 600900.SH(测试唯一用到的), 和 600938.SH(没有测试读它,
+    留着只为把纸面账户形状固定住); 其余代码(601088.SH 等)继承自 DEFAULT_CONFIG。
     以后新增依赖某个配置键的测试, 记得在这里一并钉住。
     """
     return tt_config.load(overrides={

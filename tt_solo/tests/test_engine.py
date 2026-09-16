@@ -84,7 +84,7 @@ def test_switch_disabled_skips_symbol(eng_factory, ledger, sym, snap_factory):
 
 
 def test_half_state_halves_units(eng_factory, ledger, sym, snap_factory):
-    """HALF → 只做前一半档位(5 档 → 2 档)。"""
+    """HALF → 只做前一半档位(深度先被 max_units 截到 3, 半量后 2 档)。"""
     ledger.load()
     eng, _ = eng_factory({"600900.SH": snap_factory(
         last=30.0, last_close=29.5, high=30.0, low=29.5,
@@ -334,8 +334,7 @@ def test_max_units_does_not_change_unit_size(eng_factory, ledger, sym,
     a = eng.plan_symbol(sym, eng.account_state(), OPEN, "OPEN")[1]
     vol_a = [i for i in a if i.side == "SELL"][0].volume
 
-    ledger2 = eng.ledger
-    eng.grid_cfg["max_units"] = 3
+    eng.grid_cfg["max_units"] = 2           # 必须与夹具值不同, 否则两次调用同参
     b = eng.plan_symbol(sym, eng.account_state(), OPEN, "OPEN")[1]
     vol_b = [i for i in b if i.side == "SELL"][0].volume
     assert vol_a == vol_b
