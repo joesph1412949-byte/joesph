@@ -158,7 +158,8 @@ passorder(
 5. DRY_RUN = True 先跑一天，看日志
 6. 无误后改 DRY_RUN = False
 7. 启动策略；每天开盘前仍要写 armed.txt
-   外部侧改跑：python -m tt.daemon（不加 --direct）
+   外部侧改跑：cd tt_solo 后 python -m ttcore.daemon（不加 --direct）
+   （或直接跑 tifosi 主菜单 1）
    → 信号落到 D:/QMT_SIGNALS/real/pending/，桥自动消费
 ```
 
