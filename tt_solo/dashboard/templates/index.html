@@ -89,20 +89,27 @@ async function jget(url){
 }
 
 function renderGates(d){
+  // 重算路径(_source==='live_recompute')的 dry_run 来自 config 文件默认值,
+  // 不是运行中守护的实测值(--live 只在内存里改 dry_run, 从不落盘): 此时
+  // 该段必须标明是"按配置判定", 不得当作已观测事实呈现。
+  const cfgOnly = d._source === 'live_recompute';
   const gates = [
     {name:'dry_run', off: d.dry_run,
-     on:'实盘可发单', offText:'演练(不发单)'},
+     on: cfgOnly ? '实盘可发单(按配置判定)' : '实盘可发单',
+     offText: cfgOnly ? '演练(不发单·按配置判定)' : '演练(不发单)'},
     {name:'paused', off: d.paused,
      on:'未急停', offText:'已急停'},
     {name:'armed', off: !d.armed,
      on:'今日已放行', offText:(d.armed_msg || '今日未放行')},
   ];
+  const srcLabel = d._source === 'daemon' ? '守护快照(实测)'
+      : cfgOnly ? '面板重算(按配置)' : (d._source || '');
   $('gates').innerHTML =
     '<span class="muted">能否做T:</span>' +
     gates.map(g => `<span class="gate ${g.off?'off':'on'}">${
         g.name} · ${esc(g.off ? g.offText : g.on)}</span>`).join('<span class="arrow">→</span>')
     + `<span class="muted" style="margin-left:auto">env=${esc(d.env)} ·
-        行情源(自报)=<span title="行情门面自报值, 未独立核实: 离线样本通道(--sample)同样会自报 qmt, 不可据此认定走的是真实行情">${esc(d.source)}</span> · ${d._source||''}${d._age!=null?' '+d._age+'s':''}</span>`;
+        行情源(自报·未核实)=${esc(d.source)} · ${esc(srcLabel)}${d._age!=null?' '+d._age+'s':''}</span>`;
 }
 
 function renderAccount(d){
@@ -150,19 +157,33 @@ function renderLadders(d){
   const t = (s) => {
     if(s.skip) return `<div class="muted">跳过: ${esc(s.skip)}</div>`;
     const lad = s.ladder || {};
-    const line = (label, price) =>
+    const row = (label, price) => ({p: price, h:
       `<div style="display:flex;justify-content:space-between">
-         <span class="muted">${label}</span><span>${num(price,3)}</span></div>`;
-    const sells = (lad.sell||[]).map((p,i) =>
-        line('sell'+(i+1)+(((s.filled_sell_units||0)>i)?' ✓':''), p)).reverse().join('');
-    const buys = (lad.buy||[]).map((p,i) =>
-        line('buy'+(i+1)+(((s.filled_buy_units||0)>i)?' ✓':''), p)).join('');
-    return `${sells}
-      <div style="border-top:2px solid #4b5563;border-bottom:2px solid #4b5563;
+         <span class="muted">${label}</span><span>${num(price,3)}</span></div>`});
+    // 渲染序自上而下价格递减: sellN..sell1 → 中枢 ref → buy1..buyM
+    const rows = [
+      ...(lad.sell||[]).map((p,i) =>
+          row('sell'+(i+1)+(((s.filled_sell_units||0)>i)?' ✓':''), p)).reverse(),
+      {p: s.ref, h: `<div style="border-top:2px solid #4b5563;
+                  border-bottom:2px solid #4b5563;
                   margin:4px 0;padding:2px 0;display:flex;
                   justify-content:space-between">
-        <b>中枢 ref</b><b>${num(s.ref,3)}</b></div>
-      ${buys}`;
+        <b>中枢 ref</b><b>${num(s.ref,3)}</b></div>`},
+      ...(lad.buy||[]).map((p,i) =>
+          row('buy'+(i+1)+(((s.filled_buy_units||0)>i)?' ✓':''), p)),
+    ];
+    if(s.last != null){
+      // 现价插位: 插到第一个"价格 ≤ 现价"的档位之前(即它在阶梯上的真实位置);
+      // 无此档位 = 现价低于全部买入档 → 排到最后
+      let at = rows.findIndex(r => r.p != null && Number(r.p) <= Number(s.last));
+      if(at < 0) at = rows.length;
+      rows.splice(at, 0, {h:
+        `<div style="display:flex;justify-content:space-between;
+                  background:#3b3320;border-left:3px solid #facc15;
+                  border-radius:3px;padding:2px 6px;margin:2px 0;font-weight:700">
+          <span>▶ 现价</span><span>${num(s.last,3)}</span></div>`});
+    }
+    return rows.map(r => r.h).join('');
   };
   $('ladders').innerHTML = syms.map(s => `
     <div class="card">
@@ -237,12 +258,18 @@ async function load(){
 }
 
 async function post(url, body){
-  const r = await fetch(url, {method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(Object.assign({confirm:true}, body))});
-  const b = await r.json().catch(()=>({ok:false,error:'bad json'}));
-  if(!b.ok) alert('失败: ' + (b.error||''));
-  await load();
+  try{
+    const r = await fetch(url, {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        // body 在前, confirm: true 在后: 调用方无法用 body.confirm 覆盖强制确认
+        body: JSON.stringify({...body, confirm: true})});
+    const b = await r.json().catch(()=>({ok:false,error:'bad json'}));
+    if(!b.ok) alert('失败: ' + (b.error||''));
+    await load();
+  }catch(e){
+    // 写闸门操作绝不能静默失败: 网络/服务不可达时给操作者可见反馈
+    alert('写操作失败(网络异常或服务不可达): ' + url + ' — ' + ((e && e.message) || e));
+  }
 }
 function togglePause(on){
   const w = on ? '确认急停？将立刻停止一切发单。' : '确认解除急停？';
