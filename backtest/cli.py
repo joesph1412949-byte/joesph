@@ -20,7 +20,8 @@ try:
 except Exception:
     requests = None
 
-from prism.backtest import Backtester
+from shared.common import limit_ratio_for_code, with_market_suffix
+from prism.backtest import Backtester, _parse_kline_date
 from prism.engine import load_strategy
 from prism.strategies import STRATEGIES_DIR
 import prism.factors  # noqa: F401  触发因子库扫描注册
@@ -65,70 +66,92 @@ def _get_zt_index():
 
 # ---------------------------------------------------------------- QMT K线源
 
-def qmt_kline_feed(code):
-    """用 QMT 本地 K线(xtdata, 已连接的 miniQMT)拉历史日K
-    → [(date, open, high, low, close, volume), ...] 全量 OHLCV 契约。
+def _df_to_kline6(df):
+    """xtdata 日线 DataFrame → [(iso_date, open, high, low, close, volume), ...]。
 
-    优先从 zt_history 缓存读(构建后秒回, 无网络); 老缓存只存了 close →
-    退回 2 元组旧契约(volume 由 backtest 占位, 量能因子失效属预期)。
-    缓存无此股 → 单只实时拉(带完整 OHLCV)。失败 → []。
+    日期归一到 ISO(time 毫秒列 / YYYYMMDD 索引键两来源都兼容); 缺列以 close
+    兜底(结构稳定, 量能列真缺失时不臆造); 升序; 无数据 → []。
     """
-    # 优先: zt_history 缓存(全市场K线已落盘)
-    _cache = _get_zt_cache()
-    if _cache:
-        rec = _cache.get(str(code).strip().upper())
-        if rec and rec.get("dates"):
-            # 新缓存若带 volume 走全量契约; 老缓存只有 close 走旧契约
-            if rec.get("volume"):
-                return list(zip(rec["dates"],
-                                rec.get("open") or rec["close"],
-                                rec.get("high") or rec["close"],
-                                rec.get("low") or rec["close"],
-                                rec["close"], rec["volume"]))
-            return list(zip(rec["dates"], rec["close"]))
-    # 回退: 单只实时拉
+    if df is None or len(df) == 0:
+        return []
+    closes = df["close"].tolist()
+    # 日期: 新版毫秒 epoch / 旧版 YYYYMMDD 索引
+    if "time" in df.columns:
+        raw_dates = [datetime.fromtimestamp(int(t) / 1000.0)
+                     .strftime("%Y-%m-%d") for t in df["time"]]
+    else:
+        raw_dates = [str(t) for t in df.index]
+    cols = {}
+    for k in ("open", "high", "low", "volume"):
+        cols[k] = (df[k].tolist() if k in df.columns else list(closes))
+    out = []
+    for raw, o, h, l, c, v in zip(raw_dates, cols["open"], cols["high"],
+                                  cols["low"], closes, cols["volume"]):
+        dt = _iso_day(raw)
+        if dt is None:
+            continue
+        out.append((dt, float(o), float(h), float(l), float(c), float(v)))
+    out.sort(key=lambda r: r[0])
+    return out
+
+
+def _qmt_daily(code, count=400):
+    """QMT 本地日线 → 6 元组列表(全量 OHLCV, 真实成交量)。
+
+    优先读本地(get_local_data, 实测单只 ~2ms); 本地没有该股数据时补一次
+    download_history_data 再读。失败/无数据 → []。
+    """
     try:
         from xtquant import xtdata
-        s = str(code).strip().upper()
-        if "." not in s:
-            if s.startswith("6"):
-                s += ".SH"
-            else:
-                s += ".SZ"
-        xtdata.download_history_data(s, "1d")
-        df = xtdata.get_market_data_ex([], [s], period="1d",
-                                       start_time="", end_time="", count=400)
-        df = (df or {}).get(s)
-        if df is None or len(df) == 0:
-            return []
-        closes = df["close"].tolist()
-        # 日期: 新版毫秒 epoch / 旧版 YYYYMMDD 索引
-        if "time" in df.columns:
-            from datetime import datetime as _dt
-            dates = [_dt.fromtimestamp(int(t) / 1000.0).strftime("%Y-%m-%d")
-                     for t in df["time"]]
-        else:
-            dates = [str(t) for t in df.index]
-        # 全量 OHLCV: 缺列时以 close 兜底, 保证 6 元组结构稳定
-        cols = {}
-        for k in ("open", "high", "low", "volume"):
-            cols[k] = (df[k].tolist() if k in df.columns
-                       else list(closes))
-        return list(zip(dates, cols["open"], cols["high"], cols["low"],
-                        closes, cols["volume"]))
     except Exception:
         return []
+    for attempt in (0, 1):
+        try:
+            if attempt:
+                xtdata.download_history_data(code, "1d")
+            data = xtdata.get_local_data(field_list=[], stock_list=[code],
+                                         period="1d", start_time="",
+                                         end_time="", count=count)
+            df = (data or {}).get(code)
+        except Exception:
+            return []
+        out = _df_to_kline6(df)
+        if out:
+            return out
+    return []
+
+
+def qmt_kline_feed(code):
+    """QMT 日线 → [(date, open, high, low, close, volume), ...] 全量 OHLCV 契约。
+
+    两档来源(都只读 QMT 本地, 不触网):
+      1. get_local_data 本地日线 —— 含真实 open/high/low/close/**volume**
+         (F5/Y3/S2/S3 量能因子与 M6/M7/S2 形态因子的数据源);
+      2. zt_history 缓存兜底(全市场K线已落盘, QMT 停机时可用): 老缓存只存了
+         close → 退回 **2 元组旧契约**。拿不到的量**不造假**: volume 由
+         backtest 占位 1.0, 量能因子此时静默失效(不能用来评估它们)。
+    失败 → []。
+    """
+    s = with_market_suffix(code)
+    out = _qmt_daily(s)
+    if out:
+        return out
+    _cache = _get_zt_cache()
+    rec = (_cache or {}).get(s)
+    if rec and rec.get("dates"):
+        return list(zip(rec["dates"], rec["close"]))
+    return []
 
 
 def kline_feed(code):
     """K线数据源(优先 QMT 本地, 网络源回退)。
 
-    返回契约: 网络源/QMT 实时源 → [(date, open, high, low, close, volume), ...]
-    全量 OHLCV; QMT 老缓存(只存 close) → 旧 2 元组, 由 backtest 占位。
-    升序。
+    返回契约: 网络源/QMT 本地源 → [(date, open, high, low, close, volume), ...]
+    全量 OHLCV; QMT 停机且只有 zt 老缓存(只存 close) → 旧 2 元组, 由 backtest
+    占位(量能因子失效属预期, 不造假成交量)。升序。
 
     数据源链(逐级回退, 全部失败 → []):
-      1. QMT xtdata 本地K线(需 miniQMT 已连接, 最快最稳)
+      1. QMT xtdata 本地K线(需 miniQMT 已连接 / 本地日线已下载, 最快最稳)
       2. 东财 push2his(历史接口)
       3. 东财 push2(行情接口)
       4. 腾讯 ifzq.gtimg.cn(与东财无关)
@@ -261,6 +284,291 @@ def _kline_from(url, code, extra=None):
                 continue
     return out
 
+# ---------------------------------------------------------------- 按日上下文
+
+# 指数: 上证(000001.SH) 供 F6 大盘配合 + 两市成交额的一半; 深证成指(399001.SZ)
+# 另一半。两市成交额 = 两者 amount 之和(实测 8711亿 + 9680亿, 量级正确)。
+_INDEX_CODES = ("000001.SH", "399001.SZ")
+# 指数序列最多带多少根: F6 要 21 根算 MA20 → 30 根留余量, 不搬全历史。
+_SH_INDEX_BARS = 30
+# 区间前多取几天: "昨日池"(N3/N4)与近 5 日涨停家数(N1)要往前看。
+_FEED_PAD_DAYS = 20
+
+
+def _iso_day(raw):
+    """日期串(YYYY-MM-DD / YYYYMMDD) → ISO 字符串; 非法 → None。"""
+    d = _parse_kline_date(raw)
+    return d.strftime("%Y-%m-%d") if d else None
+
+
+def _calendar_days(extra=()):
+    """交易日候选(ISO 字符串, 升序): zt 索引日期 ∪ 传入日期(指数日线)。
+
+    交易日历必须来自真实数据: 用自然日回退一天会把周一误当"上一交易日"
+    (周日无池 → yesterday_codes 空 → N3/N4 假阴性)。
+    """
+    days = set()
+    for key in (_get_zt_index() or {}):
+        iso = _iso_day(key)
+        if iso:
+            days.add(iso)
+    for raw in extra or ():
+        iso = _iso_day(raw)
+        if iso:
+            days.add(iso)
+    return sorted(days)
+
+
+def _df_to_index_rows(df):
+    """指数日线 DataFrame → [(iso_date, close, volume, amount)] 升序。
+
+    日期两来源都**归一成 ISO**: 'time' 毫秒列(取全字段时才有) / 索引键
+    (get_local_data 收窄 field_list 后不带 time 列, 索引是 "YYYYMMDD")。
+    必须归一 —— 逐日切片是字符串比较, "20260904" > "2026-09-04" 会被
+    _upto 整段滤掉, sh_index_kline 与两市成交额双双静默为空(F6/N5 恒 0;
+    2026-09-16 本地实跑抓到过一次)。无数据/脏行 → 空/丢弃。
+    """
+    if df is None or len(df) == 0:
+        return []
+    if "time" in df.columns:
+        raw_dates = [datetime.fromtimestamp(int(t) / 1000.0)
+                     .strftime("%Y-%m-%d") for t in df["time"]]
+    else:
+        raw_dates = [str(t) for t in df.index]
+    closes = df["close"].tolist()
+    vols = (df["volume"].tolist() if "volume" in df.columns
+            else [None] * len(closes))
+    amts = (df["amount"].tolist() if "amount" in df.columns
+            else [None] * len(closes))
+    out = []
+    for raw, c, v, a in zip(raw_dates, closes, vols, amts):
+        dt = _iso_day(raw)
+        if dt is None:
+            continue
+        try:
+            out.append((dt, float(c),
+                        float(v) if v is not None else None,
+                        float(a) if a is not None else None))
+        except (TypeError, ValueError):
+            continue
+    out.sort(key=lambda r: r[0])
+    return out
+
+
+def _index_daily(code, start, end):
+    """指数日线 → [(iso_date, close, volume, amount)] 升序; 失败/无数据 → []。
+
+    amount 供 N5 两市成交额; close/volume 供 F6(MA20 + 连两日放量)。
+    """
+    try:
+        from xtquant import xtdata
+    except Exception:
+        return []
+    try:
+        xtdata.download_history_data(code, "1d", start, end)
+        data = xtdata.get_local_data(
+            field_list=["close", "volume", "amount"], stock_list=[code],
+            period="1d", start_time=start, end_time=end, count=-1)
+        df = (data or {}).get(code)
+    except Exception:
+        return []
+    return _df_to_index_rows(df)
+
+
+def _iso_kline(rows):
+    """kline_feed 元组列表 → [(iso_date, o, h, l, c, volume|None)] 升序。
+
+    契约三档按长度识别(与 prism.backtest._stock_ctx 同一套规则); 日期归一到
+    ISO(逐日切片靠字符串比较)。脏行丢弃。
+    """
+    out = []
+    for row in rows or []:
+        dt = _iso_day(row[0] if row else None)
+        if dt is None:
+            continue
+        try:
+            if len(row) >= 6:
+                o, h, l, c = (float(row[1]), float(row[2]), float(row[3]),
+                              float(row[4]))
+                v = float(row[5])
+            else:
+                c = float(row[1])
+                o = h = l = c
+                v = None            # 旧契约没有成交量 → None(不占位 1.0)
+        except (TypeError, ValueError, IndexError):
+            continue
+        out.append((dt, o, h, l, c, v))
+    out.sort(key=lambda r: r[0])
+    return out
+
+
+def _upto(rows, d8):
+    """升序日期序列 → 只留 date <= d8 的前缀(防未来函数)。无 → []。"""
+    return [r for r in (rows or []) if r and r[0] <= d8]
+
+
+def _batch_klines(codes):
+    """池内股票日K {code: [(iso,o,h,l,c,v)...]}。
+
+    逐只读 QMT 本地日线(实测 ~1ms/只; 本地没有才补一次单只 download)。
+    **不做批量 download_history_data2**: 实测空窗口批量下载 1000+ 只要 100s+
+    (等于全历史重拉), 收紧窗口也要 66s —— 本地日线本来就在(zt 缓存与
+    守护刷新都已落盘), 白等。失败/无数据的股票不进结果(缺即缺, 不造假)。
+    """
+    out = {}
+    for code in codes:
+        # QMT 只认带后缀代码; 键保持池条目原样(东财兜底池给的是裸 6 位码),
+        # 否则 _day_payload 按池 code 取 klines 会全空(F1 又变恒 0)。
+        qmt_code = with_market_suffix(code)
+        rows = _iso_kline(_qmt_daily(qmt_code))
+        # 本地没有 → 退回 zt 缓存(可能只有 close) → 至少 last/last_close 可用
+        if not rows:
+            rec = (_get_zt_cache() or {}).get(qmt_code)
+            if rec and rec.get("dates"):
+                rows = _iso_kline(list(zip(rec["dates"], rec["close"])))
+        if rows:
+            out[code] = rows
+    return out
+
+
+def _float_volumes(codes):
+    """QMT 流通股本 {code: 股}(缺/失败 → 不放键)。口径同实盘 data.py。"""
+    try:
+        from xtquant import xtdata
+    except Exception:
+        return {}
+    out = {}
+    for code in codes:
+        try:
+            det = xtdata.get_instrument_detail(code) or {}
+            fv = det.get("FloatVolume")
+            if fv:
+                out[code] = float(fv)
+        except Exception:
+            continue
+    return out
+
+
+def _day_payload(d, pools, cal, klines, floats, indices):
+    """单日市场/个股上下文(纯函数, 无 IO) → 规格 §4 的 day_feed 载荷。
+
+    d: 决策日(date); pools: {date: 涨停池 [{code, boards}]}(含区间前几日,
+    用来算"昨日池"); cal: 交易日(date, 升序); klines: {code: [(iso,...)...]};
+    floats: {code: 流通股本}; indices: {指数代码: [(iso, close, vol, amount)]}。
+    只读 <= d 的数据(指数/个股序列都按日切片), 无未来函数。
+    """
+    d8 = d.strftime("%Y-%m-%d")
+    pool = pools.get(d) or []
+    pos = cal.index(d) if d in cal else None
+    prev_pool = (pools.get(cal[pos - 1]) or []) if pos else []
+    # 逐日涨停家数(池子合成, 与 N1 的 daily_counts 同源): 含当日, 取近 11 天
+    hist = cal[max(0, pos + 1 - 11):pos + 1] if pos is not None else [d]
+    counts = [(x.strftime("%Y-%m-%d"), len(pools.get(x) or [])) for x in hist]
+    prev_counts = [c for _x, c in counts[:-1]][-5:][::-1]   # 近→远, 与东财同序
+
+    # ---- 个股: 当日收盘 / 昨收 / 涨停价 / 流通股本(只回看 <= d 的K线) ----
+    stock = {}
+    for s in pool:
+        code = s.get("code")
+        rows = _upto(klines.get(code), d8)
+        if len(rows) < 2:
+            continue        # 无昨收 → 算不出涨停价, 宁缺勿假
+        close, prev_close = rows[-1][4], rows[-2][4]
+        if not close or not prev_close or close <= 0 or prev_close <= 0:
+            continue
+        item = {"last": close, "last_close": prev_close,
+                # 涨停价 = 昨收 ×(1+档位), 四舍五入两位(同 zt_history 口径)
+                "up_price": round(prev_close
+                                  * (1 + limit_ratio_for_code(code)), 2)}
+        fv = (floats or {}).get(code)
+        if fv:
+            item["float_vol"] = float(fv)
+            item["float_mv"] = float(fv) * close     # 同实盘口径: 股本 × 现价
+        stock[code] = item
+
+    # ---- 门控 em: 今日最高连板 + 昨日池(N3/N4 口径同东财 get_market_stats) ----
+    em = {"max_boards": max([int(s.get("boards") or 0) for s in pool],
+                            default=0),
+          "yesterday_codes": [s.get("code") for s in prev_pool
+                              if s.get("code")],
+          "yesterday_boards": [s.get("code") for s in prev_pool
+                               if s.get("code")
+                               and int(s.get("boards") or 0) >= 2]}
+    if len(prev_counts) >= 3:      # 不足 3 天视为不可用(与东财 stats 同口径)
+        em["daily_counts"] = prev_counts
+
+    # ---- ticks: 指数条只带 amount(N5 求和), 池内股只带 lastPrice/lastClose(N3)
+    #      —— 池内股**不带 amount**: 个股成交额已含在两市成交额里, 再叠加会重复计算。
+    ticks = {}
+    for code in _INDEX_CODES:
+        rows = _upto((indices or {}).get(code), d8)
+        if rows and rows[-1][3]:
+            ticks[code] = {"amount": rows[-1][3]}
+    for code, item in stock.items():
+        ticks[code] = {"lastPrice": item["last"],
+                       "lastClose": item["last_close"]}
+
+    # ---- 指数序列: 上证 30 根(≤d) 供 F6; 涨停家数序列供 N1 兜底 ----
+    sh = _upto((indices or {}).get("000001.SH"), d8)[-_SH_INDEX_BARS:]
+    return {"em": em, "ticks": ticks,
+            "index_kline": [(x, c) for x, c in counts],
+            "sh_index_kline": [(x, c, v) for x, c, v, _a in sh],
+            "stock": stock}
+
+
+def build_day_feed(start, end, *, use_intraday=False, progress=None):
+    """装配回测的按日上下文 → day_feed(d) -> dict|None(规格 2026-09-16 §4)。
+
+    每字段都只含 <= 当日的本地数据(QMT 日线 + zt 涨停池历史), 防未来函数由
+    _day_payload 的逐日切片保证。区间外的日子返回 None → run() 退回静态参数。
+
+    use_intraday: 1 分钟特征层(封板时间/封单代理, Task 2 实现) —— 本版只保留
+    接口, 传 True 暂不改变输出。
+    progress(done, total): 逐日装配进度回调(可选)。
+    QMT 离线且无 zt 索引(无交易日历) → 返回恒 None 的 callable(等于不注入,
+    静态参数照常生效), 并打印一行原因(不静默)。
+    """
+    lo = (start - timedelta(days=_FEED_PAD_DAYS)).strftime("%Y%m%d")
+    hi = end.strftime("%Y%m%d")
+    indices = {c: _index_daily(c, lo, hi) for c in _INDEX_CODES}
+    lo_iso = (start - timedelta(days=_FEED_PAD_DAYS)).strftime("%Y-%m-%d")
+    hi_iso = end.strftime("%Y-%m-%d")
+    cal = [x for x in _calendar_days(
+        [r[0] for rows in indices.values() for r in rows])
+        if lo_iso <= x <= hi_iso]
+    if not cal:
+        print("警告: 按日上下文无法装配(无涨停池索引也无指数日线) → "
+              "N3/N4/N5/F1/F6 仍按静态参数空转", file=sys.stderr)
+        return lambda d: None
+    cal_dates = [_parse_kline_date(x) for x in cal]
+    pools = {}
+    for x, dd in zip(cal, cal_dates):
+        try:
+            pools[dd] = zt_feed(x.replace("-", "")) or []
+        except Exception:
+            pools[dd] = []
+    codes = sorted({s.get("code") for p in pools.values() for s in p
+                    if s.get("code")})
+    klines = _batch_klines(codes)
+    floats = _float_volumes(codes)
+    start_iso = start.strftime("%Y-%m-%d")
+    ctx_by_day = {}
+    for i, (x, dd) in enumerate(zip(cal, cal_dates)):
+        if progress:
+            progress(i + 1, len(cal))
+        if x < start_iso:
+            continue        # 区间外的日子只用于"昨日池"/近5日家数
+        ctx_by_day[x] = _day_payload(dd, pools, cal_dates, klines, floats,
+                                     indices)
+    n_idx = sum(1 for c in _INDEX_CODES if indices.get(c))
+    print("按日上下文: %d 天 / 池内股 %d 只(有日线 %d) / 指数 %d/2 / "
+          "1m特征%s" % (
+              len(ctx_by_day), len(codes), len(klines), n_idx,
+              "未实现(Task2, use_intraday 本次不生效)" if use_intraday
+              else "未启用"), file=sys.stderr)
+    return lambda d: ctx_by_day.get(d.strftime("%Y-%m-%d"))
+
+
 # ---------------------------------------------------------------- main
 
 def _parse_date(s):
@@ -311,9 +619,10 @@ def main():
                     help="运行样本外验证(前后半段对比, 防过拟合)")
     ap.add_argument("--no-market-data", dest="use_market_data",
                     action="store_false",
-                    help="不注入市场数据缓存(mkt/sector_map)。默认注入 —— "
-                         "否则 N6-N8/F8/F9/SEC1-4/SEC6 共 10 个因子静默失效, "
-                         "回测结果不能用来评估它们")
+                    help="不注入市场数据缓存(mkt/sector_map)与按日上下文"
+                         "(day_feed)。默认注入 —— 否则 N6-N8/F8/F9/SEC1-4/SEC6 "
+                         "共 10 个因子静默失效, 且 N3/N4/N5/F1/F6 拿不到逐日"
+                         "快照(回测结果不能用来评估它们)")
     args = ap.parse_args()
 
     start = _parse_date(args.start)
@@ -340,6 +649,7 @@ def main():
 
     mkt = None
     sector_map = None
+    day_feed = None
     if args.use_market_data:
         mkt, sector_map, md_note = load_market_data()
         if md_note:
@@ -348,14 +658,20 @@ def main():
             print("市场数据注入: 板块 %d, 全球指数 %d, 个股映射 %d" % (
                 len(mkt["sector"]), len(mkt["global"]), len(sector_map)),
                 file=sys.stderr)
+        # 按日上下文(N3/N4/N5/F1/F6 需要逐日快照; 静态参数只有一份)
+        def _feed_progress(done, total):
+            if done % 50 == 0:
+                print("  装配按日上下文 %d/%d" % (done, total), file=sys.stderr)
+
+        day_feed = build_day_feed(start, end, progress=_feed_progress)
 
     if args.oos:
         res = bt.run_oos(start, end, sell_rules=sell or None, progress=progress,
-                         mkt=mkt, sector_map=sector_map)
+                         mkt=mkt, sector_map=sector_map, day_feed=day_feed)
         print(json.dumps(res, ensure_ascii=False, indent=2, default=str))
     else:
         rep = bt.run(start, end, sell_rules=sell or None, progress=progress,
-                     mkt=mkt, sector_map=sector_map)
+                     mkt=mkt, sector_map=sector_map, day_feed=day_feed)
         print(json.dumps(rep, ensure_ascii=False, indent=2, default=str))
     return 0
 

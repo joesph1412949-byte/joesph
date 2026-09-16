@@ -8,7 +8,7 @@
 
 数据源注入(测试用假实现 / 东财 backtest_cli):
   zt_feed(date_str) -> [{code, boards, theme}, ...]   当日涨停池
-  kline_feed(code)  -> [(date_str, close), ...]       该股日K线(升序)
+  kline_feed(code)  -> [(date_str, open, high, low, close, volume), ...]  该股日K(升序)
 
 回测数据适配层(审查 I1, 让真实因子可在回测命中):
   - kline_feed 的元组列表组装成 DataFrame(close/volume/open/high/low,
@@ -19,6 +19,11 @@
     依赖这些数据的门槛因子得 0 并记入报告 gate_notes 供诊断。
   - run() 默认采用策略配置的 sell_rules(策略 JSON 是唯一策略描述),
     显式传入的 sell_rules 参数优先覆盖。
+
+按日注入(规格 2026-09-16 §4, 复活 N3/N4/N5/F1/F6):
+  静态 em/ticks/mkt 参数是全程同一份, 而 N3/N4/N5/F6/F1 需要逐日快照。
+  run(..., day_feed=None) 新增按日上下文: day_feed(d) -> dict|None, 键见
+  run() docstring。静态参数仍生效(day_feed 缺键/未注入时兜底), 旧调用不受影响。
 
 注意: 回测里用到的因子必须在 registry 注册(测试用 @factor 装饰器注入
 N1/A1 等假因子); 引擎不依赖 prism.factors 的真实因子(它们需要真实行情,
@@ -58,6 +63,61 @@ def _parse_kline_date(raw):
         return date(int(s[:4]), int(s[4:6]), int(s[6:8]))
     except ValueError:
         return None
+
+
+def _row_date(row):
+    """K线行 → (原始日期串, date); 结构非法(空元组/非序列) → (None, None)。"""
+    try:
+        raw = row[0]
+    except (TypeError, IndexError):
+        return None, None
+    return raw, _parse_kline_date(raw)
+
+
+def _kline_close(row):
+    """K线行 → 收盘价(按元组长度识别三档契约, 与 _stock_ctx 同一套规则)。
+
+    2/3 元组 [1]=close; 6 元组 [4]=close —— **6 元组的 [1] 是开盘价**,
+    盲取 [1] 会把成交价静默变成开盘价(买入口径=选股日收盘, 用户已拍板)。
+    结构非法/非数值 → None(调用方跳过)。
+    """
+    try:
+        return float(row[4]) if len(row) >= 6 else float(row[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _as_index_df(idx):
+    """指数K线 → 供 N1/F6 按 idx["close"]/idx["volume"] 访问的 DataFrame。
+
+    已是 DataFrame(实盘路径 ds.get_index_kline 的返回值) → 原样透传;
+    [(date, close[, volume])] 元组列表(build_day_feed 的契约) → 构 DataFrame。
+    无 volume 列时补一列 NaN 而非留空: F6 的"连两日放量"分支自然为 False,
+    不会因 KeyError 被整段 except 吞掉(那会把"站上20日线"也误判为 0)。
+    """
+    if idx is None or hasattr(idx, "columns"):
+        return idx
+    rows = []
+    for row in idx or []:
+        try:
+            dt = str(row[0])
+            close = float(row[1])
+            vol = float(row[2]) if len(row) > 2 else float("nan")
+        except (TypeError, ValueError, IndexError):
+            continue
+        rows.append((dt, close, vol))
+    if not rows:
+        return None
+    return pd.DataFrame({"close": [r[1] for r in rows],
+                         "volume": [r[2] for r in rows]},
+                        index=[r[0] for r in rows])
+
+
+def _day_field(day_ctx, key, static):
+    """按日上下文取字段: 缺键/值为 None → 静态参数兜底(向后兼容旧调用)。"""
+    val = day_ctx.get(key)
+    return static if val is None else val
+
 
 # 门槛因子 → 依赖的回测可注入数据源(缺失时该因子无法命中, 记入 gate_notes)。
 # 不在表内的门槛因子(如 N1/N2 兜底靠池子即可算)不归因数据缺失。
@@ -192,7 +252,8 @@ class Backtester:
 
     # ---------------- 选股(复用 engine) ----------------
     def _stock_ctx(self, code, kline, mkt=None, sector_map=None,
-                   limit_ups=None, fund=None):
+                   limit_ups=None, fund=None, stock_extra=None,
+                   index_kline=None, sh_index_kline=None):
         """回测环境的股票上下文(只用回测可得的字段)。
 
         kline_feed 元组 → DataFrame(open/high/low/close/volume, 日期做行索引),
@@ -207,6 +268,15 @@ class Backtester:
         是"静默失效"而非"不命中", 回测结果不能用来评估这些因子。
         mkt: 市场数据层快照(供 SEC 板块因子), 注入 ctx._extra["mkt"]。
         sector_map: code → 行业板块代码(供 SEC 因子查个股所属板块)。
+        stock_extra: 按日注入的个股字段(day_feed["stock"][code], 规格 §4):
+          sealed/tick/up_price/last/last_close/float_vol/float_mv (+ fund);
+          值为 None 的键**不覆盖**(缺数据不造假); 表内没有的键(如 Task2 的
+          bt_seal_ratio)落 ctx._extra, 因子用 ctx.get(name) 取。
+        index_kline: 涨停指数(880368 语义, N1 兜底 ≥6 根)。
+        sh_index_kline: 上证指数(000001.SH, F6 需 ≥21 根) —— 与前者语义不同,
+          必须分开传(实盘同款区分见 prism/data.py)。
+        两个指数参数都接受 DataFrame(实盘)或 [(date, close[, volume])] 元组列表
+        (day_feed), 由 _as_index_df 归一。
         """
         rows = []
         for row in kline or []:
@@ -236,6 +306,19 @@ class Backtester:
             extra["sector_map"] = sector_map
         if limit_ups is not None:
             extra["limit_ups"] = limit_ups
+        idx_df = _as_index_df(index_kline)
+        if idx_df is not None:
+            extra["index_kline"] = idx_df
+        sh_df = _as_index_df(sh_index_kline)
+        if sh_df is not None:
+            extra["sh_index_kline"] = sh_df    # FactorContext 无此形参 → 落 _extra
+        for k, v in (stock_extra or {}).items():
+            if v is None:
+                continue                        # 缺数据不覆盖(宁缺勿假)
+            if k == "fund":
+                fund = v
+            else:
+                extra[k] = v
         if fund is not None:
             extra["fund"] = fund
         if not rows:
@@ -250,7 +333,8 @@ class Backtester:
         return FactorContext(code=code, kline=df, **extra)
 
     def _pick(self, pool, asof, em=None, ticks=None, mkt=None, sector_map=None,
-              prev_pool=None):
+              prev_pool=None, index_kline=None, sh_index_kline=None,
+              stock_extra=None):
         """用策略引擎对当日涨停池选股。返回 [(code, boards, theme, composite,
         sec_score), ...](sec_score: 板块综合评分, 评分关闭/无数据时 None)。
 
@@ -268,6 +352,8 @@ class Backtester:
         (只传入 asof 当日及之前的数据); 未注入时依赖这些数据的门槛因子得 0
         (见 _gate_notes 归因)。
         prev_pool: 上一有效交易日涨停池, 注入 mkt['zt_prev'] 供 F9。
+        index_kline/sh_index_kline/stock_extra: 按日注入(规格 §4), 由 run()
+        从 day_feed(d) 拆分传入; 直接调本方法时缺省 None(等同旧行为)。
         """
         gate = self.strategy.get("market_gate") or {}
         gate_fids = gate.get("factors", [])
@@ -290,8 +376,14 @@ class Backtester:
         sec_scores = (sector_score.compute_scores(mkt_sliced)
                       if score_cfg["enabled"] else {})
         mkt_extra = {"mkt": mkt_sliced}
+        idx_df = _as_index_df(index_kline)
+        sh_df = _as_index_df(sh_index_kline)
         market_ctx = FactorContext(code="__MKT__", limit_ups=pool_ctx,
-                                   em=em or {}, ticks=ticks or {}, **mkt_extra)
+                                   em=em or {}, ticks=ticks or {},
+                                   index_kline=idx_df, **mkt_extra)
+        if sh_df is not None:
+            # 与实盘 build_market_context 同款: sh_index_kline 走 _extra
+            market_ctx._extra["sh_index_kline"] = sh_df
         for fid in gate_fids:
             meta = reg.get_factor(fid)
             try:
@@ -309,14 +401,21 @@ class Backtester:
         for s in pool:
             code = s["code"]
             kline_full = self._kline_for(code)
-            # 防未来函数: 只保留 <= asof 的K线(选股日当天及之前)
-            kline = [(dt, px) for dt, px in kline_full
-                     if _parse_kline_date(dt) is not None
-                     and _parse_kline_date(dt) <= asof]
+            # 防未来函数: 只保留 <= asof 的K线(选股日当天及之前)。
+            # 整行保留(不塌成 (date, close)) —— 6 元组契约下 volume/open/high/low
+            # 是量能与形态因子的数据源, 塌成两元组会让它们静默失效。
+            kline = []
+            for row in kline_full:
+                _raw, dt = _row_date(row)
+                if dt is not None and dt <= asof:
+                    kline.append(row)
+            stock = (stock_extra or {}).get(code) or {}
+            fund = stock.get("fund") or self._fund_for(
+                code, asof, stock.get("float_mv") or s.get("float_mv"))
             ctx = self._stock_ctx(code, kline, mkt_sliced, sector_map,
-                                  limit_ups=pool_ctx,
-                                  fund=self._fund_for(code, asof,
-                                                      s.get("float_mv")))
+                                  limit_ups=pool_ctx, fund=fund,
+                                  stock_extra=stock, index_kline=idx_df,
+                                  sh_index_kline=sh_df)
             scores = compute_model_scores(ctx, self.strategy)
             best = max([scores[m["id"]]
                         for m in self.strategy["scoring_models"]], default=0)
@@ -384,7 +483,7 @@ class Backtester:
 
     # ---------------- 主流程 ----------------
     def run(self, start_date, end_date, sell_rules=None, progress=None,
-            em=None, ticks=None, mkt=None, sector_map=None):
+            em=None, ticks=None, mkt=None, sector_map=None, day_feed=None):
         """回放 [start_date, end_date]。返回报告 dict(与旧 backtest 同构)。
 
         sell_rules: {take_profit_pct, stop_loss_pct, max_hold_days},
@@ -392,10 +491,19 @@ class Backtester:
         (审查 I1: 策略 JSON 是唯一策略描述, 不再硬编码默认值), 配置也缺时
         回退默认(止盈8%/止损5%/持有5天)。
         em/ticks: 可注入的市场数据(供 N3/N5 等节点因子), 缺省 None →
-        依赖它们的门槛因子得 0 并记入报告 gate_notes。
+        依赖它们的门槛因子得 0 并记入报告 gate_notes。**静态: 全程同一份**,
+        需要逐日快照(连板/晋级率/成交额随日变)时用 day_feed。
         mkt: 市场数据层快照(供 SEC 板块因子)。防未来函数由调用方保证——
         只传 asof 当日及之前的数据; 每次 _pick 应传当日的 asof 切片。
         sector_map: code → 行业板块代码(供 SEC 因子, 需与 mkt 配对)。
+        day_feed: 按日上下文注入(规格 2026-09-16 §4), day_feed(d) -> dict|None,
+        键(全部可选):
+          em / ticks / index_kline / sh_index_kline / stock
+        其中 stock = {code: {sealed, tick, up_price, last, last_close,
+        float_vol, float_mv, fund}}。每日取一次, 同名键优先于上面的静态
+        参数; 缺键/返回 None → 退回静态参数(旧调用与旧测试不受影响)。
+        防未来函数由调用方保证: 只放 <= 当日的快照(backtest.cli.
+        build_day_feed 已按日切片)。
         策略开启 sector_score(v5)时: 板块评分 >threshold 才买(fail-closed),
         trade 记 sector_score/pos_mult, 单笔投入按 pos_mult 放大。
         """
@@ -405,10 +513,13 @@ class Backtester:
         cfg_rules.update(self.strategy.get("sell_rules") or {})
         rules = dict(cfg_rules, **(sell_rules or {}))
         score_cfg = sector_score.load_config(self.strategy)
-        gate_notes = self._gate_notes(em, ticks)
         trades = []
         dates = []
         self._filter_stats = self._new_filter_stats()   # 每次 run 重置诊断计数
+        # gate_notes 归因用: 未注入 em/ticks 时才提示缺数据。按日注入时以
+        # "当日实际给到过"为准(静态参数全 None 但 day_feed 天天给 em 时,
+        # 不该再报"缺 em 数据")。
+        note_em, note_ticks = em, ticks
         # 第一步: 预取区间内全部涨停股K线(并发 + 缓存), 避免逐日串行请求
         all_codes = set()
         d = start_date
@@ -425,13 +536,23 @@ class Backtester:
         while d <= end_date:
             if progress:
                 progress(d)
+            day_ctx = (day_feed(d) or {}) if day_feed else {}
+            if day_ctx.get("em"):
+                note_em = day_ctx["em"]
+            if day_ctx.get("ticks"):
+                note_ticks = day_ctx["ticks"]
             pool = self._pool_for(d)
             if pool:
                 dates.append(d)
                 self._filter_stats["days"] += 1
                 for code, boards, theme, composite, sec_score in self._pick(
-                        pool, asof=d, em=em, ticks=ticks, mkt=mkt,
-                        sector_map=sector_map, prev_pool=prev_pool):
+                        pool, asof=d,
+                        em=_day_field(day_ctx, "em", em),
+                        ticks=_day_field(day_ctx, "ticks", ticks),
+                        mkt=mkt, sector_map=sector_map, prev_pool=prev_pool,
+                        index_kline=day_ctx.get("index_kline"),
+                        sh_index_kline=day_ctx.get("sh_index_kline"),
+                        stock_extra=day_ctx.get("stock")):
                     kline = self._kline_for(code)
                     tr = self._simulate_trade(code, kline, d, rules)
                     if tr:
@@ -452,6 +573,7 @@ class Backtester:
                         })
                 prev_pool = pool   # 今日池成为下一有效交易日的"昨日池"
             d += timedelta(days=1)
+        gate_notes = self._gate_notes(note_em, note_ticks)
         # 净值模拟: 资金约束下的净值曲线 → 总收益/回撤/夏普(真实口径)
         curve, skipped = self._simulate_equity(trades)
         eq_stats = self._equity_stats(curve, self.initial_capital)
@@ -465,19 +587,21 @@ class Backtester:
 
         卖出判定复用 exit_rules.ExitRule(止损 > 止盈 > 持有期满),
         以含滑点的买入价为成本基准; 卖出价减滑点; 手续费双向。
+        价格统一走 _kline_close(契约三档): 6 元组的 [1] 是开盘价,
+        买入口径必须是**收盘价**(用户拍板)。
         返回 (entry, exit, return_pct) 或 None(无法成交)。
         """
         if not kline:
             return None
         idx = None
-        for i, (dt, _c) in enumerate(kline):
-            d_parsed = _parse_kline_date(dt)
+        for i, row in enumerate(kline):
+            _raw, d_parsed = _row_date(row)
             if d_parsed is not None and d_parsed >= entry_date:
                 idx = i
                 break
         if idx is None:
             return None
-        entry_close = kline[idx][1]
+        entry_close = _kline_close(kline[idx])
         if not entry_close:
             return None
         # 买入: 收盘价 + 滑点
@@ -491,9 +615,10 @@ class Backtester:
         exit_date = None
         peak_pct = 0.0          # 持有期内最高浮盈(相对买入价)
         for j in range(idx + 1, len(kline)):
-            dt_raw, px = kline[j]
-            today = _parse_kline_date(dt_raw)
-            if today is None:
+            row = kline[j]
+            _raw, today = _row_date(row)
+            px = _kline_close(row)
+            if today is None or px is None:
                 continue
             rule = ExitRule(code, code, buy_price, entry_date, today=today,
                             **rule_kwargs)
@@ -678,14 +803,14 @@ class Backtester:
     # ---------------- 防过拟合: 样本外验证 ----------------
     def run_oos(self, start_date, end_date, split_ratio=0.5,
                 sell_rules=None, progress=None, em=None, ticks=None,
-                mkt=None, sector_map=None):
+                mkt=None, sector_map=None, day_feed=None):
         """样本外验证(Out-of-Sample): 把区间按时间切成两段,
         前段(样本内)回测 + 后段(样本外)回测, 对比两者绩效。
 
         防过拟合逻辑: 若策略只在样本内好、样本外崩, 说明过拟合了参数;
         样本外绩效与样本内接近(或不明显恶化)才算稳健。
         返回 {in_sample: 报告, out_sample: 报告, verdict: 判语}。
-        em/ticks/mkt/sector_map: 透传给 run(与 run 语义一致)。
+        em/ticks/mkt/sector_map/day_feed: 透传给 run(与 run 语义一致)。
         """
         total = (end_date - start_date).days
         if total < 6:
@@ -693,10 +818,11 @@ class Backtester:
         split = start_date + timedelta(days=int(total * split_ratio))
         ins = self.run(start_date, split, sell_rules=sell_rules,
                        progress=progress, em=em, ticks=ticks,
-                       mkt=mkt, sector_map=sector_map)
+                       mkt=mkt, sector_map=sector_map, day_feed=day_feed)
         oos = self.run(split + timedelta(days=1), end_date,
                        sell_rules=sell_rules, progress=progress,
-                       em=em, ticks=ticks, mkt=mkt, sector_map=sector_map)
+                       em=em, ticks=ticks, mkt=mkt, sector_map=sector_map,
+                       day_feed=day_feed)
         # 判语: 样本外有交易 且 样本外均值收益不为负 → 稳健; 否则警告
         verdict = "稳健(样本外仍有正收益)"
         if not oos.get("trades"):
