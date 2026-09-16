@@ -381,6 +381,74 @@ def test_read_history_survives_corrupt_archive(tmp_path):
     assert Ledger.read_history(tmp_path / "tt_state.json") == []
 
 
+# ---------------- §B 回归修复(findings 1-2) ----------------
+
+def test_same_day_version_mismatch_preserves_original_file(tmp_path):
+    """同日仅版本不符: 不归档, 但也不准就地覆盖 —— 原账本须改名留档。
+
+    场景: 收盘后升版重启(正常发版窗口)或手工改过 state 文件。曾直接
+    _empty_state + save 把原始数据盖掉, 于是第二天无料可归档, 当天在
+    history 里彻底消失且不可恢复。
+    """
+    p = tmp_path / "tt_state.json"
+    original = {
+        "version": 2, "date": "2026-09-14",              # 同日, 仅版本不符
+        "updated_at": "2026-09-14T15:00:00",
+        "symbols": {"600900.SH": {"sold_today": 800, "bought_today": 300,
+                                  "trips": 1, "realized_pnl": 120.0}},
+        "events": [{"hhmm": "10:00", "code": "600900.SH", "side": "SELL"}],
+    }
+    p.write_text(json.dumps(original), encoding="utf-8")
+
+    led = Ledger(path=p, now_fn=lambda: datetime(2026, 9, 14, 15, 10))
+    led.load()
+
+    bak = tmp_path / "tt_state.json.pre-v2-2026-09-14.bak"
+    assert bak.exists(), "同日版本不符的账本被直接覆盖, 原始数据丢失"
+    assert json.loads(bak.read_text(encoding="utf-8")) == original
+    assert led.state["date"] == "2026-09-14"             # 照常重置为新账本
+    assert led.state["symbols"] == {}
+    assert _hist_rows(tmp_path) == []                    # 今天没被钉上半日行
+
+
+def test_preserve_failure_does_not_block_load(tmp_path, monkeypatch):
+    """留档失败(盘满/无权限)只能丢备份, 绝不许拦住账本载入 —— 与归档同款 fail-safe。"""
+    p = tmp_path / "tt_state.json"
+    p.write_text(json.dumps({
+        "version": 2, "date": "2026-09-14",
+        "symbols": {"600900.SH": {"sold_today": 800}}, "events": [],
+    }), encoding="utf-8")
+
+    def boom(self, target):
+        raise RuntimeError("disk full")        # 非 OSError: load 外层不会顺手吞掉
+    monkeypatch.setattr(type(p), "replace", boom)
+
+    led = Ledger(path=p, now_fn=lambda: datetime(2026, 9, 14, 15, 10))
+    led.load()                                           # 不抛异常
+    assert led.state["date"] == "2026-09-14"
+    assert led.state["symbols"] == {}
+
+
+def test_archived_dates_ignore_scalar_line(tmp_path, now_fn):
+    """归档文件混入标量行不得毒掉整个日期集合 —— 否则已归档日被写第二遍。"""
+    (tmp_path / "tt_history.jsonl").write_text(
+        '{"date": "2026-09-14", "sold_total": 100}\n5\n', encoding="utf-8")
+    led = Ledger(path=tmp_path / "tt_state.json", now_fn=now_fn)
+    led.load()
+    led.record_fill("600900.SH", "SELL", 28.5, 100, hhmm="10:00", reason="档位1")
+    assert led.archive_current() is False
+    assert len((tmp_path / "tt_history.jsonl").read_text(
+        encoding="utf-8").strip().splitlines()) == 2     # 没多写第二行
+
+
+def test_read_history_skips_scalar_line(tmp_path):
+    """read_history 遇到标量行只跳过该行, 不整份丢弃。"""
+    (tmp_path / "tt_history.jsonl").write_text(
+        '5\nnull\n{"date": "2026-09-14", "sold_total": 100}\n', encoding="utf-8")
+    rows = Ledger.read_history(tmp_path / "tt_state.json")
+    assert len(rows) == 1 and rows[0]["date"] == "2026-09-14"
+
+
 def test_archive_row_payload_values(tmp_path):
     """归档行的字段值须与账本事实一致(仪表盘收益曲线直接消费这些值)。"""
     led = Ledger(path=tmp_path / "tt_state.json",

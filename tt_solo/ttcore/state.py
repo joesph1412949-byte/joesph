@@ -85,7 +85,8 @@ class Ledger:
     # ---------------- 载入 / 重置 ----------------
 
     def load(self):
-        """读盘。跨日 / 损坏 / 版本不符 → 先归档旧账本, 再重置为新日账本。"""
+        """读盘。跨日 → 先归档旧账本; 同日的版本/结构不符 → 改名留档;
+        损坏 → 直接重置。两者都不让存量数据凭空消失, 再重置为新日账本。"""
         today = _today_str(self.now_fn())
         if self.path and Path(self.path).exists():
             try:
@@ -98,14 +99,20 @@ class Ledger:
                     self.state = raw
                     self._loaded = True
                     return self.state
-                # 旧日/旧版本: 先把存量数据归档, 否则永久丢失。
-                # 只归档"已完结的日"(date != today): 同日仅版本不符的文件不归档 ——
-                # 否则会给今天写半日行并占掉归档位, 日终真正的汇总行再也写不出来。
+                # 存量数据两条出路, 一律不许"就地覆盖丢掉":
+                #   1. 已完结的日(date != today) → 归档进 history;
+                #   2. 同日但版本/结构不符 → 刻意不归档(否则给今天写半日行并占掉
+                #      归档位, 日终真正的汇总行再也写不出来), 改为改名留档
+                #      (见 _preserve_unarchived), 原始数据仍在盘上可人工恢复。
                 # "非空"口径与 archive_current 对齐: 只有 events 也算有料。
-                if (isinstance(raw, dict) and raw.get("date") != today
-                        and (raw.get("symbols") or raw.get("events"))):
-                    self.state = raw
-                    self.archive_current()
+                if isinstance(raw, dict):
+                    has_data = bool(raw.get("symbols") or raw.get("events"))
+                    archived = False
+                    if has_data and raw.get("date") != today:
+                        self.state = raw
+                        archived = self.archive_current()
+                    if has_data and not archived:
+                        self._preserve_unarchived(raw)
             except (ValueError, OSError):
                 pass                          # 坏文件 → 按新日重置(fail-safe)
         self.state = _empty_state(today)
@@ -132,6 +139,25 @@ class Ledger:
 
     # ---------------- 日终归档 ----------------
 
+    def _preserve_unarchived(self, raw):
+        """未被归档的账本在重置前改名留档, 免得 save() 把它就地盖成空账本。
+
+        进这里 = 同日仅版本不符(收盘后升版 / 手改过 state 文件)或归档没写成功。
+        定名(name + 旧版本 + 日期)是关键: 重启循环反复覆盖同一个 .bak, 不堆积。
+        名字带版本+日期, 也不会撞上正经的 state 文件。
+
+        fail-safe: 与归档同款 —— 任何异常吞掉, 备份是旁路, 绝不阻断载入/交易。
+        """
+        try:
+            p = Path(self.path)
+            if not p.exists():
+                return
+            bak = "%s.pre-v%s-%s.bak" % (p.name, raw.get("version"),
+                                         raw.get("date") or "")
+            p.replace(p.with_name(bak))       # os.replace 语义: 同盘原子改名
+        except Exception:                 # noqa: BLE001 - 刻意吞掉一切
+            pass
+
     def _load_archived_dates(self):
         """已归档日期集合(用于幂等判断)。读不到 → 空集, 不阻断。"""
         if not self.history_path:
@@ -146,9 +172,14 @@ class Ledger:
                 if not line:
                     continue
                 try:
-                    d = json.loads(line).get("date")
+                    obj = json.loads(line)
                 except ValueError:
                     continue
+                # 标量行(如 5 / "x")解析得出来但不是行 —— 跳过它, 别让一行
+                # 毒掉整份日期集合(那会导致已归档的日被写第二遍)。
+                if not isinstance(obj, dict):
+                    continue
+                d = obj.get("date")
                 if d:
                     out.add(str(d))
             return out
@@ -212,9 +243,11 @@ class Ledger:
                 if not line:
                     continue
                 try:
-                    rows.append(json.loads(line))
+                    obj = json.loads(line)
                 except ValueError:
                     continue
+                if isinstance(obj, dict):     # 标量行跳过(见 _load_archived_dates)
+                    rows.append(obj)
             rows.sort(key=lambda r: str(r.get("date") or ""))
             return rows[-int(limit):] if limit else rows
         # 与 _load_archived_dates 同款 fail-safe: 归档文件损坏(如非 UTF-8)只让
