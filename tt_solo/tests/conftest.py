@@ -31,6 +31,7 @@ def cfg():
         "paper_positions": {"600900.SH": 5000, "600938.SH": 3000},
         "max_units_per_round": 2,
         "grid": {"band_mode": "sigma", "band_k": 1.0, "n_units": 5,
+                 "max_units": 5,
                  "ref_mode": "prev_close", "sigma_window": 60},
         "risk": {"max_single_order_amount": 50000, "max_daily_trades": 20,
                  "max_daily_loss": 3000, "max_price_deviation_pct": 0.05,
