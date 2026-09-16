@@ -808,91 +808,16 @@ Copy-Item tt\sample_data\*.csv tt_solo\ttcore\sample_data\
 `market.py` 只 `from . import grid`（已是相对导入）→ **零改动**。
 `config.py` 无外部 import → **零改动**。
 
-- [ ] **Step 2: 修正 `tt_config.json` 的中文乱码**
+- [ ] **Step 2: 原样拷贝 `tt_config.json`（**不要重写**）**
 
-实测现有 `tt/tt_config.json` 的 `name` / `note` 字段是**乱码**（`闀挎睙鐢靛姏` 应为 `长江电力`）—— 文件被以错误编码写过。用 UTF-8 重写正确名称：
-
-```json
-{
-  "version": 1,
-  "env": "real",
-  "dry_run": true,
-  "account_id": "",
-
-  "grid": {
-    "band_mode": "sigma",
-    "band_k": 1.0,
-    "n_units": 5,
-    "max_units": 3,
-    "ref_mode": "prev_close",
-    "sigma_window": 60
-  },
-
-  "session": {
-    "open_start": "09:30",
-    "open_end": "14:55",
-    "converge_after": "14:30",
-    "hard_stop_after": "14:57"
-  },
-
-  "risk": {
-    "max_single_order_amount": 50000,
-    "max_daily_trades": 20,
-    "max_daily_loss": 3000,
-    "max_price_deviation_pct": 0.05,
-    "max_position_pct": 0.20,
-    "max_net_buy_today_ratio": 0.0,
-    "max_consecutive_failures": 3,
-    "max_slippage_pct": 0.03
-  },
-
-  "symbols": [
-    {
-      "code": "600900.SH",
-      "name": "长江电力",
-      "enabled": true,
-      "weight": 0.18,
-      "band_pct": 0.53,
-      "n_units": 5,
-      "switch": {"dev_max_pct": 4.0, "slope_max_pct": 0.3, "r20_max_pct": 8.0}
-    },
-    {
-      "code": "600938.SH",
-      "name": "中国海油",
-      "enabled": true,
-      "weight": 0.15,
-      "band_pct": 1.65,
-      "n_units": 5,
-      "switch": {"dev_max_pct": 4.0, "slope_max_pct": 0.3, "r20_max_pct": 8.0}
-    },
-    {
-      "code": "601088.SH",
-      "name": "中国神华",
-      "enabled": true,
-      "weight": 0.09,
-      "band_pct": 1.4,
-      "n_units": 5,
-      "switch": {"dev_max_pct": 4.0, "slope_max_pct": 0.3, "r20_max_pct": 8.0}
-    },
-    {
-      "code": "603268.SH",
-      "name": "松发股份",
-      "enabled": false,
-      "weight": 0.0,
-      "band_pct": 3.41,
-      "n_units": 5,
-      "switch": {"dev_max_pct": 4.0, "slope_max_pct": 0.3, "r20_max_pct": 8.0},
-      "note": "重组成长股, 趋势加速段停做; 历史超额 -60%~-67%, 默认停用"
-    }
-  ]
-}
-```
-
-写文件时必须 UTF-8 无 BOM：
 ```powershell
-$json = Get-Content D:\cc-joesph\tt_solo\ttcore\tt_config.json -Raw -Encoding UTF8
-[System.IO.File]::WriteAllText("D:\cc-joesph\tt_solo\ttcore\tt_config.json", $json, (New-Object System.Text.UTF8Encoding($false)))
+Copy-Item D:\cc-joesph\tt\tt_config.json D:\cc-joesph\tt_solo\ttcore\tt_config.json -Force
 ```
+
+> **规划期误判纠正**：曾以为该文件中文是乱码需重写，**已推翻** —— 用 `read` 工具
+> 核验，`name` 字段是正确的 `长江电力` / `中国海油` / `中国神华` / `松发股份`。
+> 之前的"乱码"是 **PowerShell stdout 的输出通道问题**，不是文件编码。
+> **逐字节拷贝即可，切勿用脚本重写**（重写反而可能引入真乱码）。
 
 - [ ] **Step 3: 扩写 `tt_solo/tests/conftest.py`，搬入原夹具**
 
@@ -1336,6 +1261,31 @@ ROOT = Path(__file__).resolve().parents[2]      # -> tt_solo/
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 ```
+
+- [ ] **Step 1c: 改造 `tt_solo/dashboard/tests/test_guard.py`（**易漏**）**
+
+该文件用的是 `import tt_web.app as app_module`（**模块形式，不是 `from`**），
+所以普通的 `from tt.` 替换**抓不到它**，漏改会直接 `ModuleNotFoundError`。
+
+> **编码说明**：该文件曾疑似 GBK 乱码，**已核验为误判** —— 原始字节为
+> `e4 ba a4`（UTF-8 的「交」），文件本身是正确的 UTF-8。
+> **不要做任何转码**，只改 import 一行。
+
+```powershell
+cd D:\cc-joesph\tt_solo\dashboard\tests
+$t = Get-Content 'D:\cc-joesph\tt_web\tests\test_guard.py' -Raw
+$t = $t -replace 'import tt_web\.app as app_module', 'import dashboard.app as app_module'
+[System.IO.File]::WriteAllText('D:\cc-joesph\tt_solo\dashboard\tests\test_guard.py', $t, (New-Object System.Text.UTF8Encoding($false)))
+```
+
+确认改对了（**用 `read` 工具看，不要用 pwsh 打印**，pwsh 的 stdout 会把中文显示成乱码）：
+```
+read tt_solo/dashboard/tests/test_guard.py
+```
+Expected: 第 11 行左右为 `import dashboard.app as app_module`；docstring 为可读中文
+
+`sys.path.insert(0, str(Path(__file__).parent.parent.parent))` 在原文件里指向
+`tt_solo/`（`dashboard/tests/` 往上三级）—— **恰好正确，无需改**。
 
 - [ ] **Step 2: 先写失败测试（新接口）**
 
@@ -1847,99 +1797,77 @@ git commit -m "feat(tt_solo): 仪表盘前端重建(五区块一屏决策面板)
 - Consumes: Task 7 的 `python -m ttcore.daemon`、Task 10 的 `dashboard/app.py`
 - Produces: 6 个可用入口
 
-- [ ] **Step 1: 重写 6 个 .bat（UTF-8 无 BOM + `chcp 65001`）**
+- [ ] **Step 1: 只改路径，**不重写文件内容****
 
-现存文件是 GBK 编码却设了 `chcp 65001` → 中文提示全是乱码。全部重写为 UTF-8 无 BOM。
+> **规划期误判纠正**：曾判定这些 `.bat` 是「GBK 编码 + `chcp 65001` → 乱码」需重写。
+> **已推翻** —— 用 `read` 工具核验，`做T-今日放行.bat` 的中文完全正常，
+> 与 `chcp 65001` 是正确配对。乱码是 **PowerShell stdout 的输出通道问题**。
+> 另有 3 个文件（`启动做T守护.bat` / `启动做T模拟守护.bat` 等）**根本不含中文**。
+>
+> **因此：逐行做最小字符串替换，保留原文（含既有中文安全警告）原样。**
+> 用脚本重写全文反而会把好文件改坏。
 
-`启动做T守护.bat`:
-```bat
-@echo off
-chcp 65001 >nul
-cd /d D:\cc-joesph\tt_solo
-set PYTHONIOENCODING=utf-8
-title TT Daemon - DRY RUN (no orders)
-echo ============================================
-echo  做T守护进程
-echo.
-echo  模式: DRY-RUN  --^> 只算不发单, 不碰你的钱和股票
-echo.
-echo  要真正发信号必须同时满足:
-echo    1) 用 --live 启动
-echo    2) D:/QMT_SIGNALS/paused 不存在 (急停开关未按)
-echo    3) D:/QMT_SIGNALS/real/armed.txt 含今日日期
-echo.
-echo  关闭本窗口 = 停止守护
-echo ============================================
-python -m ttcore.daemon --interval 5
-pause
-```
+六个文件各自需要的替换（全部是路径层面，不动文案）：
 
-`启动做T直连守护.bat`: 同上，末行改 `python -m ttcore.daemon --direct --interval 5`，标题与提示相应改为「直连模式(DRY-RUN)」。
+| 文件 | `cd` | python 调用 |
+|---|---|---|
+| `启动做T守护.bat` | `→ D:\cc-joesph\tt_solo` | `tt.daemon` → `ttcore.daemon` |
+| `启动做T直连守护.bat` | 同上 | `tt.daemon --direct` → `ttcore.daemon --direct` |
+| `启动做T实盘直连.bat` | 同上 | `tt.daemon --direct --live` → `ttcore.daemon --direct --live` |
+| `启动做T模拟守护.bat` | 同上 | `tt.daemon --env sim` → `ttcore.daemon --env sim` |
+| `启动做T监控台.bat` | 同上 | `tt_web\app.py` → `dashboard\app.py`，端口提示 `5010` → `5011` |
+| `做T-今日放行.bat` | 无 cd | `D:\cc-joesph\tt\arm_today.py` → `D:\cc-joesph\tt_solo\ttcore\arm_today.py` |
 
-`启动做T实盘直连.bat`: 保留原 8 秒警告，末行改 `python -m ttcore.daemon --direct --live --interval 5`。
-
-`启动做T模拟守护.bat`: 末行改 `python -m ttcore.daemon --interval 5 --env sim`，**必须保留原文中"桥端不校验账户"的安全警告**。
-
-`做T-今日放行.bat`:
-```bat
-@echo off
-chcp 65001 >nul
-title TT - Arm Today
-set PYTHONIOENCODING=utf-8
-echo ================================================================
-echo  做T - 今日放行 (arm)
-echo.
-echo  作用: 往 D:/QMT_SIGNALS/real/armed.txt 写入今天的日期。
-echo        守护进程每天都必须有一张"当日放行条"才会真正下单,
-echo        昨天的条件今天自动失效 -- 相当于每天一道人工确认。
-echo.
-echo  同时确保急停开关 D:/QMT_SIGNALS/paused 不存在。
-echo ================================================================
-python "D:\cc-joesph\tt_solo\ttcore\arm_today.py" %*
-echo.
-pause
-```
-
-`启动做T监控台.bat`:
-```bat
-@echo off
-chcp 65001 >nul
-cd /d D:\cc-joesph\tt_solo
-set PYTHONIOENCODING=utf-8
-title TT 做T仪表盘 (只读, 可急停)
-echo ============================================
-echo  做T仪表盘  (仅本机)
-echo  http://127.0.0.1:5011
-echo  只读看板 + 急停/放行; 绝不下单。
-echo  关闭本窗口 = 停止面板
-echo ============================================
-python dashboard\app.py
-pause
-```
-
-写入时统一用：
 ```powershell
-[System.IO.File]::WriteAllText("D:\cc-joesph\启动做T守护.bat", $text, (New-Object System.Text.UTF8Encoding($false)))
+cd D:\cc-joesph
+$utf8 = New-Object System.Text.UTF8Encoding($false)
+$files = @('启动做T守护.bat','启动做T直连守护.bat','启动做T实盘直连.bat',
+           '启动做T模拟守护.bat','启动做T监控台.bat','做T-今日放行.bat')
+foreach ($f in $files) {
+  $p = Join-Path 'D:\cc-joesph' $f
+  $t = [System.IO.File]::ReadAllText($p, [System.Text.Encoding]::UTF8)
+  # (?m) 多行模式必需: 否则 $ 只匹配整串末尾, 锚不住行尾的 cd 那一行
+  $t = $t -replace '(?m)^cd /d D:\\cc-joesph\r?$', 'cd /d D:\cc-joesph\tt_solo'
+  $t = $t -replace 'python -m tt\.daemon', 'python -m ttcore.daemon'
+  $t = $t -replace 'python tt_web\\app\.py', 'python dashboard\app.py'
+  $t = $t -replace 'D:\\cc-joesph\\tt\\arm_today\.py', 'D:\cc-joesph\tt_solo\ttcore\arm_today.py'
+  if ($f -eq '启动做T监控台.bat') { $t = $t -replace '5010', '5011' }
+  [System.IO.File]::WriteAllText($p, $t, $utf8)
+}
 ```
 
-- [ ] **Step 2: 逐个冒烟（至少两个）**
+（上述脚本已**干跑验证**：6 个文件各自只改动 `cd` 行与 python 调用行，
+`做T-今日放行.bat` 只改 python 路径，`启动做T监控台.bat` 额外改端口提示，
+其余文案一字未动。）
+
+- [ ] **Step 2: 逐条核对替换结果（用 `read` 工具，不要用 pwsh 打印）**
+
+```
+read 启动做T监控台.bat
+read 做T-今日放行.bat
+```
+Expected:
+- 监控台：`cd /d D:\cc-joesph\tt_solo`、`python dashboard\app.py`、提示 `5011`；中文可读
+- 今日放行：`python "D:\cc-joesph\tt_solo\ttcore\arm_today.py" %*`；中文可读
+
+- [ ] **Step 3: 冒烟（两个代表性入口）**
 
 Run: 双击 `启动做T监控台.bat`
-Expected: 中文提示**不乱码**，服务起在 5011
+Expected: 中文提示正常显示，服务起在 5011
 
-Run: `启动做T-今日放行.bat`（或命令行执行 `python D:\cc-joesph\tt_solo\ttcore\arm_today.py --status`）
-Expected: 中文不乱码，`--status` 正确报告 armed 状态与退出码
+Run: `python D:\cc-joesph\tt_solo\ttcore\arm_today.py --status`
+Expected: 正确报告 armed 状态；退出码 0 或 1
 
-- [ ] **Step 3: 确认无残留指向 tt/ 或 tt_web/ 的引用**
+- [ ] **Step 4: 确认无残留指向 tt/ 或 tt_web/ 的引用**
 
-Run: `Select-String -Path *.bat -Pattern 'tt_web|tt\.daemon|tt\.arm_today'`
+Run: `Select-String -Path *.bat -Pattern 'tt_web|tt\.daemon|tt\\arm_today'`
 Expected: 无输出
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add *.bat
-git commit -m "chore(tt_solo): 启动入口指向新目录 + 修 UTF-8 编码(中文不再乱码)"
+git commit -m "chore(tt_solo): 启动入口指向 tt_solo/dashboard(仅改路径, 不重写文案)"
 ```
 
 ---

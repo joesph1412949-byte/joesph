@@ -60,9 +60,18 @@
 - 测试基线：`python -m pytest tt/tests tt_web/tests` = **150 passed**；
 - `tt/` 与 `tt_web/` **均已入库**（`git ls-files` 实测），不存在未跟踪风险。
 
-### 2.4 顺带发现的问题
+### 2.4 编码：一次被推翻的误判（留档，避免后人重踩）
 
-- 现有 6 个做T `.bat` 文件为 **GBK 编码**，却设了 `chcp 65001`（UTF-8）→ 中文提示在控制台显示为乱码。新入口需统一编码。
+规划期曾判定「6 个做T `.bat` 是 GBK 编码却设 `chcp 65001` → 中文乱码」，并打算重写它们。
+**该结论已推翻**：用 `read` 工具与原始字节核验后确认，`tt_config.json` 与各 `.bat`
+**都是正确的 UTF-8**（`做T` 的字节为 `e5 81 9a 54`），与 `chcp 65001` 是**正确配对**，
+`tt_config.json` 的中文名（长江电力等）也完全正常。
+
+**乱码来自 PowerShell 输出通道**，不是文件编码 —— 同一文件用 `pwsh` 打印是乱码、
+用 `read` 工具读则正常。**教训：判断文件编码一律看原始字节或走 `read` 工具，
+不要以 `pwsh` 的 stdout 为准。**（此坑已补入 MEMORY 环境备忘。）
+
+结论：**没有编码工作要做**。做T的入口文件只需改路径，不重写内容。
 
 ---
 
@@ -257,7 +266,7 @@ def calc_buy_volume(price, total_asset, position_ratio=0.15, lot=100)
 | 测试 | `pytest tt_solo/tests` 全绿，用例数 ≥ 150 |
 | 无回归 | 步骤 5 双跑对照：同输入下 Intent 列表逐字段一致 |
 | 仪表盘 | 6+2 个接口全 200；`pause`/`arm` 无 `confirm` 返 400、带 `confirm` 生效；远程请求返 403 |
-| 编码 | 新 `.bat` 中文提示不乱码 |
+| 编码 | **无需处理** —— 已核验 `.bat` 与 `tt_config.json` 均为正确 UTF-8（见 §2.4）。仅改路径，不重写文件 |
 | 路径独立 | 跑一轮后 `tt_solo/runtime/state/` 生成文件，主 `runtime/state/tt_state.json` **不被触碰** |
 
 ---
