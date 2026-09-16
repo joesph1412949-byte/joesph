@@ -306,6 +306,24 @@ def test_max_units_caps_depth(eng_factory, ledger, sym, snap_factory):
     assert len(sells) == 2                      # 单轮上限 2 且深度上限 2
 
 
+def test_production_depth_cap(eng_factory, ledger, sym, snap_factory):
+    """生产配置(n_units=5, max_units=3): 穿越第 5 档, 深度仍封顶在 3。"""
+    ledger.load()
+    eng, _ = eng_factory({"600900.SH": snap_factory(
+        last=28.45, last_close=28.09, high=29.50, low=28.10,
+        ma20=28.19, ma20_prev=28.19)})
+    # 先把前提钉住: 否则夹具改成 n_units=max_units 时本测试会假通过
+    assert (eng.grid_cfg["n_units"], eng.grid_cfg["max_units"]) == (5, 3)
+
+    ctx, intents = eng.plan_symbol(sym, eng.account_state(), OPEN, "OPEN")
+    assert ctx["high"] >= ctx["ladder"]["sell"][4]   # 最高价已越过第 5 档
+    assert ctx["n_eff_units"] == 3                   # 深度由 max_units 截断
+    assert ctx["target_sell_units"] == 3             # 阶梯穿 5 档, 目标只 3 档
+    sells = [i for i in intents if i.side == "SELL"]
+    assert len(sells) == 2                           # 单轮上限 2 是另一道闸门
+    assert all(i.meta["target_units"] == 3 for i in sells)
+
+
 def test_max_units_does_not_change_unit_size(eng_factory, ledger, sym,
                                              snap_factory):
     """max_units 只限制档数, 不改变单档股数(n_units 仍决定分母)。"""

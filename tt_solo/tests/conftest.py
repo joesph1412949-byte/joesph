@@ -26,21 +26,28 @@ def now_fn():
 def cfg():
     """测试配置: 下面 overrides 里列出的键钉死, 但**不是**整份自足。
 
-    tt_config.load() 是先读盘上 DEFAULT_CONFIG_PATH(ttcore/tt_config.json) 再深合并
-    overrides —— 只有这里列出的键不受用户改盘影响, 没列出的仍从盘上继承。
-    当前没钉的顶层键只有 version / env / account_id(无测试依赖: version 谁都不读,
-    env/account_id 只在 plan() 输出里透传), 所以可以安全继承。
-    grid / risk / session 三个子块已逐叶子钉全; paper_positions 只钉了测试用到的两个
-    代码, 其余代码来自 DEFAULT_CONFIG(亦无测试依赖)。
+    tt_config.load() 的顺序是 DEFAULT_CONFIG → 盘上 tt_config.json →
+    overrides 逐层深合并, 所以没钉的键仍从盘上文件继承(用户可改)。
+    这里钉住的每个键都对齐部署值 ttcore/tt_config.json —— 测试因此跑在生产配置下,
+    又不受用户改那份文件影响。
+    当前没钉的顶层键只剩 version(没有任何代码读它; 状态文件里的 version 是另一码事)。
+    grid / risk / session 三个子块已逐叶子钉全。其中 grid 的 n_units=5 配
+    max_units=3 就是部署值, 也是 config 校验里写明的**故意解耦**: n_units 定阶梯
+    深度与每档金额分母, max_units 定日内实际用几档 —— 底仓只够 3 档时留 n_units=5,
+    每档金额才维持 1/5。
+    paper_positions 只钉了 600900.SH(测试唯一用到的代码); 600938.SH 那个钉子没有
+    测试读, 其余代码(601088.SH 等)继承自 DEFAULT_CONFIG。
     以后新增依赖某个配置键的测试, 记得在这里一并钉住。
     """
     return tt_config.load(overrides={
+        "env": "real",
         "dry_run": True,
+        "account_id": "",
         "paper_total_asset": 500000.0,
         "paper_positions": {"600900.SH": 5000, "600938.SH": 3000},
         "max_units_per_round": 2,
         "grid": {"band_mode": "sigma", "band_k": 1.0, "n_units": 5,
-                 "max_units": 5,
+                 "max_units": 3,
                  "ref_mode": "prev_close", "sigma_window": 60},
         # ponytail: session 必须钉住才谈得上自足 —— plan() 由 session_cfg 推 hhmm/phase,
         # test_engine.test_plan_full_shape 断言 "10:00"/"OPEN"; 值对齐 DEFAULT_CONFIG.session。
