@@ -176,9 +176,46 @@ def _guard():
     return "prism_web 敏感 403 / 远程选股放行 / tt_web 闸门 403 均验证"
 
 
+def _public_tunnel():
+    """公网隧道可达性(可选, --with-tunnel 时跑): 期望 CF Access 拦到登录页。
+
+    判定: 未登录时 CF Access 会 302 到 *.cloudflareaccess.com 登录页
+    (或 200 直接给登录页)。隧道断/服务停 → 连接失败或 502/530。"""
+    import urllib.error
+    import urllib.request
+    url = "https://prism.prism1121.icu/"
+    req = urllib.request.Request(url, headers={"User-Agent": "prism-smoke"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            code, body = resp.status, resp.read(400).decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        code, body = e.code, ""
+    except Exception as e:                      # 连接失败 = 隧道/服务断
+        raise AssertionError("公网不可达(隧道或 PRISM 未运行): %r" % e)
+    if code >= 500:
+        raise AssertionError("隧道通但源站故障(HTTP %d)" % code)
+    if code in (301, 302, 303, 307, 308):
+        loc = ""
+        try:                                     # 跟随一次拿 Location 判 Access
+            with urllib.request.urlopen(req, timeout=15) as r2:
+                loc = r2.geturl()
+        except urllib.error.HTTPError as e2:
+            loc = e2.headers.get("Location", "") if e2.headers else ""
+        except Exception:
+            loc = ""
+        if "cloudflareaccess.com" in loc:
+            return "公网可达 + CF Access 登录页(白名单生效)"
+        return "公网可达(HTTP %d → %s)" % (code, loc[:60] or "重定向")
+    if "cloudflareaccess.com" in body or "Sign in" in body:
+        return "公网可达 + CF Access 登录页(白名单生效)"
+    return "公网可达(HTTP %d, 未见 Access 登录页——检查 Access 应用是否启用)" % code
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--with-cli", action="store_true", help="附带 CLI 自检")
+    ap.add_argument("--with-tunnel", action="store_true",
+                    help="附带公网隧道可达性(需联网; 断网时跳过)")
     ap.add_argument("--trace", action="store_true", help="失败时打印堆栈")
     ap.parse_args()
 
@@ -187,9 +224,11 @@ def main():
     check("3. Web 路由(真实缓存)", _routes)
     check("4. 纯计算层出数", _compute)
     check("5. 运行期状态健康", _state)
-    if "--with-cli" in sys.argv:
-        check("7. CLI 入口", _cli)
     check("6. 分级护栏", _guard)
+    if "--with-tunnel" in sys.argv:
+        check("7. 公网隧道可达性", _public_tunnel)
+    if "--with-cli" in sys.argv:
+        check("8. CLI 入口", _cli)
 
     print("=" * 62)
     print("prism 交付级冒烟自检")
