@@ -1275,7 +1275,8 @@ git commit -m "test(tt_solo): 自包含硬护栏 + 全套测试通过(>=150)"
 
 **Files:**
 - Create: `tt_solo/dashboard/app.py`
-- Create: `tt_solo/dashboard/tests/conftest.py`（**必须** —— 见 Step 1b）
+- Create: `tt_solo/dashboard/__init__.py`（**必须** —— 见 Step 1d）
+- Create: `tt_solo/dashboard/tests/conftest.py`（见 Step 1b）
 - Create: `tt_solo/dashboard/tests/test_guard.py`、`test_api.py`
 - Create: `tt_solo/dashboard/templates/.gitkeep`（前端在 Task 10 填）
 
@@ -1364,6 +1365,30 @@ Expected: 第 11 行左右为 `import dashboard.app as app_module`；docstring �
 
 `sys.path.insert(0, str(Path(__file__).parent.parent.parent))` 在原文件里指向
 `tt_solo/`（`dashboard/tests/` 往上三级）—— **恰好正确，无需改**。
+
+- [ ] **Step 1d: 建 `tt_solo/dashboard/__init__.py`（**执行时发现，原计划遗漏**）**
+
+**必须存在。** 否则 `tt_solo/tests/conftest.py` 与 `tt_solo/dashboard/tests/conftest.py`
+会派生出**同名模块** `tests.conftest`，整树收集时 pytest 直接报
+`ValueError: Plugin already registered under a different name`（实测复现）。
+建了 `__init__.py` 后 `dashboard` 成为真正的包，整树可收集。
+
+```powershell
+New-Item -ItemType File -Force -Path tt_solo\dashboard\__init__.py | Out-Null
+```
+
+> **Step 1b 的 conftest 说明已修正**：原计划称"缺了它 `from dashboard import app` 会
+> `ModuleNotFoundError`"——**该说法只在"只跑 dashboard 目录"时成立**。整树运行时，
+> pytest 的初始 conftest 发现机制**会**加载 `tt_solo/tests/conftest.py`（它把 `tt_solo/`
+> 放进 `sys.path`），`dashboard` 随后作为 PEP 420 命名空间包也能导入。
+>
+> 也就是说：**`__init__.py` 才是关键，conftest 在有了 `__init__.py` 之后是冗余的。**
+> 仍保留 conftest（5 行、无谎报、brief 要求），但**不要**把它当成不可省的依赖。
+
+**Step 1c 补充：** `tt_solo/dashboard/tests/test_guard.py` 的文件头 docstring 仍写着
+`tt_web 交易闸门护栏测试`，改为 `dashboard`（纯文案，不影响断言）。
+
+---
 
 - [ ] **Step 2: 先写失败测试（新接口）**
 
@@ -1558,7 +1583,16 @@ git commit -m "feat(tt_solo): 仪表盘后端(端口 5011) + 被拦归因/历史
 ### Task 10: 仪表盘前端重建（五区块一屏决策面板）
 
 **Files:**
-- Create: `tt_solo/dashboard/templates/index.html`（完全重写）
+- Replace: `tt_solo/dashboard/templates/index.html`（**整文件替换，不是编辑**）
+- Delete: `tt_solo/dashboard/templates/.gitkeep`（目录里已有真实文件，占位无意义）
+
+> ⚠️ **必须整文件替换，不要在旧模板上改。**
+> Task 9 为让 `test_index_renders` 通过，先把主项目的旧 `tt_web/templates/index.html`
+> （538 行）拷了过来 —— 那是**临时占位**。旧页面的 JS 只接了旧接口
+> （`/api/status`、`/api/config`、`/api/kline`、`/api/pause`、`/api/arm`），
+> **完全没有** `/api/rejections` 与 `/api/ledger/history`。若在其上做增量编辑，
+> 会留下悬挂的旧逻辑和半新半旧的界面。
+> 直接写入本任务给出的完整 `index.html` 内容（覆盖），然后删掉 `.gitkeep`。
 
 **Interfaces:**
 - Consumes: `/api/status`、`/api/config`、`/api/kline/<code>`、`/api/rejections`、`/api/ledger/history`、`/api/pause`、`/api/arm`
