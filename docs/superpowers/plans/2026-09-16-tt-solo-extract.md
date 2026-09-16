@@ -1121,7 +1121,62 @@ git commit -m "feat(tt_solo): 迁移 daemon + arm_today(自带 runtime 路径)"
 - Consumes: 全部 `ttcore.*`
 - Produces: 无（验证任务）
 
-- [ ] **Step 1: 写自包含护栏测试**
+- [ ] **Step 1: 写自包含护栏(共享扫描器 + 整树测试)**
+
+> **为什么用 AST 扫描而不是行正则**：`tt_solo` 里**刻意保留**了出处散文
+> （`ttcore/_vendor.py`、`broker.py`、`engine.py:9/30/444`、`executor.py:84` 都提到
+> `prism.*` 作为"这段逻辑来自哪里"的溯源说明）。行正则的两种写法都不好：
+> 不锚定会被散文误伤；锚定虽可（实测零命中）但依然只认字面文本，对动态 import 无效。
+> **AST 扫描按真实 `Import`/`ImportFrom` 节点判定，散文永远自由，且能覆盖嵌套 import。**
+>
+> 单一实现放在 `tt_solo/tests/_import_scan.py`，供本任务与既有
+> `test_broker.py`（它已有一份本地 AST 扫描）共用 —— 避免同一逻辑块两处重复。
+
+`tt_solo/tests/_import_scan.py`：
+
+```python
+# -*- coding: utf-8 -*-
+"""自包含扫描器(单一实现): 判定一个 Python 文件是否 import 了禁用包。
+
+用 AST 而非文本正则 —— tt_solo 刻意保留出处散文(如 "与 prism.trader 同构"),
+文本扫描会把散文误判成依赖; 而 AST 只看真实的 Import/ImportFrom 节点,
+散文永远自由, 且能覆盖函数内/条件内的嵌套 import。
+"""
+import ast
+from pathlib import Path
+
+FORBIDDEN_ROOT_IMPORTS = frozenset(
+    {"prism", "shared", "qmt_sync", "backtest", "legacy"})
+
+
+def imported_roots(source):
+    """返回源码 import 到的顶层包名集合(相对 import 不计)。
+
+    ast.walk 会遍历全部后代节点, 故函数内/条件内的 import 也会被抓到。
+    取根段(name.split(".")[0]), 所以 `import prism.foo` 归为 `prism`。
+    相对 import(from . import x / from .broker import Y)解析不到顶层包, 跳过。
+    """
+    tree = ast.parse(source)
+    roots = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                roots.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.module and not node.level:
+                roots.add(node.module.split(".")[0])
+    return roots
+
+
+def forbidden_imports(path, source=None):
+    """该文件的禁用 import 列表(已排序); 无则空列表。"""
+    if source is None:
+        source = Path(path).read_text(encoding="utf-8")
+    hits = imported_roots(source) & FORBIDDEN_ROOT_IMPORTS
+    return sorted(hits)
+```
+
+`tt_solo/tests/test_selfcontained.py`：
 
 ```python
 # -*- coding: utf-8 -*-
@@ -1129,32 +1184,43 @@ git commit -m "feat(tt_solo): 迁移 daemon + arm_today(自带 runtime 路径)"
 
 这是本次重构的完成定义 —— 用测试固化, 防止将来有人顺手 import 回去。
 """
-import re
+import importlib
 from pathlib import Path
 
-import pytest
+from _import_scan import FORBIDDEN_ROOT_IMPORTS, forbidden_imports
 
 ROOT = Path(__file__).resolve().parents[1]        # tt_solo/
-FORBIDDEN = ("prism", "shared", "qmt_sync", "backtest", "legacy")
-PAT = re.compile(r"^\s*(?:from|import)\s+(%s)\b" % "|".join(FORBIDDEN),
-                 re.MULTILINE)
 
 
 def _py_files():
     return [p for p in ROOT.rglob("*.py") if "__pycache__" not in p.parts]
 
 
+def test_scanner_discriminates():
+    """负控: 扫描器必须真能判别禁用 import(否则整条护栏是空的)。"""
+    assert forbidden_imports("x.py", "import prism\n") == ["prism"]
+    assert forbidden_imports("x.py", "import prism.foo\n") == ["prism"]
+    assert forbidden_imports("x.py", "def f():\n    import shared\n") == ["shared"]
+    assert forbidden_imports("x.py", "from . import grid\n") == []
+    assert forbidden_imports("x.py", "from .broker import X\n") == []
+    # 散文里的 prism 不算依赖(这正是选 AST 的理由)
+    assert forbidden_imports("x.py", '"""与 prism.trader 同构"""\n') == []
+    # 禁用清单本身不得被改窄
+    assert {"prism", "shared", "qmt_sync", "backtest", "legacy"} <= \
+        FORBIDDEN_ROOT_IMPORTS
+
+
 def test_no_forbidden_imports_anywhere():
     bad = []
     for p in _py_files():
-        for m in PAT.finditer(p.read_text(encoding="utf-8")):
-            bad.append("%s: %s" % (p.relative_to(ROOT), m.group(0).strip()))
+        hits = forbidden_imports(p)
+        if hits:
+            bad.append("%s: %s" % (p.relative_to(ROOT), hits))
     assert bad == [], "tt_solo 出现外部依赖: %s" % bad
 
 
 def test_core_modules_importable_without_qmt():
     """核心模块必须能在没有 xtquant 的环境导入(惰性加载)。"""
-    import importlib
     for name in ("ttcore._vendor", "ttcore.grid", "ttcore.risk",
                  "ttcore.state", "ttcore.config", "ttcore.broker",
                  "ttcore.market", "ttcore.engine", "ttcore.executor",
@@ -1162,20 +1228,32 @@ def test_core_modules_importable_without_qmt():
         importlib.import_module(name)
 ```
 
+- [ ] **Step 1b: 让 `test_broker.py` 复用共享扫描器（消除重复实现）**
+
+`test_broker.py` 里已有一份本地 `_imported_roots`（Task 4 引入，约 15 行）。
+现在有了单一实现 → 删掉本地副本，改为 `from _import_scan import forbidden_imports`，
+其断言改成 `assert forbidden_imports(broker.__file__) == []`。
+**必须保留该文件既有的负控测试 `test_import_scanner_discriminates`**（它证明扫描器会失败），
+可改为调用共享扫描器。改完 `test_broker.py` 的测试数应保持不变（13）。
+
 - [ ] **Step 2: 跑护栏测试**
 
-Run: `python -m pytest tt_solo/tests/test_selfcontained.py -q --import-mode=importlib --basetemp=D:/cc-joesph/pt_bt250`
-Expected: PASS（2 passed）。若第一条失败，按报错逐个清理残留 import。
+Run: `python -m pytest tt_solo/tests/test_selfcontained.py tt_solo/tests/test_broker.py -q --import-mode=importlib --basetemp=D:/cc-joesph/pt_bt250`
+Expected: PASS — selfcontained 3 例（含负控）+ broker 13 例。若 `test_no_forbidden_imports_anywhere` 失败，按报错逐个清理残留 import。
 
-- [ ] **Step 3: 独立 grep 复核（不依赖测试）**
+- [ ] **Step 3: 独立复核（不依赖测试，两道）**
 
-Run:
+Run（锚定 grep，只查真实 import 语句）:
 ```powershell
 Get-ChildItem tt_solo -Recurse -Include *.py |
   Where-Object { $_.FullName -notmatch '__pycache__' } |
   Select-String -Pattern '^\s*(from|import)\s+(prism|shared|qmt_sync|backtest|legacy)\b'
 ```
-Expected: 无输出
+Expected: 无输出。
+> **注意**：裸词搜索（不带 `^\s*(from|import)` 前缀）会命中若干**出处散文**
+> （`ttcore/_vendor.py`、`broker.py`、`engine.py:9/30/444`、`executor.py:84`），
+> 那是**刻意保留的溯源说明，不是依赖**。判断依据永远是"真实 import 节点"，
+> 不是"文件里有没有出现 prism 这个词"。
 
 - [ ] **Step 4: 脱沙箱跑全套 tt_solo 测试**
 
