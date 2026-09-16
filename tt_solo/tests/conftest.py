@@ -24,7 +24,16 @@ def now_fn():
 
 @pytest.fixture
 def cfg():
-    """一份自足的测试配置(不读盘上的 tt_config.json, 避免被用户改动影响)。"""
+    """测试配置: 下面 overrides 里列出的键钉死, 但**不是**整份自足。
+
+    tt_config.load() 是先读盘上 DEFAULT_CONFIG_PATH(ttcore/tt_config.json) 再深合并
+    overrides —— 只有这里列出的键不受用户改盘影响, 没列出的仍从盘上继承。
+    当前没钉的顶层键只有 version / env / account_id(无测试依赖: version 谁都不读,
+    env/account_id 只在 plan() 输出里透传), 所以可以安全继承。
+    grid / risk / session 三个子块已逐叶子钉全; paper_positions 只钉了测试用到的两个
+    代码, 其余代码来自 DEFAULT_CONFIG(亦无测试依赖)。
+    以后新增依赖某个配置键的测试, 记得在这里一并钉住。
+    """
     return tt_config.load(overrides={
         "dry_run": True,
         "paper_total_asset": 500000.0,
@@ -33,6 +42,10 @@ def cfg():
         "grid": {"band_mode": "sigma", "band_k": 1.0, "n_units": 5,
                  "max_units": 5,
                  "ref_mode": "prev_close", "sigma_window": 60},
+        # ponytail: session 必须钉住才谈得上自足 —— plan() 由 session_cfg 推 hhmm/phase,
+        # test_engine.test_plan_full_shape 断言 "10:00"/"OPEN"; 值对齐 DEFAULT_CONFIG.session。
+        "session": {"open_start": "09:30", "open_end": "14:55",
+                    "converge_after": "14:30", "hard_stop_after": "14:57"},
         "risk": {"max_single_order_amount": 50000, "max_daily_trades": 20,
                  "max_daily_loss": 3000, "max_price_deviation_pct": 0.05,
                  "max_position_pct": 0.20, "max_net_buy_today_ratio": 0.0,
