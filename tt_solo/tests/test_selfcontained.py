@@ -13,7 +13,11 @@ ROOT = Path(__file__).resolve().parents[1]        # tt_solo/
 
 
 def _py_files():
-    return [p for p in ROOT.rglob("*.py") if "__pycache__" not in p.parts]
+    """tt_solo 下的全部 .py; __pycache__ / 点目录(.venv 等) / venv 不是本仓源码。"""
+    skip = ("__pycache__", "venv")
+    return [p for p in ROOT.rglob("*.py")
+            if not any(s in skip or s.startswith(".")
+                       for s in p.relative_to(ROOT).parts[:-1])]
 
 
 def test_scanner_discriminates():
@@ -21,6 +25,8 @@ def test_scanner_discriminates():
     assert forbidden_imports("x.py", "import prism\n") == ["prism"]
     assert forbidden_imports("x.py", "import prism.foo\n") == ["prism"]
     assert forbidden_imports("x.py", "def f():\n    import shared\n") == ["shared"]
+    # from X import Y 是独立分支(也正是 tt/ 里原违规的形态: from shared.common import ...)
+    assert forbidden_imports("x.py", "from prism.qmt import Trader\n") == ["prism"]
     assert forbidden_imports("x.py", "from . import grid\n") == []
     assert forbidden_imports("x.py", "from .broker import X\n") == []
     # 散文里的 prism 不算依赖(这正是选 AST 的理由)
@@ -31,8 +37,11 @@ def test_scanner_discriminates():
 
 
 def test_no_forbidden_imports_anywhere():
+    files = _py_files()
+    # 枚举必须先自证非空: 否则 ROOT/rglob 一坏, 下面的循环不执行, 护栏恒过(实测 26)
+    assert len(files) >= 20, "仅枚举到 %d 个 .py, 枚举失效, 护栏形同虚设" % len(files)
     bad = []
-    for p in _py_files():
+    for p in files:
         hits = forbidden_imports(p)
         if hits:
             bad.append("%s: %s" % (p.relative_to(ROOT), hits))
@@ -71,7 +80,7 @@ def test_core_modules_importable_without_qmt():
     ])
     # cwd=tt_solo/ 让 sys.path[0] 指向它, 与 conftest 的 sys.path 注入同源
     r = subprocess.run([sys.executable, "-c", code], cwd=str(ROOT),
-                       capture_output=True, text=True,
+                       capture_output=True, text=True, timeout=60,
                        encoding="utf-8", errors="replace")
     assert r.returncode == 0, "无 xtquant 环境下核心模块导入失败:\n%s" % r.stderr
     assert "OK" in r.stdout

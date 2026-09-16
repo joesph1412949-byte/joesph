@@ -154,4 +154,6 @@ def test_import_scanner_discriminates():
         "x.py", "from . import state\nfrom .broker import X\n") == []
     assert forbidden_imports(
         "x.py", "def f():\n    if 0:\n        import prism.qmt\n") == ["prism"]
+    # from X import Y 是另一条分支, 同样要钉住(否则删掉它整套测试仍全绿)
+    assert forbidden_imports("x.py", "from prism.qmt import Trader\n") == ["prism"]
     assert forbidden_imports("x.py", "import os, time\n") == []
