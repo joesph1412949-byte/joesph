@@ -107,6 +107,29 @@ def current_status():
     return plan
 
 
+# 分级写护栏(2026-09-15, spec tiered-guard): 做T急停/每日放行是真实交易
+# 闸门, 仅限本机; 判据唯一真相 = shared.common.is_local_request(有
+# CF-Connecting-IP 头=经隧道=远程; 无头且 loopback/RFC1918=本机)。
+from shared.common import is_local_request            # noqa: E402
+
+_LOCAL_ONLY = frozenset({"api_pause", "api_arm"})
+
+
+@app.before_request
+def _local_only_guard():
+    if request.method not in ("POST", "PUT", "DELETE", "PATCH"):
+        return None
+    if is_local_request(request.headers.get("CF-Connecting-IP"),
+                        request.remote_addr):
+        return None
+    if request.endpoint in _LOCAL_ONLY:
+        LOG.warning("远程拦截交易闸门: %s %s (CF-IP=%s)", request.method,
+                    request.path, request.headers.get("CF-Connecting-IP"))
+        return jsonify({"ok": False,
+                        "error": "此操作仅限本机执行(交易闸门类)"}), 403
+    return None
+
+
 @app.route("/")
 def index():
     return render_template("index.html")

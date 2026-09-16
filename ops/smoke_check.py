@@ -22,6 +22,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# GBK 控制台兜底: 报告含非 GBK 字符(如 ✓)时不再 UnicodeEncodeError 崩溃
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 RESULTS = []
 
 
@@ -148,6 +152,30 @@ def _cli():
     return "CLI --help 可用" if not outs else "; ".join(outs)
 
 
+def _guard():
+    """分级写护栏(2026-09-15): 远程敏感写 403, 远程选股放行, tt 闸门 403。"""
+    import prism_web.app as appmod
+    import tt_web.app as tt_app
+    env = {"REMOTE_ADDR": "127.0.0.1", "HTTP_CF_CONNECTING_IP": "203.0.113.7"}
+    # prism_web: 敏感路由必须 403; 远程选股必须放行(非 403)
+    c = appmod.app.test_client()
+    r = c.post("/api/strategies/full_factor_v1/activate", json={},
+               environ_base=env)
+    if r.status_code != 403:
+        raise AssertionError("prism_web 敏感路由未被拦: %d" % r.status_code)
+    r = c.post("/api/screen", json={"strategy": "x"}, environ_base=env)
+    if r.status_code == 403:
+        raise AssertionError("远程选股被误拦")
+    # tt_web: 做T闸门必须 403(真下单闸门绝不能远程碰)
+    ct = tt_app.app.test_client()
+    for url in ("/api/pause", "/api/arm"):
+        r = ct.post(url, json={"confirm": "true"}, environ_base=env)
+        if r.status_code != 403:
+            raise AssertionError("tt_web 闸门 %s 未被拦: %d"
+                                 % (url, r.status_code))
+    return "prism_web 敏感 403 / 远程选股放行 / tt_web 闸门 403 均验证"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--with-cli", action="store_true", help="附带 CLI 自检")
@@ -160,7 +188,8 @@ def main():
     check("4. 纯计算层出数", _compute)
     check("5. 运行期状态健康", _state)
     if "--with-cli" in sys.argv:
-        check("6. CLI 入口", _cli)
+        check("7. CLI 入口", _cli)
+    check("6. 分级护栏", _guard)
 
     print("=" * 62)
     print("prism 交付级冒烟自检")
