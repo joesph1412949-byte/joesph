@@ -26,7 +26,8 @@ tt.engine.TTEngine(旧) 与 ttcore.engine.TTEngine(新), 逐字段比对。
   该分歧由 compare_bj() 钉成**断言**: 只允许它, 且只允许那一个档位;
   除它以外的任何分歧都会让本脚本以退出码 1 失败。
 
-用法: python tt_solo/tools/compare_legacy.py     # 退出码 0 = 除上述例外外一致
+用法: python tt_solo/tools/compare_legacy.py
+退出码: 0 = 除上述例外外一致, 1 = 发现差异, 2 = 无法运行(旧 tt/ 已不在, 见 main())
 """
 import json
 import sys
@@ -191,6 +192,28 @@ def leaf_count(obj):
     return sum(1 for _ in leaf_paths(obj))
 
 
+# ---------------------------------------------------------------- 旧树缺席
+
+class LegacyTreeMissing(RuntimeError):
+    """旧 tt/ 包 import 不进来(2026-09-16 随 84fd654 删除) —— 对照无法运行。"""
+
+
+LEGACY_MISSING_HINT = """无法运行对照: 旧 tt/ 包不存在。
+
+本脚本必须同时 import 旧 tt.* 与新 ttcore.*, 逐字段比对才成立 —— 少了旧树,
+它证明不了任何事。旧树已于 2026-09-16 随 84fd654 删除(tt_solo 成为唯一实现),
+故这条对照路径不再可跑; 它要守的结论已由当时记录的结果承担(见 README)。
+
+确实要重跑(需要旧树在场):
+    git show 84fd654^:tt/engine.py            # 确认该提交之前 tt/ 存在
+    git checkout 84fd654^ -- tt/              # 取回删除前的整棵旧树
+    python tt_solo/tools/compare_legacy.py    # 退出码 0 = 除已批准例外外一致
+用完请把取回的 tt/ 删掉 —— 它是历史副本, 不该留在工作树里。
+
+退出码: 0 = 除 920xxx 那条例外外一致, 1 = 发现差异, 2 = 无法运行(本情形)。
+"""
+
+
 # ---------------------------------------------------------------- 跑一侧
 
 def _book(led, plan):
@@ -214,10 +237,14 @@ def run_side(prefix, tmpdir, cases=None, overrides=None, cycles=2):
           'history': [归档行...], 'ratio_920': 该侧 920xxx 涨跌停比例}
     """
     if prefix == "tt":
-        from tt import config as cfgmod
-        from tt.engine import TTEngine
-        from tt.state import Ledger
-        from tt.risk import limit_ratio_for_code
+        try:
+            from tt import config as cfgmod
+            from tt.engine import TTEngine
+            from tt.state import Ledger
+            from tt.risk import limit_ratio_for_code
+        except ImportError:
+            # 旧树不在 → 交给 main() 打印指引并退出 2, 不让 ModuleNotFoundError 裸奔
+            raise LegacyTreeMissing()
     else:
         from ttcore import config as cfgmod
         from ttcore.engine import TTEngine
@@ -460,9 +487,15 @@ def main():
             stream.reconfigure(errors="replace")
 
     import tempfile
-    with tempfile.TemporaryDirectory() as t:
-        res_main = compare_main(Path(t) / "main")
-        res_bj = compare_bj(Path(t) / "bj")
+    try:
+        with tempfile.TemporaryDirectory() as t:
+            res_main = compare_main(Path(t) / "main")
+            res_bj = compare_bj(Path(t) / "bj")
+    except LegacyTreeMissing:
+        # 编码容错已设好(上面) —— 指引含中文, 非 UTF-8 控制台不该把"无法运行"
+        # 变成 UnicodeEncodeError 的 traceback。
+        print(LEGACY_MISSING_HINT)
+        return 2
 
     problems = res_main["problems"] + res_bj["problems"]
     if problems:

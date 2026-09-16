@@ -46,6 +46,9 @@ SIGNAL_ROOT = Path(os.environ.get("TT_SIGNAL_ROOT") or r"D:/QMT_SIGNALS")
 RUNTIME_MAX_AGE = 20.0          # 秒: 超过则视为过期, 现场重算
 # 行情工厂: 模块级常量, 测试打桩用(与 SIGNAL_ROOT/STATE_PATH 同款缝)
 FEED_FACTORY = market.make_feed
+# 账户替身: 同为模块级常量, 测试打桩用。生产恒为 None → 引擎自己连 QMT;
+# 打桩后重算路径不碰 xtquant, 也就不会被真实账户的持仓/资金左右测试结果。
+ACCOUNT = None
 
 _cache = {"at": 0.0, "data": None}
 
@@ -85,7 +88,7 @@ def readonly_plan():
     cfg = tt_config.load()
     led = Ledger(path=STATE_PATH, writable=False)
     led.load()
-    eng = TTEngine(cfg, led, feed=FEED_FACTORY(), now_fn=None,
+    eng = TTEngine(cfg, led, feed=FEED_FACTORY(), account=ACCOUNT, now_fn=None,
                    force_paper=False)
     plan = eng.plan()
     plan["runtime_at"] = datetime.now().isoformat(timespec="seconds")

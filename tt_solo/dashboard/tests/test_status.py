@@ -6,8 +6,8 @@
 真正跑的路。面板的整个安全叙事是"监控面不改交易状态", 这个承诺必须由测试
 钉住 —— 写在文档里不算数。
 
-全离线: 行情走 `FEED_FACTORY` 打桩, STATE_PATH / RUNTIME_PATH / SIGNAL_ROOT
-全部打到 tmp, 不碰 D:/QMT_SIGNALS 与真实运行目录。
+全离线: 行情走 `FEED_FACTORY` 打桩, 账户走 `ACCOUNT` 打桩, STATE_PATH /
+RUNTIME_PATH / SIGNAL_ROOT 全部打到 tmp, 不碰 D:/QMT_SIGNALS 与真实运行目录。
 """
 import hashlib
 import json
@@ -62,9 +62,25 @@ def feed():
         ma20=28.19, ma20_prev=28.19)})
 
 
+# 账户替身: 重算路径不该碰真实 QMT。不只要"没有第三方告警"—— 真账户在线时
+# 持仓/资金会渗进 plan, 测试结果随机器漂移(本机 QMT 常开, 实测真账户在场)。
+STUB_ASSET = {"total_asset": 500000.0, "cash": 200000.0, "market_value": 300000.0}
+
+
+class StubAccount:
+    """TTEngine(account=...) 的离线替身: 只实现引擎用到的 asset()/positions()。"""
+
+    def asset(self):
+        return dict(STUB_ASSET)
+
+    def positions(self):
+        return {CODE: {"volume": 5000, "can_use_volume": 5000,
+                       "market_value": 142250.0}}
+
+
 @pytest.fixture
 def client(monkeypatch, tmp_path, feed):
-    """面板级隔离: 三条路径全打 tmp + 行情打桩 + 清掉 5 秒结果缓存。
+    """面板级隔离: 三条路径全打 tmp + 行情/账户打桩 + 清掉 5 秒结果缓存。
 
     缓存必须清: 它是模块级的, 上一个用例的结果会漏进来, 让"重算路径"根本没跑。
     """
@@ -73,6 +89,7 @@ def client(monkeypatch, tmp_path, feed):
     monkeypatch.setattr(dash, "RUNTIME_PATH", tmp_path / "no_runtime.json")
     monkeypatch.setattr(dash, "SIGNAL_ROOT", tmp_path / "signals")
     monkeypatch.setattr(dash, "FEED_FACTORY", lambda: feed)
+    monkeypatch.setattr(dash, "ACCOUNT", StubAccount())
     dash._cache["at"], dash._cache["data"] = 0.0, None
     dash.app.config["TESTING"] = True
     yield dash.app.test_client()
@@ -95,6 +112,11 @@ def test_status_recompute_returns_expected_shape(client, tmp_path):
     assert d["signals_written"] == 0 and d["signals"] == []
     assert d["blocked"] == "面板只读重算(未落信号)"
     assert d["paused"] is False and d["armed"] is False
+    # 账户确实来自注入替身: 真去连 QMT 的话 source 与数值都不会长这样
+    # (换言之这条断言同时钉住"重算路径没碰 xtquant/真实持仓")
+    assert d["account"]["source"] == "qmt"
+    assert d["account"]["total_asset"] == STUB_ASSET["total_asset"]
+    assert d["account"]["positions"][CODE]["can_use_volume"] == 5000
     # 标的栏必须真的算出阶梯(前端靠它画档位)
     sym = next(s for s in d["symbols"] if s["code"] == CODE)
     assert sym["ref"] > 0 and sym["ladder"]
