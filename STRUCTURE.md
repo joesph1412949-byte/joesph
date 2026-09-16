@@ -12,8 +12,7 @@
 |---|---|---|
 | `prism/` | **主策略引擎**：36 因子、回测、模拟盘、实盘信号守护 | 项目 |
 | `prism_web/` | prism 的网页控制台（`http://127.0.0.1:5000`） | 项目 |
-| `tt/` | **做 T 策略引擎**（日内 T+0：底仓 + 网格 + 风控） | 项目 |
-| `tt_web/` | 做 T 监控台（`http://127.0.0.1:5010`，只读） | 项目 |
+| `tt_solo/` | **做 T 策略（自包含）**：日内 T+0 底仓 + 网格 + 风控 + 守护 + 面板（`http://127.0.0.1:5011`，只读） | 项目 |
 | `qmt_sync/` | miniQMT **成交/持仓同步**到本地 SQLite + 告警 | 项目 |
 | `datasource/` | **现役数据模块**（v04 网页被删后留下的数据层：DataSource/EastMoney/Fundamental/ManualStore/PerfStore；由 prism 与 prism_web 复用） | 项目 |
 | `qmt/` | **miniQMT 桥接与工具**（桥脚本 + 只读自检） | 桥接 |
@@ -96,21 +95,28 @@
 | `templates/` `static/` | 页面与前端资源 |
 | `tests/` | 网页测试 |
 
-### `tt/` — 做 T 策略引擎
+### `tt_solo/` — 做 T 策略（自包含包，2026-09-16 由 `tt/` + `tt_web/` 抽取）
+
+> 自包含：不 import `prism` / `shared` / `qmt_sync` / `backtest` / `legacy`，
+> 整包拷走即可独立运行（少数底座函数内联在 `ttcore/_vendor.py`）。
+> **操作手册见 `tt_solo/README.md`**；旧 `tt/` 与 `tt_web/`（面板 5010）已退役。
 
 | 文件 | 作用 |
 |---|---|
-| `config.py` | 策略参数（`tt_config.json` 是实际取值） |
-| `engine.py` | T 决策核心：算意图（intent） |
-| `grid.py` | 网格档位与挂单价计算 |
-| `market.py` | 行情获取（tick/快照） |
-| `risk.py` | **风控闸门**（时段/涨跌停/金额/次数/亏损，先硬后软） |
-| `state.py` | 状态机 + 账本持久化（`runtime/state/tt_state.json`） |
-| `daemon.py` | 守护进程：轮询 → 决策 → 落信号 → 记账（`python -m tt.daemon`） |
-| `sample_data/` `tests/` | 样例数据与测试 |
-
-### `tt_web/` — 做 T 监控台（:5010，只读）
-`app.py` + `templates/` + `static/`。能暂停，**不能下单**。
+| `ttcore/config.py` | 策略参数（`tt_config.json` 是实际取值） |
+| `ttcore/engine.py` | T 决策核心：算意图（intent） |
+| `ttcore/grid.py` | 网格档位与挂单价计算 |
+| `ttcore/market.py` | 行情获取（tick/快照，失败回落离线样本） |
+| `ttcore/risk.py` | **风控闸门**（时段/涨跌停/金额/次数/亏损，先硬后软） |
+| `ttcore/state.py` | 状态机 + 账本持久化（`tt_solo/runtime/state/tt_state.json`）+ 日终归档 |
+| `ttcore/broker.py` | miniQMT 账户只读适配层 |
+| `ttcore/executor.py` | 直连下单执行器（**全项目唯一会真报单的地方**） |
+| `ttcore/daemon.py` | 守护进程：轮询 → 决策 → 落信号 → 记账（`python -m ttcore.daemon`） |
+| `ttcore/arm_today.py` | 人工闸门工具（放行/急停/看状态） |
+| `ttcore/sample_data/` | 离线样本 K 线 |
+| `dashboard/` | 做 T 监控台（Flask，`:5011`，只监听本机；能急停，**不能下单**） |
+| `tools/compare_legacy.py` | 与旧 `tt/` 的对照取证（证明搬家零回归；旧树删除后失去意义） |
+| `tests/` `dashboard/tests/` | 223 例 pytest（2026-09-16） |
 
 ### `qmt_sync/` — QMT 成交/持仓同步
 `qmt_client.py`（连 QMT）、`sync.py`（拉取并入库）、`db.py`/`models.py`（SQLite）、
@@ -134,7 +140,8 @@
 | `common.py` | **路径真相来源**（`PROJECT_ROOT`/`CACHE_DIR`/`STATE_DIR`/`LOG_DIR`/`SIGNAL_ROOT`）、统一日志、A 股代码后缀、涨跌停比例 |
 | `exit_rules.py` | 卖出规则引擎：止盈 / 止损 / 持有期 / **T+1** / 可卖量 / 跌停顺延 |
 
-被 `prism`、`prism_web`、`strategy_web`、`tt`、`tt_web`、`ops` 共同引用。
+被 `prism`、`prism_web`、`datasource`、`tt_solo/dashboard`、`ops` 共同引用
+（`tt_solo/ttcore` **刻意不引用** `shared/`：它自带 `ttcore/_vendor.py` 以便整包拷走）。
 导入方式统一为 `from shared.xxx import ...`（各组件先把项目根注入 `sys.path`）。
 
 ### `backtest/` — 离线回测 ★本次新建
@@ -174,7 +181,7 @@ python legacy/strategy_close_pick.py send
 | 子目录 | 内容 | 可重建？ |
 |---|---|---|
 | `runtime/cache/` | `.market_data_cache.pkl`、`.zt_history_cache.pkl`、`fundamental_cache.json` | ✅ 可重新采集 |
-| `runtime/state/` | `.paper_account.json`（模拟盘账本）、`tt_state.json`、`tt_runtime.json`、`close_pick_state.json`、`live_state.json`、`positions.json` | ❌ **不可重建，注意备份** |
+| `runtime/state/` | `.paper_account.json`（模拟盘账本）、`close_pick_state.json`、`live_state.json`、`positions.json`（做T 自 2026-09-16 起有自己的 `tt_solo/runtime/state/`，不再写这里） | ❌ **不可重建，注意备份** |
 | `runtime/log/` | 各组件的按天轮转日志 | ✅ |
 
 整个 `runtime/` 已在 `.gitignore` 中忽略内容，只保留目录骨架（`.gitkeep`）。
@@ -191,7 +198,7 @@ python legacy/strategy_close_pick.py send
 | `启动模拟盘.bat` | 模拟盘守护 `python -m prism.paper_daemon` |
 | `启动做T守护.bat` | 做 T 守护（干跑，不发信号） |
 | `启动做T模拟守护.bat` | 做 T 守护（走 sim 通道） |
-| `启动做T监控台.bat` | 做 T 监控台 `http://127.0.0.1:5010` |
+| `启动做T监控台.bat` | 做 T 监控台 `http://127.0.0.1:5011` |
 | `install_watchdog.bat` | 注册开机任务跑 `ops/watchdog.py`（需管理员） |
 | `restart_vibe_backend.bat` | 重启外部 `D:\Vibe-Trading` 后端 |
 | 桌面 `PRISM.bat` | → `ops/prism_launcher.ps1`（模拟盘守护 + 网页 :5000） |
@@ -214,9 +221,15 @@ python legacy/strategy_close_pick.py send
 ## 五、常用命令速查
 
 ```bash
-# 全量测试（基线 720 passed / 0 failed，另 tt+qmt_sync 134 passed）
+# 全量测试（基线 720 passed / 0 failed，另做T tt_solo 223 passed + qmt_sync）
 python -m pytest prism/tests prism_web/tests strategy_web/tests tests -q \
     --import-mode=importlib --basetemp=D:\cc-joesph\pt_btNNN
+
+# 做T（自包含包，含面板测试）
+python -m pytest tt_solo -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_btNNN
+
+# 做T 与旧 tt/ 的行为对照（退出码 0 = 只差那一处已批准例外）
+python tt_solo\tools\compare_legacy.py
 
 # 模拟盘
 python -m prism.paper_daemon          # 守护

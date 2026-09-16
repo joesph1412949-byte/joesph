@@ -153,9 +153,18 @@ def _cli():
 
 
 def _guard():
-    """分级写护栏(2026-09-15): 远程敏感写 403, 远程选股放行, tt 闸门 403。"""
+    """分级写护栏(2026-09-15): 远程敏感写 403, 远程选股放行, 做T闸门 403。
+
+    做T面板自 2026-09-16 起是 `tt_solo/dashboard`(端口 5011), 旧 `tt_web`
+    (5010) 已退役: 这里若继续 import tt_web, 删目录后整个自检项抛 ImportError,
+    「远程调用者碰不了交易闸门」这条断言会**静默消失**(只剩一条 FAIL, 很容易被
+    当成环境问题忽略)。所以按新路径 import —— 断言本身一字不改。
+    """
     import prism_web.app as appmod
-    import tt_web.app as tt_app
+    # 追加而非插 0: tt_solo/tests、tt_solo/tools 会与根级同名目录抢名
+    if str(ROOT / "tt_solo") not in sys.path:
+        sys.path.append(str(ROOT / "tt_solo"))
+    import dashboard.app as tt_app
     env = {"REMOTE_ADDR": "127.0.0.1", "HTTP_CF_CONNECTING_IP": "203.0.113.7"}
     # prism_web: 敏感路由必须 403; 远程选股必须放行(非 403)
     c = appmod.app.test_client()
@@ -166,14 +175,14 @@ def _guard():
     r = c.post("/api/screen", json={"strategy": "x"}, environ_base=env)
     if r.status_code == 403:
         raise AssertionError("远程选股被误拦")
-    # tt_web: 做T闸门必须 403(真下单闸门绝不能远程碰)
+    # 做T面板(tt_solo/dashboard): 闸门必须 403(真下单闸门绝不能远程碰)
     ct = tt_app.app.test_client()
     for url in ("/api/pause", "/api/arm"):
         r = ct.post(url, json={"confirm": "true"}, environ_base=env)
         if r.status_code != 403:
-            raise AssertionError("tt_web 闸门 %s 未被拦: %d"
+            raise AssertionError("做T面板闸门 %s 未被拦: %d"
                                  % (url, r.status_code))
-    return "prism_web 敏感 403 / 远程选股放行 / tt_web 闸门 403 均验证"
+    return "prism_web 敏感 403 / 远程选股放行 / 做T面板(tt_solo/dashboard:5011) 闸门 403 均验证"
 
 
 def _public_tunnel():

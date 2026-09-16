@@ -2,6 +2,10 @@
 
 > 2026-09-15 ｜ 目的：在不报真单的前提下，把算法与链路测透
 > 核心原则：**命令行里不出现 `--live`，就永远不会下单**
+>
+> ⚠️ **2026-09-16 起命令已改指 `tt_solo/`**（旧 `tt/` 已退役）：旧写法
+> `python -m tt.daemon ...` 跑的是旧守护、写旧账本，而面板（5011）读 `tt_solo`
+> 的账本，两者共用 `D:/QMT_SIGNALS` → 会出现「面板空账，真单照发」。
 
 ---
 
@@ -11,11 +15,11 @@
 
 | 闸门 | 位置 | 当前状态（09-15） |
 |---|---|---|
-| 1. `dry_run` | `tt/tt_config.json` → `"dry_run": true` | ✅ 开着 |
+| 1. `dry_run` | `tt_solo/ttcore/tt_config.json` → `"dry_run": true` | ✅ 开着 |
 | 2. 放行条 `armed.txt` | `D:/QMT_SIGNALS/real/armed.txt` | ✅ 内容是 `20260914`，今天 `20260915` → **已自动失效** |
 | 3. 急停开关 `paused` | `D:/QMT_SIGNALS/paused` | 未创建（需要时一键开） |
 
-**闸门优先级**：`dry_run` > `paused` > `armed`（见 `tt/daemon.py` 的 `run_once()` 四分支）。
+**闸门优先级**：`dry_run` > `paused` > `armed`（见 `ttcore/daemon.py` 的 `run_once()` 四分支）。
 只要 `dry_run` 还是 `true`，后面两道**根本走不到**。所以今天想测代码，**什么都不用改，直接跑就行**。
 
 > 反过来说：**报真单需要同时满足** `dry_run=false` **且** `--live` **且** 放行条写了当天日期。
@@ -24,12 +28,12 @@
 
 ## 二、四层测试（从零风险到最接近实盘）
 
-| 层 | 命令 | 要 QMT? | 会下单? | 验证什么 |
+| 层 | 命令（先 `cd tt_solo`） | 要 QMT? | 会下单? | 验证什么 |
 |---|---|---|---|---|
-| **L1** 单元测试 | `python -m pytest tt/tests -q` | ❌ | ❌ | 代码逻辑（140 例） |
-| **L2** 离线样本 | `python -m tt.daemon --once --sample --fake-now` | ❌ | ❌ | 全链路跑通（写死的假行情） |
-| **L3** 真机干跑 ⭐ | `python -m tt.daemon --direct --once` | ✅ | ❌ | **真实行情 / 真实持仓 / 11 道风控 / 档位计算** |
-| **L4** 持续干跑 | `python -m tt.daemon --direct --interval 5` | ✅ | ❌ | 盘中动态响应（挂一整天看） |
+| **L1** 单元/面板测试 | `python -m pytest tt_solo -q --import-mode=importlib --basetemp=D:/cc-joesph/pt_btNNN`（在仓库根跑） | ❌ | ❌ | 策略 + 面板全绿（223 例） |
+| **L2** 离线样本 | `python -m ttcore.daemon --once --sample --fake-now` | ❌ | ❌ | 全链路跑通（写死的假行情） |
+| **L3** 真机干跑 ⭐ | `python -m ttcore.daemon --direct --once` | ✅ | ❌ | **真实行情 / 真实持仓 / 11 道风控 / 档位计算** |
+| **L4** 持续干跑 | `python -m ttcore.daemon --direct --interval 5` | ✅ | ❌ | 盘中动态响应（挂一整天看） |
 
 **L3 是今天最值得做的一层** —— 它连的是真账户、真行情，唯一区别就是最后那一下不报单。
 
@@ -45,8 +49,8 @@
 # 第 2 步：不用写放行条（dry-run 在 armed 检查之前，轮不到它）
 
 # 第 3 步：单轮干跑
-cd /d D:\cc-joesph
-python -m tt.daemon --direct --once
+cd /d D:\cc-joesph\tt_solo
+python -m ttcore.daemon --direct --once
 ```
 
 输出分三块，重点看第三块：
@@ -58,7 +62,7 @@ python -m tt.daemon --direct --once
 想挂久一点观察（推荐，能看到盘中价格变化如何触发不同档位）：
 
 ```bash
-python -m tt.daemon --direct --interval 5
+python -m ttcore.daemon --direct --interval 5
 # Ctrl+C 停
 ```
 
@@ -90,7 +94,7 @@ python -m tt.daemon --direct --interval 5
 
 买入必须等卖出**成交**后才放行，绝不允许日内净加仓。
 
-而 `tt/daemon.py` 的 `run_once()` 里，**dry-run 分支不调用 `_book()`**：
+而 `ttcore/daemon.py` 的 `run_once()` 里，**dry-run 分支不调用 `_book()`**：
 
 ```python
 if self.dry_run:
@@ -108,7 +112,8 @@ if self.dry_run:
 **补齐办法：`--book-dry-run`（已实现）**
 
 ```bash
-python -m tt.daemon --direct --interval 5 \
+cd /d D:\cc-joesph\tt_solo
+python -m ttcore.daemon --direct --interval 5 \
     --book-dry-run \
     --state runtime/state/tt_state.drill.json
 ```
@@ -139,14 +144,15 @@ python -m tt.daemon --direct --interval 5 \
 
 ```bash
 # 1. 放行当天
-python tt/arm_today.py
+cd /d D:\cc-joesph
+python tt_solo/ttcore/arm_today.py
 
 # 2. 改 dry_run=false（或直接用 --live 覆盖）
 #    双击 启动做T实盘直连.bat
 
 # 紧急情况
-python tt/arm_today.py --pause     # 一键急停
-python tt/arm_today.py --resume    # 解除
+python tt_solo/ttcore/arm_today.py --pause     # 一键急停
+python tt_solo/ttcore/arm_today.py --resume    # 解除
 ```
 
 ---
@@ -159,9 +165,9 @@ python -m qmt.tools.live_check
 python -m qmt.tools.live_check --quiet
 
 # 放行条状态
-python tt/arm_today.py --status
+python tt_solo/ttcore/arm_today.py --status
 
-# 全量回归（六路径）
-python -m pytest prism/tests prism_web/tests strategy_web/tests tests tt/tests qmt_sync/tests -q \
+# 全量回归（六路径; 做T侧已并入 tt_solo, 不再有独立的 tt/tests）
+python -m pytest prism/tests prism_web/tests strategy_web/tests tests tt_solo qmt_sync/tests -q \
     --import-mode=importlib --basetemp=D:/cc-joesph/pt_btNNN
 ```

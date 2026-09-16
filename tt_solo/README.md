@@ -8,7 +8,7 @@
 （band / 档位 / 风控 / 股数算法）与主项目 `tt/` 逐字段一致，唯一刻意例外见 §1 末尾。
 
 > ⚠️ **会动真金白银。** 默认 `dry_run` 不发任何单；真正下单要同时满足
-> ①显式 `--live` ②未急停 ③有当日放行条，缺一不可。**先跑 §2 的零副作用演练。**
+> ①显式 `--live` ②未急停 ③有当日放行条，缺一不可。**先跑 §2 的离线演练。**
 
 ---
 
@@ -36,11 +36,12 @@
 属主项目侧的潜在缺陷。当前配置的标的集里**没有** `920xxx`，所以这条分歧今天不会触发。
 `tools/compare_legacy.py` 把它钉成断言：**只许这一处、只许这一个档位**，其余任何分歧都判失败。
 
-## 2. 快速开始（离线演练，零副作用）
+## 2. 快速开始（离线演练，不碰交易）
 
 最安全的第一步 —— 用离线样本行情跑一轮决策并打印，**不写信号、不下单、不产生任何成交**，
-非交易时段也能跑。对交易零副作用；唯一会落盘的是运行数据（刷新
-`runtime/state/tt_runtime.json`；账本 `tt_state.json` 缺失或跨日时会新建/翻页）：
+非交易时段也能跑。**对交易零副作用**；但要说清楚"零副作用"只对交易成立，它**会落盘运行数据**：
+刷新 `runtime/state/tt_runtime.json`；账本 `runtime/state/tt_state.json` 缺失或跨日时会新建/翻页
+（跨日翻页还会往 `tt_history.jsonl` 追加一行归档）。这些都是本包自己的运行数据，可以随便删。
 
 ```powershell
 cd tt_solo
@@ -132,7 +133,7 @@ python -m ttcore.daemon --once --sample
 
 ```powershell
 python tt_solo/ttcore/arm_today.py --status    # 只看状态，不动任何文件
-python tt_solo/ttcore/arm_today.py             # 写今日放行条（并确保无急停）
+python tt_solo/ttcore/arm_today.py             # 写今日放行条（急停中则拒发）
 python tt_solo/ttcore/arm_today.py --pause     # 按急停（创建 paused）
 python tt_solo/ttcore/arm_today.py --resume    # 解除急停（删 paused）
 python tt_solo/ttcore/arm_today.py --disarm    # 撤销今日放行条（删 armed.txt）
@@ -142,6 +143,9 @@ python tt_solo/ttcore/arm_today.py --disarm    # 撤销今日放行条（删 arm
 
 - **`--status` 在"当前不可下单"时退出码是 1**（可以下单才是 0）。这是状态码，不是报错 ——
   别把它当成命令失败。
+- **`arm` 不解除急停，而是拒绝**：`paused` 存在时它打印提示并以**退出码 2** 退出，
+  `paused` 文件原样不动（先 `--resume` 再放行）。这是刻意的 fail-closed ——
+  放行条工具不该顺手把急停开关关掉。
 - `arm_today.py` 只操作 **`real`** 通道的 `armed.txt`（`ENV = "real"` 写死）。跑
   `--env sim` 的守护时，`sim/armed.txt` 得你自己写。
 
@@ -181,18 +185,18 @@ tt_solo/
 │   ├── tt_config.json      策略配置（标的、band、风控阈值、时段）
 │   └── sample_data/        离线样本行情（演练用）
 ├── dashboard/              监控面板（Flask）
-│   ├── app.py              后端；只监听 127.0.0.1
+│   ├── app.py              后端；只监听 127.0.0.1；**只读接口连账本翻页/归档都不做**
 │   ├── templates/          index.html 单页
 │   ├── static/             echarts.min.js
-│   └── tests/              面板测试（接口 / 远程拦截 / 前端契约）
-├── tests/                  策略核心测试（192 项）
+│   └── tests/              面板测试（接口 / 状态重算零写盘 / 远程拦截 / 前端契约）
+├── tests/                  策略核心测试（200 项）
 ├── tools/compare_legacy.py 与主项目 tt/ 的对照取证脚本
 └── runtime/                运行数据（默认，可覆盖；见 §7）
     ├── state/              账本 tt_state.json、快照 tt_runtime.json、归档 tt_history.jsonl
     └── log/
 ```
 
-整个套件 192（`tests/`）+ 17（`dashboard/tests/`）= **209 项**。
+整个套件 200（`tests/`）+ 23（`dashboard/tests/`）= **223 项**。
 
 ## 7. 数据归属：谁写哪儿
 
@@ -225,13 +229,19 @@ $env:PYTHONIOENCODING='utf-8'
 python -m pytest tt_solo -q --import-mode=importlib --basetemp=D:/cc-joesph/pt_btNNN
 ```
 
-实测：**209 passed**（`--basetemp` 里的 `NNN` 随便换个数，避免和上一轮残留撞车）。
+实测：**223 passed**（`--basetemp` 里的 `NNN` 随便换个数，避免和上一轮残留撞车）。
 
 与主项目 `tt/` 的行为对照（搬家后差异必须**恰好**是 §1 那一条已批准例外）：
 
 ```powershell
 python tt_solo\tools\compare_legacy.py     # 退出码 0 = 除该例外外一致(与控制台编码无关)
 ```
+
+> ⚠️ **它需要旧 `tt/` 树仍在**（左右两侧就是 `tt/` 与 `ttcore/`）。旧树删掉后这个脚本
+> 不再有判别力（跑不通或只剩单侧），保留只为**历史取证**：它记录的正是"搬家那天两侧一致"。
+> 同理 `tests/test_parity.py`：旧包删除后必须**一并删掉**，因为它的 `importorskip`
+> 会让整个文件变成 0 例的"跳过"—— 一个永远不跑、也永远不红的测试挂在套件里，
+> 比没有它更糟（看起来还在守）。见计划 Task 14 Step 2。
 
 > ⚠️ **必须在沙箱外跑。** 在受限沙箱里跑 pytest 会出现**假失败** —— 安全删除守卫拦掉
 > `--basetemp` 的清理、网络被拦截导致行情相关用例失败。这是环境问题，不是代码缺陷。
@@ -252,10 +262,17 @@ python tt_solo\tools\compare_legacy.py     # 退出码 0 = 除该例外外一致
 - **账户访问只读**：`ttcore/broker.py` 只做 `query_*` 查询，绝不调 `order_stock` /
   `cancel_order_stock`。全项目唯一会下单的模块是 `ttcore/executor.py`，且它只在
   `--direct` 且 `--live` 且 `paused` 不存在且 `armed` 就绪时才被调到。
-- **原子写保留 fsync**：`flush + os.fsync + os.replace`，崩溃/断电不会留下半截账本。
-- 演练（`--once --sample`）**不写信号、不下单**。需要 `--live` 的写盘动作只有两处：
-  信号文件（`--direct` 下则换成真实委托）与账本记账。另有一处与闸门无关的写盘：
+- **原子写保留 fsync**：`flush + os.fsync + os.replace`，崩溃/断电不会留下半截账本
+  （日终归档 `tt_history.jsonl` 走 append + `flush` + `fsync`：追加式比"读全文再原子替换"
+  更安全 —— 两个写入者同时判定"这天没归档"时，读-改-写会重复写甚至丢掉对方刚写的行）。
+- 演练（`--once --sample`）**不写信号、不下单**。需要 `--live` 的写盘动作有三处：
+  信号文件（`--direct` 下则换成真实委托）、账本记账、以及跨日翻页时的
+  **日终归档行 `tt_history.jsonl`**。另有一处与闸门无关的写盘：
   运行时快照 `tt_runtime.json` **每轮都会刷新**（面板靠它取数）。
+- **监控面板不改交易状态**：它的只读接口**一个字节都不写** —— 重算时用的是
+  `Ledger(writable=False)`（读盘、但 `load`/`reset_day`/`archive_current`/`save` 全是 no-op），
+  所以面板不会替守护决定"今天什么时候翻页"，也不会产生归档行。
+  面板唯一会写的是你**手动点**的急停/放行（`pause`/`arm`，均需 `confirm=true` 且仅限本机）。
 
 ## 10. 仪表盘
 
@@ -266,7 +283,8 @@ python dashboard/app.py          # → http://127.0.0.1:5011
 
 端口取自环境变量 `TT_WEB_PORT`，默认 **5011**。单页、无构建步骤，ECharts 已随包。
 数据来源优先用守护每轮写的运行时快照；快照缺失或超过 20 秒未更新时，现场跑一次**只读计划**
-重算（断掉账本写盘句柄，零副作用），此时页面会标注"按配置判定"以区分于实测值。
+重算 —— **读取磁盘账本，但绝不写入**（`Ledger(writable=False)`：不落盘、不翻页、不归档；
+信号文件只在按急停/放行时才会被写，且要 `confirm`）。此时页面会标注"按配置判定"以区分于实测值。
 
 五个区块：
 

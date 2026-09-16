@@ -175,7 +175,9 @@ python prism_web/app.py
 看到 `Running on http://127.0.0.1:5000` 即启动成功。一键启动全部组件
 (qmt_sync + prism_web + Vibe-Trading)可用 `python start_all.py` 或双击 `start_all.bat`。
 
-> 网页入口统一为 `prism_web`(5000)与 `tt_web`(5010); v04 网页入口已移除。
+> 网页入口统一为 `prism_web`(5000)与做T面板 `tt_solo/dashboard`(5011); v04 网页入口已移除。
+> 做T策略自 2026-09-16 起是自包含包 `tt_solo/`(旧 `tt/` + 旧面板 `tt_web/`(5010) 已退役),
+> 操作手册见 `tt_solo/README.md`。
 
 **3. 浏览器访问**
 
@@ -243,12 +245,15 @@ python prism_web/app.py
 
 ## 测试
 
-全部离线(无真实网络、无需 QMT)**808 个测试全绿**(2026-09-15 结构归位后: datasource 的 123 个
-失联测试已纳入, tt/ 与根级测试一并跑)。注意 `prism/tests/` 与根 `tests/` 各有一个
+全部离线(无真实网络、无需 QMT)**808 个测试全绿**(2026-09-15 结构归位时的口径: datasource 的
+123 个失联测试已纳入, 当时的 `tt/tests` 与根级测试一并跑)。做T 自 2026-09-16 起是自包含包
+`tt_solo/`(另有 223 例, 含面板测试), **单独跑**; 旧 `tt/` 删除后下面第一条命令去掉
+`tt/tests`、数字随之下调。注意 `prism/tests/` 与根 `tests/` 各有一个
 `test_backtest.py`(同名、不同对象), 同命令跑时由 importlib 模式按路径区分:
 
 ```bash
 python -m pytest prism/tests prism_web/tests datasource/tests tt/tests tests -q   # 808: 全仓一次跑完
+python -m pytest tt_solo -q --import-mode=importlib --basetemp=D:/cc-joesph/pt_btNNN  # 做T 223
 python -m prism.factor_check                         # 因子体检: 26 因子全 PASS
 ```
 

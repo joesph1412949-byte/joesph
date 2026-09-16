@@ -2263,6 +2263,10 @@ git commit -m "docs(tt_solo): README + requirements"
 - Delete: `tt_web/`（整目录）
 - Modify: `tt_solo/tests/test_parity.py`（旧包已删 → 移除）
 - Modify: `docs/superpowers/specs/2026-09-16-tt-solo-extract-design.md`（标注已执行）
+- Already modified（2026-09-16 终审修订, Step 1 的前置条件）:
+  `ops/smoke_check.py`、`ops/make_summary_pdf.py`、`tt_README.md`、
+  `docs/做T操作卡_20260915.md`、`docs/做T测试指南.md`、`STRUCTURE.md`、根 `README.md`、
+  `做T-今日放行.bat`
 
 **Interfaces:**
 - Consumes: 全部
@@ -2275,15 +2279,54 @@ Run:
 cd D:\cc-joesph
 Get-ChildItem . -Recurse -Include *.py,*.bat,*.ps1,*.md |
   Where-Object { $_.FullName -notmatch '\\(tt|tt_web|pt_bt[^\\]*|\.git|__pycache__|node_modules)\\' } |
-  Select-String -Pattern 'tt_web|from tt\.|import tt\b|tt\.daemon|tt\.arm_today'
+  Select-String -Pattern 'tt_web|from tt\.|import tt\b|tt\.daemon|tt\.arm_today|5010|做T'
 ```
-Expected: 只应剩下 `tt_solo/tests/test_parity.py`（即将移除）与文档提及。**任何运维脚本/看门狗/启动器的引用都必须先改完。**
+Expected: 只应剩下 `tt_solo/tests/test_parity.py`（Step 2 移除）、本计划的自身文本，以及**新入口**的提及
+（`tt_solo/`、`ttcore.daemon`、`5011`、`tt_solo/README.md`）。**任何运维脚本/看门狗/启动器/操作文档里
+还指着旧入口的引用, 都必须先改完。**
+
+> ⚠️ **2026-09-16 终审修订 —— 原 `Expected` 是错的。** 原清单只预期
+> `test_parity.py` + “文档提及”，但首轮扫描漏掉了下面这些**会真的坏掉**的引用，
+> 现已在本次修订中改完（改动清单见 Step 1.1）：
+>
+> | 类别 | 文件 | 原状态 | 后果 |
+> |---|---|---|---|
+> | **运维脚本（会 ImportError）** | `ops/smoke_check.py` | `import tt_web.app` 并断言做T闸门 403 | 删目录后整项抛 ImportError → **“远程碰不了交易闸门”这条断言静默消失** |
+> | **运维脚本** | `ops/make_summary_pdf.py` | `prod_dirs` 含 `tt`/`tt_web`；文案写“Flask 双控制台(5000/5010)” | 统计漏掉 `tt_solo/`、交付 PDF 写着已退役的端口 |
+> | **操作文档（交易员盘中会照做）** | `tt_README.md`、`docs/做T操作卡_20260915.md`、`docs/做T测试指南.md`、`STRUCTURE.md`、根 `README.md` | 仍命令旧守护/旧面板（`python -m tt.daemon ...`、`tt_web` 5010、`tt/arm_today.py`） | **今天就会出事**：旧守护写旧账本，5011 面板读 `tt_solo` 账本，两者共用 `D:/QMT_SIGNALS` → 面板空账、真单照发 |
+> | **对照工具的前提** | `tt_solo/tools/compare_legacy.py` | 依赖旧 `tt/` 树做左右对照 | 旧树删除后**失去意义**（不是坏掉）：保留作历史取证，README 已注明前提 |
+>
+> 另: 项目根 `MEMORY.md` 与本计划外的 spec 也可能提旧入口 —— 那些属于**并发的另一会话**，本修订刻意不动。
+
+- [ ] **Step 1.1: 复核这些改动仍在**（改动已于 2026-09-16 终审修订完成）
+
+```powershell
+cd D:\cc-joesph
+# ① 运维脚本已改指新入口
+Select-String -Path ops\smoke_check.py -Pattern 'dashboard\.app'          # 期望: 命中(且无 import tt_web)
+Select-String -Path ops\make_summary_pdf.py -Pattern 'tt_solo'           # 期望: 命中 4 处, 无 "5000/5010"
+# ② 操作文档里不再有可照抄的旧入口命令
+Select-String -Path tt_README.md,docs\做T操作卡_20260915.md,docs\做T测试指南.md,STRUCTURE.md,README.md `
+  -Pattern 'python -m tt\.daemon|python tt[/\\]arm_today|tt_web.*5010'
+```
+Expected: ① 两行都命中新入口；② **只应剩下 5 处"旧 `tt/` + 旧面板 5010 已退役"的说明性提及**
+（tt_README.md:5、做T操作卡:63、做T测试指南:7、STRUCTURE.md:102、README.md:179）。
+**不允许出现任何可照抄的旧命令模板** —— 判断标准是"交易员照着这段敲下去会启动旧守护吗"。
+
+再跑一次冒烟自检确认闸门断言真的还在：
+```powershell
+python -c "import sys; sys.path.insert(0,r'D:\cc-joesph'); from ops import smoke_check; print(smoke_check._guard())"
+```
+Expected: 打印 `... / 做T面板(tt_solo/dashboard:5011) 闸门 403 均验证`（**不得出现 ImportError**）
 
 同时检查（MEMORY 记载的踩坑）：
 ```powershell
 Get-ChildItem D:\cc-joesph\ops\*.py | Select-String -Pattern "tt_web|tt\.daemon|5000|5010"
 ```
-Expected: 确认 `ops/start_all.py` / `ops/watchdog.py` 不引用做T面板（只引用 prism_web）
+Expected: **只应剩下三类历史/说明性命中**：`start_all.py:66-67`、`watchdog.py:28` 的 prism_web
+端口 5000，以及 `smoke_check.py:158-159` / `make_summary_pdf.py:112` 里"旧 tt_web(5010) 已退役"
+与"5000 选股 / 5011 做T"的注释文字。
+即：`ops/start_all.py` / `ops/watchdog.py` **不引用做T面板**（只引用 prism_web）。
 
 - [ ] **Step 2: 处理 `test_parity.py`**
 

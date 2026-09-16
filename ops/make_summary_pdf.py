@@ -53,7 +53,7 @@ def _py_lines(dirs):
 
 
 def collect_stats():
-    prod_dirs = ["prism", "prism_web", "tt", "tt_web", "qmt", "qmt_sync",
+    prod_dirs = ["prism", "prism_web", "tt_solo", "qmt", "qmt_sync",
                  "shared", "backtest", "ops", "datasource", "strategy_web"]
     n_files, n_lines = _py_lines(prod_dirs)
     test_files = [f for f in ROOT.rglob("test_*.py")
@@ -102,15 +102,15 @@ ARCH_ROWS = [
     ["回测层", "prism/backtest · backtest/cli",
      "严格 as-of 切片防未来函数；基本面缓存按日分区；"
      "OOS 样本外验证入口"],
-    ["执行层", "prism/paper · paper_daemon · live_daemon · tt/",
+    ["执行层", "prism/paper · paper_daemon · live_daemon · tt_solo/",
      "模拟盘账本(原子写、现金/持仓约束)；实盘信号守护；"
      "做 T 策略(底仓+网格+风控)接 miniQMT 直连"],
     ["观察层", "prism/sector_stage · sector_etf_map",
      "板块感知：孕育期三信号、五阶段定位、资金惯性表；"
      "周度跟踪：周排名/ETF 锚点/60 日新高/纸面仓位上限定"],
-    ["界面层", "prism_web · tt_web",
-     "Flask 双控制台(5000/5010)：选股、行情、因子库、策略编辑、"
-     "回测、模拟盘、板块观察；只读监控台"],
+    ["界面层", "prism_web · tt_solo/dashboard",
+     "Flask 双控制台(5000 选股 / 5011 做T)：选股、行情、因子库、策略编辑、"
+     "回测、模拟盘、板块观察；做T只读监控台"],
 ]
 
 BARRIER_ITEMS = [
@@ -241,7 +241,7 @@ def build():
              ["规模", "%s 次提交 · %s 行生产代码 · %s 个测试文件"
               % (st["commits"], st["prod_lines"], st["test_files"])],
              ["时间", "%s 至今" % st["first"]],
-             ["产出", "prism 选股引擎 · prism_web 控制台 · tt 做T策略 · 数据层与回测框架"]]
+             ["产出", "prism 选股引擎 · prism_web 控制台 · tt_solo 做T策略 · 数据层与回测框架"]]
     ct = Table(cover, colWidths=[28 * mm, 130 * mm])
     ct.setStyle(TableStyle([
         ("FONTNAME", (0, 0), (-1, -1), "MSYH"),
