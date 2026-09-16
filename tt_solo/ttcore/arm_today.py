@@ -7,7 +7,7 @@
     程序可以常驻, 但每天必须有人点头。本工具就是那个"点头"按钮。
 
 用法:
-    python tt_solo/ttcore/arm_today.py             # 写今日放行条(并确保无急停)
+    python tt_solo/ttcore/arm_today.py             # 写今日放行条(急停中则拒发, 见 arm())
     python tt_solo/ttcore/arm_today.py --status    # 只看状态, 不动
     python tt_solo/ttcore/arm_today.py --pause     # 按急停(创建 paused 文件)
     python tt_solo/ttcore/arm_today.py --resume    # 解除急停(删 paused 文件)
@@ -38,7 +38,7 @@ def _today():
 
 
 def _atomic_write(path, text):
-    """原子写: 复用 shared.common.atomic_write(mkdir+fsync+os.replace)。"""
+    """原子写: 复用 _vendor.atomic_write(mkdir+fsync+os.replace)。"""
     atomic_write(path, text)
 
 

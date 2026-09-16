@@ -43,7 +43,7 @@ DEFAULT_INTERVAL = 5.0
 
 
 def _atomic_write(path, text):
-    """原子写: 复用 shared.common.atomic_write(mkdir+fsync+os.replace)。"""
+    """原子写: 复用 _vendor.atomic_write(mkdir+fsync+os.replace)。"""
     atomic_write(path, text)
 
 

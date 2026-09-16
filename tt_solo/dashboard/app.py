@@ -5,12 +5,14 @@
   - **只监听 127.0.0.1**: 面板能触发急停/ARM, 绝不对外网暴露;
   - **只读优先**: 绝大多数接口是只读快照; 仅 pause/arm 会写文件, 且必须
     显式带 confirm=true —— 避免误点或爬虫误触改变真实交易状态;
+  - **监控面不改交易状态**: 只读接口连账本翻页/归档都不做 —— 重算用的账本
+    是 `Ledger(writable=False)`(见 ttcore/state.py), 读盘但绝不落盘;
   - **不碰交易**: 本服务不调用任何下单接口, 只能"关闸"(paused), 不能开单;
   - **脱敏**: /api/config 不回传账号等敏感字段。
 
 数据来源优先级:
   1. tt_runtime.json —— 守护每轮写的快照(最新, 且含真实 arm/paused 判定);
-  2. 若快照缺失或过期, 现场跑一次**只读 plan**(断掉写盘句柄), 不产生副作用。
+  2. 若快照缺失或过期, 现场跑一次**只读 plan**(只读账本 + 不写信号、不落盘)。
 
 启动: python tt_solo/dashboard/app.py  # http://127.0.0.1:5011
 """
@@ -42,6 +44,8 @@ RUNTIME_PATH = STATE_DIR / "tt_runtime.json"
 # 信号根目录可用环境变量覆盖, 便于演练/测试时与真实 QMT 目录隔离
 SIGNAL_ROOT = Path(os.environ.get("TT_SIGNAL_ROOT") or r"D:/QMT_SIGNALS")
 RUNTIME_MAX_AGE = 20.0          # 秒: 超过则视为过期, 现场重算
+# 行情工厂: 模块级常量, 测试打桩用(与 SIGNAL_ROOT/STATE_PATH 同款缝)
+FEED_FACTORY = market.make_feed
 
 _cache = {"at": 0.0, "data": None}
 
@@ -67,18 +71,21 @@ def _runtime_age():
 
 
 def readonly_plan():
-    """现场跑一次 plan, 但断掉账本的写盘句柄 —— 零副作用。
+    """现场跑一次 plan, 账本用只读模式, 不写信号 —— **不落盘**。
 
     结果缓存 5 秒, 避免面板自动刷新时反复拉行情。
+
+    零写盘是结构保证, 不是靠断句柄: `Ledger(writable=False)` 的
+    load/reset_day/archive_current/_preserve_unarchived/save 全是 no-op,
+    所以既不会给今天翻页, 也不会把昨天的账本归档进 tt_history.jsonl。
     """
     now = time.time()
     if _cache["data"] is not None and now - _cache["at"] < 5.0:
         return _cache["data"]
     cfg = tt_config.load()
-    led = Ledger(path=STATE_PATH)
+    led = Ledger(path=STATE_PATH, writable=False)
     led.load()
-    led.path = None                      # 关键: 后续 save() 直接 return
-    eng = TTEngine(cfg, led, feed=market.make_feed(), now_fn=None,
+    eng = TTEngine(cfg, led, feed=FEED_FACTORY(), now_fn=None,
                    force_paper=False)
     plan = eng.plan()
     plan["runtime_at"] = datetime.now().isoformat(timespec="seconds")
@@ -171,7 +178,7 @@ def api_kline(code):
         n = 60
     n = max(20, min(n, 250))
     try:
-        feed = market.make_feed()
+        feed = FEED_FACTORY()
         closes = feed.closes(code, count=n)
         # 样本源带 high/low; QMT 源只有 close, 这里用 close 兜底保证图能画
         rows = []

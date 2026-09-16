@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""tt_web 交易闸门护栏测试: 远程禁 pause/arm, 本机放行。全离线——
+"""dashboard 交易闸门护栏测试: 远程禁 pause/arm, 本机放行。全离线——
 信号根目录用 TT_SIGNAL_ROOT 环境变量打到 tmp, 不碰真实 D:/QMT_SIGNALS。"""
 import os
 import sys
@@ -21,13 +21,15 @@ def client(monkeypatch, tmp_path):
     return app_module.app.test_client()
 
 
-def test_remote_blocked_pause_arm(client):
+def test_remote_blocked_pause_arm(client, tmp_path):
     """公网来源(remote=100.x, 无 CF 头) → 403, 闸门文件不被触碰。"""
     env = {"REMOTE_ADDR": "100.64.1.2"}
     for url in ("/api/pause", "/api/arm"):
         r = client.post(url, json={"confirm": "true"}, environ_base=env)
         assert r.status_code == 403
         assert "仅限本机" in r.get_json()["error"]
+    # 护栏的意义就在这: 被拦的那次连一个闸门文件都不许留下
+    assert list(tmp_path.iterdir()) == [], "远程请求竟在信号根留下了文件"
 
 
 def test_local_pause_arm_ok(client, monkeypatch, tmp_path):
@@ -35,7 +37,8 @@ def test_local_pause_arm_ok(client, monkeypatch, tmp_path):
     for url in ("/api/pause", "/api/arm"):
         r = client.post(url, json={"confirm": "true"},
                         environ_base={"REMOTE_ADDR": "127.0.0.1"})
-        assert r.status_code != 403
+        assert r.status_code == 200, r.get_json()   # 精确到 200: 500 不算"放行"
+        assert r.get_json()["ok"] is True
     # 既有语义抽查: pause 的 confirm 校验仍在(护栏放行后走到路由本体)
     r = client.post("/api/pause", json={}, environ_base={"REMOTE_ADDR": "127.0.0.1"})
     assert r.status_code == 400          # 缺 confirm → 400 而非 403

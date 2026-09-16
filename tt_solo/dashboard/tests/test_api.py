@@ -20,8 +20,12 @@ def test_health_ok(client):
 
 
 def test_index_renders(client):
+    """首页不只是 200: 模板必须真的渲染出区块骨架(空模板也能返回 200)。"""
     r = client.get("/")
     assert r.status_code == 200
+    html = r.get_data(as_text=True)
+    for eid in ("gates", "account", "ladders", "battle", "rejections", "equity"):
+        assert 'id="%s"' % eid in html, "首页缺区块: %s" % eid
 
 
 def test_config_is_masked(client):

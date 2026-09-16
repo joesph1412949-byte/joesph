@@ -15,6 +15,7 @@
   - **events 环形截断**: 只留最近 N 条, 防止状态文件无限膨胀(它是每秒读的)。
 """
 import json
+import os
 from datetime import datetime, date
 from pathlib import Path
 
@@ -70,11 +71,17 @@ def _atomic_write(path, text):
 
 
 class Ledger:
-    """当日 T 账本。所有变更即时落盘(可注入 path=None 表示纯内存)。"""
+    """当日 T 账本。所有变更即时落盘(可注入 path=None 表示纯内存)。
 
-    def __init__(self, path=None, now_fn=None):
+    writable=False = **只读模式**: 一样读盘, 但 load/reset_day/archive_current/
+    _preserve_unarchived/save 一个字节都不写。给监控面板用 —— 面板必须能读到
+    真实账本, 又绝不能改变交易状态(包括"什么时候翻页")。
+    """
+
+    def __init__(self, path=None, now_fn=None, writable=True):
         self.path = path if path is not None else DEFAULT_STATE_PATH
         self.now_fn = now_fn or datetime.now
+        self.writable = bool(writable)
         self.state = _empty_state(_today_str(self.now_fn()))
         self._loaded = False
         # 日终归档: 与账本同目录的 append-only JSONL(见 archive_current)
@@ -86,7 +93,12 @@ class Ledger:
 
     def load(self):
         """读盘。跨日 → 先归档旧账本; 同日的版本/结构不符 → 改名留档;
-        损坏 → 直接重置。两者都不让存量数据凭空消失, 再重置为新日账本。"""
+        损坏 → 直接重置。两者都不让存量数据凭空消失, 再重置为新日账本。
+
+        只读模式: 只认"当日有效"的账本; 跨日 / 版本不符 / 损坏一律不归档、
+        不改名、不落盘 —— 内存里留着的就是新一天的空账本(拿昨天的成交冒充
+        今天会让重算出的档位与净敞口全错)。
+        """
         today = _today_str(self.now_fn())
         if self.path and Path(self.path).exists():
             try:
@@ -97,6 +109,9 @@ class Ledger:
                         and isinstance(raw.get("symbols"), dict)):
                     raw.setdefault("events", [])
                     self.state = raw
+                    self._loaded = True
+                    return self.state
+                if not self.writable:
                     self._loaded = True
                     return self.state
                 # 存量数据两条出路, 一律不许"就地覆盖丢掉":
@@ -115,6 +130,9 @@ class Ledger:
                         self._preserve_unarchived(raw)
             except (ValueError, OSError):
                 pass                          # 坏文件 → 按新日重置(fail-safe)
+        if not self.writable:
+            self._loaded = True
+            return self.state                 # 只读: 盘上没有可用的今日账本
         self.state = _empty_state(today)
         self._loaded = True
         self.save()
@@ -122,6 +140,10 @@ class Ledger:
 
     def reset_day(self, day=None):
         target = _today_str(day or self.now_fn())
+        if not self.writable:
+            # 只读: 翻页只发生在内存里 —— 不归档、不落盘(见 load())
+            self.state = _empty_state(target)
+            return self.state
         # 只归档已完结的日: 同日手动 reset 不归档(否则半日行钉死今天, 见 load())
         if self.state.get("date") != target:
             self.archive_current()
@@ -149,6 +171,8 @@ class Ledger:
         fail-safe: 与归档同款 —— 任何异常吞掉, 备份是旁路, 绝不阻断载入/交易。
         """
         try:
+            if not self.writable:
+                return                        # 只读模式: 改名也是写
             p = Path(self.path)
             if not p.exists():
                 return
@@ -195,6 +219,8 @@ class Ledger:
         它影响交易主流程。空账本(无成交且无事件)不写, 避免跨日刷垃圾行。
         """
         try:
+            if not self.writable:
+                return False                  # 只读模式: 归档就是写
             if not self.history_path:
                 return False
             syms = self.state.get("symbols") or {}
@@ -221,9 +247,15 @@ class Ledger:
             }
             p = Path(self.history_path)
             p.parent.mkdir(parents=True, exist_ok=True)
-            # append-only: 读旧内容 → 追加 → 原子替换(保证读者永不见半行)
-            old = p.read_text(encoding="utf-8") if p.exists() else ""
-            atomic_write(p, old + json.dumps(row, ensure_ascii=False) + "\n")
+            # append-only = 真的 append。绝不做"读全文 → 拼接 → 原子替换":
+            # 幂等判据来自 __init__ 读一次的日期集合, 两个写入者(守护首轮 +
+            # 面板重算 / Flask 多线程)都认为"这天没归档"时会各写一行; 读-改-写
+            # 除了重复写, 还会把对方刚追加的行整段盖掉。读者本来就按行容错
+            # (坏行跳过), 所以 append 严格更安全。
+            with open(p, "a", encoding="utf-8") as fp:
+                fp.write(json.dumps(row, ensure_ascii=False) + "\n")
+                fp.flush()
+                os.fsync(fp.fileno())     # 与 atomic_write 同款: 掉电不丢这一行
             self._archived_dates.add(day)
             return True
         except Exception:                 # noqa: BLE001 - 刻意吞掉一切
@@ -231,7 +263,12 @@ class Ledger:
 
     @staticmethod
     def read_history(path=None, limit=60):
-        """读归档历史(升序)。坏行跳过; 文件不存在 → []。"""
+        """读归档历史(升序, 每个 date 只留最后一行)。坏行跳过; 不存在 → []。
+
+        去重是必须的: 同日可能被两个写入者各追加一次(幂等判据是内存里的集合),
+        而前端是**累加**画收益曲线 —— 重复日会让当日盈亏静默翻倍, 正是归档
+        要防的事。保留最后一行 = 保留后写的那个(并发时更完整的那次)。
+        """
         p = (Path(path).with_name(HISTORY_NAME) if path
              else STATE_DIR / HISTORY_NAME)
         try:
@@ -249,6 +286,10 @@ class Ledger:
                 if isinstance(obj, dict):     # 标量行跳过(见 _load_archived_dates)
                     rows.append(obj)
             rows.sort(key=lambda r: str(r.get("date") or ""))
+            uniq = {}                         # 同日只留最后一行, 顺序仍是 date 升序
+            for r in rows:
+                uniq[str(r.get("date") or "")] = r
+            rows = list(uniq.values())
             return rows[-int(limit):] if limit else rows
         # 与 _load_archived_dates 同款 fail-safe: 归档文件损坏(如非 UTF-8)只让
         # 读者拿到 [], 不把 UnicodeDecodeError 抛给调用方(BaseException 仍上抛)。
@@ -258,7 +299,7 @@ class Ledger:
     # ---------------- 读写 ----------------
 
     def save(self):
-        if not self.path:
+        if not self.writable or not self.path:
             return
         self.state["updated_at"] = datetime.now().isoformat(timespec="seconds")
         _atomic_write(self.path, json.dumps(self.state, ensure_ascii=False,

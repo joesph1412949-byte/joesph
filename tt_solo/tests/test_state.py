@@ -200,7 +200,11 @@ def test_archive_is_idempotent_per_date(tmp_path, now_fn):
 
 
 def test_archive_failure_does_not_raise(tmp_path, now_fn, monkeypatch):
-    """归档异常必须被吞掉 —— 绝不影响交易主流程。"""
+    """归档异常必须被吞掉 —— 绝不影响交易主流程。
+
+    注: 归档自终审修订起走 append(open/flush/fsync, 不再读-改-写整file),
+    所以故障注入点从 atomic_write 移到 fsync —— 断言与意图不变。
+    """
     from ttcore import state as st
     led = st.Ledger(path=tmp_path / "tt_state.json", now_fn=now_fn)
     led.load()
@@ -209,7 +213,7 @@ def test_archive_failure_does_not_raise(tmp_path, now_fn, monkeypatch):
 
     def boom(*a, **k):
         raise OSError("disk full")
-    monkeypatch.setattr(st, "atomic_write", boom)
+    monkeypatch.setattr(st.os, "fsync", boom)
     assert led.archive_current() is False        # 不抛异常
 
 
@@ -470,3 +474,140 @@ def test_archive_row_payload_values(tmp_path):
     assert row["trades"] == 3                        # events 条数
     assert row["symbols"] == {"600900.SH": 120.0, "601398.SH": 0.0}
     assert row["archived_at"]                        # 时间戳存在即可(非本用例重点)
+
+
+# ---------------- 终审修复: 只读账本(I1) + 归档 append/去重(I2) ----------------
+
+def _stale_ledger(day="2026-09-14", sold=800):
+    return {
+        "version": 1, "date": day, "updated_at": day + "T15:00:00",
+        "symbols": {"600900.SH": {"sold_today": sold, "bought_today": 300,
+                                  "trips": 1, "realized_pnl": 120.0}},
+        "events": [],
+    }
+
+
+def test_readonly_ledger_stale_load_writes_nothing(tmp_path):
+    """`writable=False` 的账本 load() 跨日不得归档/改名/落盘。
+
+    这是"监控面绝不改交易状态"的根: 面板以前只是 `led.path = None` 堵住
+    save(), 而 load() 的归档走的是 history_path, plan() 还能经
+    roll_if_new_day → reset_day 再归档一次 —— 两处都绕过了那个 hack。
+    """
+    p = tmp_path / "tt_state.json"
+    p.write_text(json.dumps(_stale_ledger()), encoding="utf-8")
+    before = p.read_bytes()
+
+    led = Ledger(path=p, writable=False,
+                 now_fn=lambda: datetime(2026, 9, 15, 10, 0))
+    led.load()
+
+    assert p.read_bytes() == before                 # 原账本一字未动
+    assert not (tmp_path / "tt_history.jsonl").exists()   # 没归档
+    assert list(tmp_path.glob("*.bak")) == []             # 没改名留档
+    assert led.state["date"] == "2026-09-15"              # 内存里按今天算
+    assert led.state["symbols"] == {}                     # 旧账本不冒充今日事实
+
+
+def test_readonly_ledger_roll_and_archive_are_noops(tmp_path):
+    """只读模式的 archive/reset/save 一律不落盘, 翻页只在内存里发生。
+
+    内存翻页是刻意的: 盘上账本是昨天的 → 面板该显示"今天从零开始", 而不是
+    拿昨天的成交冒充今天(那会让重算出的档位/净敞口全错)。
+    """
+    t = {"now": datetime(2026, 9, 14, 10, 0)}
+    led = Ledger(path=tmp_path / "tt_state.json", writable=False,
+                 now_fn=lambda: t["now"])
+    led.load()
+    led.sym("600900.SH")["sold_today"] = 500        # 内存里造料
+    assert led.archive_current() is False           # 不写归档
+    t["now"] = datetime(2026, 9, 15, 10, 0)
+    assert led.roll_if_new_day() is True            # 内存翻页
+    assert led.state["date"] == "2026-09-15" and led.state["symbols"] == {}
+    led.set_units("600900.SH", "SELL", 2)           # 内部会调 save()
+    led.record_fill("600900.SH", "SELL", 28.5, 100, hhmm="10:00")
+    assert not (tmp_path / "tt_state.json").exists()
+    assert not (tmp_path / "tt_history.jsonl").exists()
+
+
+def test_readonly_ledger_reads_todays_file(tmp_path):
+    """只读 != 不读: 当日有效账本必须被读进来(面板要显示真实账本)。"""
+    p = tmp_path / "tt_state.json"
+    p.write_text(json.dumps(_stale_ledger(day="2026-09-15")),
+                 encoding="utf-8")
+    before = p.read_bytes()
+    led = Ledger(path=p, writable=False,
+                 now_fn=lambda: datetime(2026, 9, 15, 10, 0))
+    led.load()
+    assert led.sym("600900.SH")["sold_today"] == 800
+    assert led.snapshot()["total_realized_pnl"] == 120.0
+    assert p.read_bytes() == before                 # 读到也不回写(updated_at 不变)
+
+
+def test_readonly_ledger_does_not_rename_version_mismatch(tmp_path):
+    """同日版本不符 → 只读模式不改名留档(.bak 也是写), 只是不认它。"""
+    p = tmp_path / "tt_state.json"
+    p.write_text(json.dumps({"version": 99, "date": "2026-09-15",
+                             "symbols": {"600900.SH": {"sold_today": 800}},
+                             "events": []}), encoding="utf-8")
+    before = p.read_bytes()
+    led = Ledger(path=p, writable=False,
+                 now_fn=lambda: datetime(2026, 9, 15, 10, 0))
+    led.load()
+    assert p.read_bytes() == before
+    assert list(tmp_path.glob("*.bak")) == []
+    assert led.state["symbols"] == {}               # 不认版本不符的账本
+
+
+def test_readonly_ledger_missing_file_creates_nothing(tmp_path):
+    """盘上没账本时, 只读账本不得"顺手建一个空的"。"""
+    led = Ledger(path=tmp_path / "tt_state.json", writable=False,
+                 now_fn=lambda: datetime(2026, 9, 15, 10, 0))
+    led.load()
+    assert led.state["date"] == "2026-09-15"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_archive_appends_even_if_history_has_garbage(tmp_path):
+    """归档是 append: 文件里混了非 UTF-8 垃圾时, 新行仍必须写进去。
+
+    读-改-写会先 `read_text(utf-8)` 在这行上抛 UnicodeDecodeError, 异常被
+    fail-safe 吞掉后**这一天的归档行直接丢了**(历史静默缺一天, 收益曲线断点);
+    读者本来就按行容错(坏行跳过), 所以 append 严格更安全。
+    """
+    hist = tmp_path / "tt_history.jsonl"
+    hist.write_bytes(b'{"date": "2026-09-13", "sold_total": 7}\n\xff\xfe bad\n')
+    led = Ledger(path=tmp_path / "tt_state.json",
+                 now_fn=lambda: datetime(2026, 9, 14, 10, 0))
+    led.load()
+    led.record_fill("600900.SH", "SELL", 28.5, 100, hhmm="10:00", reason="档位1")
+    assert led.archive_current() is True
+    assert b'"date": "2026-09-14"' in hist.read_bytes()
+
+
+def test_read_history_dedupes_duplicate_dates(tmp_path):
+    """同日多行(两个写入者各追加一次)只算一次 —— 前端收益曲线是累加的。
+
+    幂等判断靠 __init__ 读一次得到的日期集合, 两个写入者可能都认为"没归档过",
+    于是同一天落两行。重复日会**静默翻倍**当日盈亏, 正是归档要防的事。
+    """
+    (tmp_path / "tt_history.jsonl").write_text(
+        '{"date": "2026-09-14", "sold_total": 100, "realized_pnl": 10.0}\n'
+        '{"date": "2026-09-15", "sold_total": 200, "realized_pnl": 20.0}\n'
+        '{"date": "2026-09-14", "sold_total": 999, "realized_pnl": 99.0}\n',
+        encoding="utf-8")
+    rows = Ledger.read_history(tmp_path / "tt_state.json")
+    assert [r["date"] for r in rows] == ["2026-09-14", "2026-09-15"]
+    assert rows[0]["realized_pnl"] == 99.0          # 保留最后一次(重写的那行)
+    assert rows[1]["realized_pnl"] == 20.0
+
+
+def test_read_history_limit_counts_distinct_days(tmp_path):
+    """limit 按"天"算, 不被重复行挤占(否则图上少画几天)。"""
+    (tmp_path / "tt_history.jsonl").write_text(
+        '{"date": "2026-09-14", "realized_pnl": 1.0}\n'
+        '{"date": "2026-09-15", "realized_pnl": 2.0}\n'
+        '{"date": "2026-09-14", "realized_pnl": 9.0}\n',
+        encoding="utf-8")
+    rows = Ledger.read_history(tmp_path / "tt_state.json", limit=1)
+    assert [r["date"] for r in rows] == ["2026-09-15"]

@@ -3,7 +3,7 @@
 
 两个后端, 同一接口:
   - XtdataBackend : 真实 miniQMT 行情(xtdata)。缺历史数据时自动补下载。
-  - SampleBackend : 读 tt/sample_data/*.csv 的离线样本(非交易时段演示/测试)。
+  - SampleBackend : 读 ttcore/sample_data/*.csv 的离线样本(非交易时段演示/测试)。
 
 所有方法 fail-open(取不到 → None / {}), 由上层 fail-closed 决策:
 拿不到行情就不做T, 而不是拿旧价硬做。
@@ -116,7 +116,7 @@ class XtdataBackend:
 
 
 class SampleBackend:
-    """离线样本后端: 读 tt/sample_data/<code>.csv (date,close,high,low)。"""
+    """离线样本后端: 读 ttcore/sample_data/<code>.csv (date,close,high,low)。"""
 
     def __init__(self, sample_dir=None):
         self.dir = Path(sample_dir or SAMPLE_DIR)
