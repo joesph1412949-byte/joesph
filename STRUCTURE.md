@@ -196,14 +196,13 @@ python legacy/strategy_close_pick.py send
 |---|---|
 | `start_all.bat` | 一键全启（qmt_sync + prism_web + Vibe 前后端） |
 | `启动模拟盘.bat` | 模拟盘守护 `python -m prism.paper_daemon` |
-| `启动做T守护.bat` | 做 T 守护（干跑，不发信号） |
-| `启动做T模拟守护.bat` | 做 T 守护（走 sim 通道） |
-| `启动做T监控台.bat` | 做 T 监控台 `http://127.0.0.1:5011` |
+| `tt_solo/tifosi.bat`（桌面 `tifosi.bat` 是薄壳） | 做 T 统一入口：守护/直连/模拟（演练）、仪表盘 `:5011`、今日放行、闸门状态；高级选项含真报单 |
 | `install_watchdog.bat` | 注册开机任务跑 `ops/watchdog.py`（需管理员） |
 | `restart_vibe_backend.bat` | 重启外部 `D:\Vibe-Trading` 后端 |
 | 桌面 `PRISM.bat` | → `ops/prism_launcher.ps1`（模拟盘守护 + 网页 :5000） |
 
 > 这些留在根目录是为了**双击即用**；逻辑实现全部在 `ops/`。
+> 做 T 是例外：实现在 `tt_solo/tifosi.bat`，桌面 `tifosi.bat` 只是指向它的薄壳。
 
 ### 文档与配置
 

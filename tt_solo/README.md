@@ -78,20 +78,21 @@ python -m ttcore.daemon --once --sample
 
 ## 3. 六种运行方式
 
-六个 `.bat` 都在仓库根，且都会设 `PYTHONIOENCODING=utf-8`（Windows 控制台默认 GBK，
-不设的话中文输出会乱码甚至抛 `UnicodeEncodeError`）。#1–#4、#6 会自己 `cd /d` 进 `tt_solo/`；
-#5 用的是 `arm_today.py` 的绝对路径，在哪儿双击都行。手动敲命令时请照做。
+六个入口都收在 `tt_solo/tifosi.bat`（桌面 `tifosi.bat` 只是指向它的薄壳），它自己会
+`cd /d D:\cc-joesph\tt_solo` 并设 `PYTHONIOENCODING=utf-8`（Windows 控制台默认 GBK，
+不设的话中文输出会乱码甚至抛 `UnicodeEncodeError`）。手动敲命令时请照做。
 
-| # | 用途 | 命令（在 `tt_solo/` 下） | 对应 .bat |
+| # | 用途 | 命令（在 `tt_solo/` 下） | 对应入口 |
 |---|------|------------------------|-----------|
-| 1 | 守护 · **信号文件通道** · 演练（默认） | `python -m ttcore.daemon --interval 5` | `启动做T守护.bat` |
-| 2 | 守护 · **QMT 模拟通道** · 演练 | `python -m ttcore.daemon --interval 5 --env sim` | `启动做T模拟守护.bat` |
-| 3 | 守护 · **直连 miniQMT** · 演练 | `python -m ttcore.daemon --direct --interval 5` | `启动做T直连守护.bat` |
-| 4 | 守护 · **直连 miniQMT · 实盘** ⚠️ | `python -m ttcore.daemon --direct --live --interval 5` | `启动做T实盘直连.bat` |
-| 5 | **当日放行条** / 急停 | `python ttcore/arm_today.py` | `做T-今日放行.bat` |
-| 6 | **监控面板** | `python dashboard/app.py` | `启动做T监控台.bat` |
+| 1 | 守护 · **信号文件通道** · 演练（默认） | `python -m ttcore.daemon --interval 5` | `tifosi` 主菜单 1 |
+| 2 | 守护 · **QMT 模拟通道** · 演练 | `python -m ttcore.daemon --interval 5 --env sim` | `tifosi` 主菜单 3 |
+| 3 | 守护 · **直连 miniQMT** · 演练 | `python -m ttcore.daemon --direct --interval 5` | `tifosi` 主菜单 2 |
+| 4 | 守护 · **直连 miniQMT · 实盘** ⚠️ | `python -m ttcore.daemon --direct --live --interval 5` | `tifosi` 高级选项 A → 1（再按 `Y` 确认） |
+| 5 | **当日放行条** / 急停 | `python ttcore/arm_today.py` | `tifosi` 主菜单 5（急停/解除/撤销在高级选项 A） |
+| 6 | **监控面板** | `python dashboard/app.py` | `tifosi` 主菜单 4（闸门状态见主菜单 6） |
 
-**⚠️ 第 4 行是唯一会真实报单的方式。** 它对应的 `.bat` 里有 8 秒倒计时给你反悔；
+**⚠️ 第 4 行是唯一会真实报单的方式。** `tifosi` 里它藏在高级选项 A 后面，
+选中后还要按 `Y` 二次确认，再等 8 秒倒计时（可 Ctrl+C 反悔）；
 先跑第 3 行确认意图无误，再上第 4 行。
 
 两条下发通道**二选一**：

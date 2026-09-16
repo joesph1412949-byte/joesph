@@ -14,14 +14,14 @@
 
 ## 1. 现在该敲的命令（全部在 `tt_solo/` 下）
 
-| 用途 | 命令 | 对应 .bat |
+| 用途 | 命令 | 对应入口 |
 |---|---|---|
-| 守护 · 信号文件通道 · 演练（默认） | `python -m ttcore.daemon --interval 5` | `启动做T守护.bat` |
-| 守护 · QMT 模拟通道 · 演练 | `python -m ttcore.daemon --interval 5 --env sim` | `启动做T模拟守护.bat` |
-| 守护 · 直连 miniQMT · 演练 | `python -m ttcore.daemon --direct --interval 5` | `启动做T直连守护.bat` |
-| 守护 · 直连 miniQMT · **实盘** ⚠️ | `python -m ttcore.daemon --direct --live --interval 5` | `启动做T实盘直连.bat` |
-| 当日放行条 / 急停 | `python ttcore/arm_today.py` | `做T-今日放行.bat` |
-| 监控面板（**5011**） | `python dashboard/app.py` | `启动做T监控台.bat` |
+| 守护 · 信号文件通道 · 演练（默认） | `python -m ttcore.daemon --interval 5` | `tifosi` 主菜单 1 |
+| 守护 · QMT 模拟通道 · 演练 | `python -m ttcore.daemon --interval 5 --env sim` | `tifosi` 主菜单 3 |
+| 守护 · 直连 miniQMT · 演练 | `python -m ttcore.daemon --direct --interval 5` | `tifosi` 主菜单 2 |
+| 守护 · 直连 miniQMT · **实盘** ⚠️ | `python -m ttcore.daemon --direct --live --interval 5` | `tifosi` 高级选项 A → 1（再按 `Y` 确认） |
+| 当日放行条 / 急停 | `python ttcore/arm_today.py` | `tifosi` 主菜单 5（急停/解除/撤销在高级选项 A） |
+| 监控面板（**5011**） | `python dashboard/app.py` | `tifosi` 主菜单 4（闸门状态见主菜单 6） |
 
 **每个交易日都必须重新放行一次**（`armed.txt` 只认当日 `YYYYMMDD`），这是刻意的人工确认点。
 

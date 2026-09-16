@@ -148,7 +148,7 @@ cd /d D:\cc-joesph
 python tt_solo/ttcore/arm_today.py
 
 # 2. 改 dry_run=false（或直接用 --live 覆盖）
-#    双击 启动做T实盘直连.bat
+#    双击 tifosi.bat → 高级选项 A → 1（再按 Y 确认）
 
 # 紧急情况
 python tt_solo/ttcore/arm_today.py --pause     # 一键急停

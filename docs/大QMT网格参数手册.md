@@ -151,7 +151,7 @@ passorder(
 ## 五、切换到 A2 的操作清单
 
 ```
-1. 停掉外部直连守护（关掉 启动做T实盘直连.bat 的窗口）
+1. 停掉外部直连守护（关掉 tifosi 高级选项 1 开出的那个守护窗口）
 2. QMT 终端 → 策略交易 → 新建 Python 策略
 3. 粘贴 qmt/bridge/signal_bridge_real.py 全文
 4. 改 FILE_MIN_AGE = 0.2
