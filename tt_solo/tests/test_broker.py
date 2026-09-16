@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
 """broker 测试: 用注入的 fake backend 覆盖只读语义与降级链。"""
-import ast
-from pathlib import Path
-
 import pytest
 
 from ttcore import broker
+
+from ._import_scan import forbidden_imports
 
 
 class FakeBackend:
@@ -137,41 +136,22 @@ def test_connect_result_is_cached():
 
 # ------------------------------------------------------------- 自包含硬约束
 
-FORBIDDEN_ROOT_IMPORTS = {"prism", "shared", "qmt_sync", "backtest", "legacy"}
-
-
-def _imported_roots(src):
-    """源码里所有 import 的根模块名(ast.walk 覆盖缩进/条件/函数内导入)。"""
-    roots = set()
-    for node in ast.walk(ast.parse(src)):
-        if isinstance(node, ast.Import):
-            names = [a.name for a in node.names]
-        elif isinstance(node, ast.ImportFrom):
-            # 相对导入(from . import x / from .broker import Y)本就自包含 → 跳过
-            names = [node.module] if node.module and not node.level else []
-        else:
-            continue
-        roots.update(n.split(".")[0] for n in names)
-    return roots
-
 
 def test_module_does_not_import_forbidden_packages():
     """自包含硬约束: broker 的**真实 import** 里不得出现外部包。
 
     只认 AST 里的 import 语句, 不扫散文/注释 —— 词面扫描会把 docstring 里的
-    来源说明也判死, 是维护陷阱。后续任务的整树行正则扫描
-    (tests/test_selfcontained.py)覆盖全树, 本文件级检查与它互补: AST 认真实
-    import 语句(含缩进的嵌套导入), 且与措辞无关。动态导入(importlib)不在
-    本检查射程内, 由整树扫描 + 评审兜底。
+    来源说明也判死, 是维护陷阱。扫描器实现单一放在 tests/_import_scan.py,
+    本文件与整树的 tests/test_selfcontained.py 共用它。动态导入(importlib)
+    不在射程内, 由评审兜底。
     """
-    src = Path(broker.__file__).read_text(encoding="utf-8")
-    bad = _imported_roots(src) & FORBIDDEN_ROOT_IMPORTS
-    assert not bad, f"broker 不得 import 外部包: {sorted(bad)}"
+    assert forbidden_imports(broker.__file__) == []
 
 
 def test_import_scanner_discriminates():
-    """把检查器的辨别力钉死(常驻负控): 相对导入不误报, 嵌套禁止导入必报。"""
-    assert _imported_roots("from . import state\nfrom .broker import X\n") == set()
-    assert _imported_roots(
-        "def f():\n    if 0:\n        import prism.qmt\n") == {"prism"}
-    assert _imported_roots("import os, time") == {"os", "time"}
+    """把共享扫描器的辨别力钉死(常驻负控): 相对导入不误报, 嵌套禁止导入必报。"""
+    assert forbidden_imports(
+        "x.py", "from . import state\nfrom .broker import X\n") == []
+    assert forbidden_imports(
+        "x.py", "def f():\n    if 0:\n        import prism.qmt\n") == ["prism"]
+    assert forbidden_imports("x.py", "import os, time\n") == []
