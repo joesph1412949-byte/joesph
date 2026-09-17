@@ -6,8 +6,10 @@
   ① 去掉 `from backtest.models import TradeRecord`(prism 无该模块): 交易对象
      按鸭子类型使用 —— 只读 `.pnl` 与 `.entry_time`(与源文件同用点);
   ② 去掉 CLI/落盘部分(`run_validation` / `_load_equity` / `_load_trades` /
-     `_parse_run_dir` / `_json_safe` / `write_validation_json` / `main`):
+     `_parse_run_dir` / `write_validation_json` / `main`):
      prism 的集成点是回测报告, 见 `prism/backtest.py::Backtester._validate`。
+     `_json_safe` 随集成点一起移植回来(payload 要经 CLI json.dumps / 网页
+     jsonify 落地, 非有限夏普会写出裸 NaN —— 不是合法 JSON)。
 
 来源: d:\\Vibe-Trading\\agent\\backtest\\validation.py (MIT License)
 
@@ -203,6 +205,26 @@ def bootstrap_sharpe_ci(
 def _sharpe(returns: np.ndarray, bars_per_year: int = 252) -> float:
     std = returns.std()
     return float(returns.mean() / (std + 1e-10) * np.sqrt(bars_per_year))
+
+
+def _json_safe(value: Any) -> Any:
+    """Return a JSON-strict copy of validation results(移植自源文件同名函数)。
+
+    非有限值(±inf/NaN)清成 None: `json.dumps` 默认 `allow_nan=True` 会写出裸
+    `NaN` / `Infinity` 记号, 那不是合法 JSON(RFC 8259); Flask `jsonify` 同理。
+    夏普在净值触零/极端收益序列下真的会非有限, 所以这道清洗不是装饰。
+    """
+    if isinstance(value, np.ndarray):
+        return [_json_safe(item) for item in value.tolist()]
+    if isinstance(value, np.generic):
+        return _json_safe(value.item())
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 # ─── 滚动前推分析 ───

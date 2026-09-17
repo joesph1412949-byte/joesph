@@ -245,8 +245,10 @@ class Backtester:
         self.stamp_duty = stamp_duty        # 印花税(仅卖出, A股默认0.05%)
         self.transfer_fee = transfer_fee    # 过户费(双向, 默认万0.1)
         # 最低佣金(借鉴 Vibe-Trading china_a.commission_min, MIT): 单笔佣金
-        # max(名义额×fee_rate, min_commission)。**每次买入各算一次**(A股按笔)。
-        # 想回到"完全零成本"的老口径: fee_rate=0 且 min_commission=0。
+        # max(名义额×fee_rate, min_commission), 源实现对**每次成交**无条件取大
+        # (is_open 只影响印花税) → 买、卖双腿各收一次下限。
+        # 想回到"完全零成本"的老口径: fee_rate=0 **且** min_commission=0
+        # (只设 fee_rate=0 每腿仍至少 ¥5, 报告 cost_config 会回显)。
         self.min_commission = min_commission
         self.position_ratio = position_ratio   # 单笔资金上限(占初始资金比例)
         self.initial_capital = initial_capital # 初始资金(净值模拟基准, 默认100万)
@@ -601,6 +603,8 @@ class Backtester:
                         self._filter_stats["one_word_unknown"] += 1
                     elif one_word:
                         # 一字板全天封死 → 买不到, 该笔不建仓
+                        # ponytail: 只覆盖"全天一字"(特征口径), 不覆盖"收盘仍
+                        # 封板"(sealed_close)那种买不到 —— 判定字段是简报钦定的。
                         self._filter_stats["filtered_one_word"] += 1
                         continue
                     kline = self._kline_for(code)
@@ -634,6 +638,11 @@ class Backtester:
                             equity_stats=eq_stats, skipped_cash=skipped,
                             filter_stats=self._filter_stats,
                             data_notes=data_notes,
+                            cost_config={"fee_rate": self.fee_rate,
+                                         "min_commission": self.min_commission,
+                                         "slippage": self.slippage,
+                                         "stamp_duty": self.stamp_duty,
+                                         "transfer_fee": self.transfer_fee},
                             validation=self._validate(trades, curve)
                             if validate else {})
 
@@ -647,6 +656,8 @@ class Backtester:
           - pnl 序列用**每笔收益率(%)**, 路径基准 100 → 与实际净值同量纲;
           - entry_time 用 ISO 日期串, 与净值曲线索引(日期串)可直接比较。
         样本不足时三个函数各自返回 error dict(移植保真的校验分支)。
+        返回前过 `validation._json_safe`: 非有限夏普清成 None(裸 NaN 不是合法
+        JSON, CLI `json.dumps` 与网页 `jsonify` 会把它写出去)。
         **整段兜住异常**: 验证只是附加信息, 失败绝不能影响回测返回。
         """
         try:
@@ -654,7 +665,7 @@ class Backtester:
                    for t in trades]
             equity = pd.Series([nav for _d, nav in curve],
                                index=[d for d, _nav in curve])
-            return {
+            return validation._json_safe({
                 # 口径披露(不静默): 移植函数按"逐笔路径 + 252 年化"算夏普, 而
                 # prism 的 trade 序列是每笔收益率 → 绝对夏普只在"≈每日一笔"时
                 # 可比; p 值/置信区间不受影响。报告的权威夏普用 sharpe_ratio
@@ -665,7 +676,7 @@ class Backtester:
                 "monte_carlo": validation.monte_carlo_test(seq, 100.0),
                 "bootstrap": validation.bootstrap_sharpe_ci(equity),
                 "walk_forward": validation.walk_forward_analysis(equity, seq),
-            }
+            })
         except Exception as exc:
             logger.warning("validation 计算失败(不影响回测结果): %r", exc)
             return {"error": repr(exc)}
@@ -779,12 +790,22 @@ class Backtester:
             # 1) 卖出: 回款 本金×(1+收益率), 从持仓移除(按 uid 精确匹配)
             # 收益率取**持仓里存的那份**(h[2]): 建仓时已按 A股成交约束调整
             # (100股整手 / ¥5最低佣金), 不能用 trade 原始 return_pct。
+            # 卖出腿的 ¥5 下限: 源口径对买、卖**各**取一次
+            # max(名义额×费率, ¥5) —— 比例佣金已在 h[2] 里(_simulate_trade 的
+            # sell_comm), 这里只补"下限与比例之差"(不重复计)。
             for t in ev["sell"]:
                 uid = "%s|%s" % (t["date"], t["code"])
                 for i, h in enumerate(holdings):
                     if h[0] == uid:
                         holdings.pop(i)
-                        cash += h[1] * (1 + h[2] / 100.0)
+                        proceeds = h[1] * (1 + h[2] / 100.0)
+                        gap = self._commission_floor(proceeds)
+                        cash += proceeds - gap
+                        if gap > 0:
+                            # 差额占**本笔买入名义额**的比例(h[1] 就是它):
+                            # 与 cost_pct 同口径, 报告 avg_cost_pct 才算得平。
+                            t["floor_cost_pct"] = (t.get("floor_cost_pct", 0.0)
+                                                   + gap / h[1] * 100.0)
                         break
                 # 未成交的买入(不在持仓) → 不回款
             # 2) 买入: 按当日净值×仓位比例投入, 现金足且持仓未满
@@ -803,12 +824,26 @@ class Backtester:
                     cash -= invest
                     holdings.append(("%s|%s" % (t["date"], t["code"]),
                                      invest, ret))
+                    # 买入腿的下限差额也记进 trade(报告成本与净值口径一致)
+                    floor = self._commission_floor(invest)
+                    if floor > 0:
+                        t["floor_cost_pct"] = floor / invest * 100.0
                 else:
                     skipped += 1
             # 3) 当日净值: 现金 + 持仓按成本计(持有期内保守按成本)
             nav = cash + sum(p for _u, p, _r in holdings)
             curve.append((day, round(nav, 2)))
         return curve, skipped
+
+    def _commission_floor(self, notional):
+        """佣金下限与比例佣金之差: max(名义额×费率, ¥5) - 名义额×费率(≤0 → 0)。
+
+        源口径(Vibe-Trading `china_a.calc_commission`, MIT)对**每次成交**无条件
+        取大, `is_open` 只影响印花税 → 买、卖双腿各收一次下限: 买入腿在
+        `_trade_notional` 扣(摊进收益率), 卖出腿在 `_simulate_equity` 卖出分支
+        从回款里扣。两处都只扣"差额", 比例部分各自已在收益率里。
+        """
+        return max(0.0, self.min_commission - notional * self.fee_rate)
 
     def _trade_notional(self, amount, trade):
         """本笔实际成交金额 + 计入净值模拟的收益率(A股成交约束)。
@@ -821,18 +856,21 @@ class Backtester:
         为什么在资金层: 两个约束都取决于**本笔名义额**, 而名义额只有资金模拟
         知道(`_simulate_trade` 是单股口径, 与手数无关)。佣金下限的差额在这里
         摊进收益率(比例佣金 `_simulate_trade` 已按 buy_price 计过)。
+        **这里只管买入腿**; 卖出腿的下限在 `_simulate_equity` 卖出分支补。
         缺买入价(手工构造的 trades, 如既有测试) → 不取整、不加下限(旧口径),
         避免"没有价格还硬编一个手数"。
         """
         ret = float(trade.get("return_pct") or 0.0)
         price = trade.get("entry")
         if not price or price <= 0:
+            # ponytail: 退回旧口径(不取整、不加下限)—— 真实 run() 产出的
+            # trade 必有 entry; 只有手搓 trades 才走到这里。
             return amount, ret
         shares = int(amount / price / 100) * 100      # 100 股整手
         if shares < 100:
             return None, None
         invest = shares * price
-        floor = self.min_commission - invest * self.fee_rate   # 下限与比例佣金之差
+        floor = self._commission_floor(invest)
         if floor > 0:
             ret -= floor / invest * 100
         return invest, ret
@@ -872,7 +910,8 @@ class Backtester:
     # ---------------- 统计 ----------------
     @staticmethod
     def _report(trades, dates, gate_notes, equity_stats, skipped_cash=0,
-                filter_stats=None, data_notes=None, validation=None):
+                filter_stats=None, data_notes=None, validation=None,
+                cost_config=None):
         """汇总回测报告。
 
         equity_stats: _equity_stats 的结果(基于资金模拟净值曲线), 含
@@ -882,12 +921,15 @@ class Backtester:
         data_notes: 数据覆盖说明(day_feed 携带, 如 1m 特征缓存覆盖/降级)——
         让"缺数据"可追溯而不是静默 fail-open。
         validation: 统计验证结果(规格 §6, 蒙特卡洛/bootstrap/滚动前推)。
+        cost_config: 成本参数回显(fee_rate/min_commission/...)—— min_commission
+        默认 ¥5 时 fee_rate=0 也不是零成本, 对净值前先看这里。
         **两个分支共用同一份 base**: 有交易分支曾经漏掉 data_notes 键(既有
         bug: 有交易的报告一律丢失数据可得性说明), 统一由 base 承载。"""
         n = len(trades)
         base = {"trading_days": len(dates), "trades": n,
                 "gate_notes": gate_notes or [], "skipped_cash": skipped_cash,
                 "filter_stats": filter_stats or {},
+                "cost_config": cost_config or {},
                 "data_notes": list(data_notes or []),
                 "validation": validation or {}}
         if n == 0:
@@ -912,8 +954,12 @@ class Backtester:
         trade_log = sorted(
             trades,
             key=lambda t: (t["date"], t["code"]), reverse=True)
-        # 平均交易成本(占买入价比例, %)
-        costs = [t.get("cost_pct") for t in trades if t.get("cost_pct") is not None]
+        # 平均交易成本(占买入价比例, %): 单股比例口径(cost_pct, _simulate_trade
+        # 按 buy_price 算) + 资金层按**本笔名义额**扣的双腿 ¥5 下限差额
+        # (floor_cost_pct, _simulate_equity 盖戳) —— 净值扣了下限, 报告成本
+        # 必须跟上, 否则"扣了钱报告不写"就是暗账。
+        costs = [(t.get("cost_pct") or 0.0) + (t.get("floor_cost_pct") or 0.0)
+                 for t in trades if t.get("cost_pct") is not None]
         avg_cost = (sum(costs) / len(costs)) if costs else None
         return dict(base, **{
             "win_rate": round(win_rate, 4),

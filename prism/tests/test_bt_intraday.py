@@ -354,17 +354,20 @@ def test_f3_backtest_end_to_end_proxy():
 # ---------------- ⑥ build_day_feed(use_intraday=True) ----------------
 
 _INTRA_FEAT = {"limit_price": 11.0, "first_seal_hm": "09:31", "opened": False,
-               "open_times": 0, "sealed_close": True, "one_word": False,
+               "open_times": 0, "sealed_close": True, "one_word": True,
                "on_board_amt": 5.5e5, "on_board_vol": 600.0, "bars": 240}
 
 
-def _intra_io(monkeypatch, tmp_path, with_cache=True):
-    """离线桩 build_day_feed 的全部 IO(含 1m 特征缓存, 按需预写)。"""
+def _intra_io(monkeypatch, tmp_path, with_cache=True, feat=None):
+    """离线桩 build_day_feed 的全部 IO(含 1m 特征缓存, 按需预写)。
+
+    feat: 覆盖缓存条目(如"旧版本缓存缺 one_word 键"的跨版本场景)。
+    """
     fd = tmp_path / "bt_intraday"
     monkeypatch.setattr(bti, "FEATURE_DIR", fd)
     if with_cache:
         _write_month(fd, "2026-07",
-                     {"600000.SH": {"2026-07-07": dict(_INTRA_FEAT)}})
+                     {"600000.SH": {"2026-07-07": dict(feat or _INTRA_FEAT)}})
     # 下载相关的一切调用都视为违规(网页请求路径绝不下载)
     monkeypatch.setattr(bti, "_download_batch",
                         lambda *a, **k: (_ for _ in ()).throw(
@@ -398,7 +401,10 @@ def test_build_day_feed_intraday_synthesizes_stock_fields(monkeypatch, tmp_path)
     assert tick["lastPrice"] == 11.0 and tick["lastClose"] == 10.0
     assert tick["amount"] == pytest.approx(5.5e5)
     assert _parse_timetag_hhmm(tick["timetag"]) == (9, 31)
-    # F3 代理在真实 build_day_feed 载荷上命中(note 含"回测代理")
+    # F3 代理在真实 build_day_feed 载荷上命中(note 含"回测代理")。
+    # 该载荷 one_word=True(一字板)会被成交约束拦下买入 —— 本用例只验 F3 命中,
+    # 故按"未知"口径去掉该键(不拦不假); one_word 的搬运由 ⑥ 下一个用例专测。
+    st.pop("one_word")
     s = _mk_strategy(scoring=("F3",), gate=("N1",))
     rep = _bt(s, _pool_zt({FD8}), lambda c: _KLINE2).run(
         DAY, date(2026, 7, 8), day_feed=lambda d: (ctx if d == DAY else None))
@@ -427,18 +433,33 @@ def test_build_day_feed_without_intraday_unchanged_and_no_notes(monkeypatch, tmp
 
 
 def test_build_day_feed_intraday_carries_one_word(monkeypatch, tmp_path):
-    """⑥ one_word 接线(规格 §6 成交约束): 缓存有该日 → 带布尔;
-    缓存缺该日 → **不设键**(未知 ≠ False, Backtester 按未知处理)。"""
+    """⑥ one_word 接线(规格 §6 成交约束): 缓存有该日 → 带布尔值**原样**搬运;
+    缓存缺该日 → **不设键**(未知 ≠ False, Backtester 按未知处理)。
+
+    缓存值取 True: 若写成 False, 接线字段名写错(取到 None → bool(None)=False)
+    也能过 —— 只有 True 才能证明"特征值真的被搬过来了"。
+    """
     _intra_io(monkeypatch, tmp_path)
     st = cli.build_day_feed(date(2026, 7, 6), date(2026, 7, 7),
                             use_intraday=True)(DAY)["stock"]["600000.SH"]
-    assert st["one_word"] is False        # _INTRA_FEAT["one_word"] = False
+    assert st["one_word"] is True         # _INTRA_FEAT["one_word"] = True
     # 缺缓存: one_word 键不存在(不是 False) —— 回测侧据此判"未知"。
     # 换独立目录(bt_intraday 按月分片带 memo, 键含 FEATURE_DIR → 不复用旧缓存)
     _intra_io(monkeypatch, tmp_path / "nocache", with_cache=False)
     st2 = cli.build_day_feed(date(2026, 7, 6), date(2026, 7, 7),
                              use_intraday=True)(DAY)["stock"]["600000.SH"]
     assert "one_word" not in st2
+
+
+def test_build_day_feed_one_word_missing_key_is_unknown(monkeypatch, tmp_path):
+    """⑥ 缓存条目在、但**没有** one_word 键(旧版本缓存跨版本存活)→ 不设键
+    (= 未知), 绝不压成 False(= 已知买得到)。"""
+    old = {k: v for k, v in _INTRA_FEAT.items() if k != "one_word"}
+    _intra_io(monkeypatch, tmp_path, feat=old)
+    st = cli.build_day_feed(date(2026, 7, 6), date(2026, 7, 7),
+                            use_intraday=True)(DAY)["stock"]["600000.SH"]
+    assert "one_word" not in st           # 缺键 = 未知, 不是 False
+    assert st["sealed"] is True           # 同一条目的其余字段照常搬运
 
 
 # ---------------- ⑦ 报告 data_notes ----------------

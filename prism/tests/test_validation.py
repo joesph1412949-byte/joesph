@@ -6,16 +6,21 @@
   ④ 三函数对固定收益序列输出稳定(固定 seed → 逐字段一致)
   ⑤ 移植保真的参数校验分支(n_simulations/n_bootstrap/confidence/n_windows/样本量)
   ⑥ 报告 validation: 有交易/零交易两分支都有该键; 计算失败不影响回测返回
+  ⑦ payload 必须 JSON 严格(非有限值清成 None, 不留裸 NaN/Infinity)
+  ⑧ CLI `--no-validate` 透传 validate=False(默认仍跑)
 """
+import json
 import sys
 from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+import numpy as np
 import pandas as pd
 import pytest
 
+import backtest.cli as cli  # noqa: E402
 import prism.registry as reg
 from prism import backtest, validation
 from prism.engine import load_strategy
@@ -126,9 +131,9 @@ _POOL = {0: ("600001.SH", 1.020), 1: ("600002.SH", 1.030),
          4: ("600005.SH", 1.010)}
 
 
-def _bt_run(pool_days=5, **kw):
-    """跑一次离线回测: 前 pool_days 天各选 1 只(持有 5 天 → 曲线 10 点)。"""
-    s = load_strategy({
+def _strategy():
+    """离线策略配置(N1 门控恒过 + A1 恒命中; 只验 validation 集成)。"""
+    return load_strategy({
         "id": "bt_val", "name": "validation", "description": "",
         "market_gate": {"model": "node", "threshold": 1, "factors": ["N1"]},
         "scoring_models": [
@@ -140,6 +145,11 @@ def _bt_run(pool_days=5, **kw):
         "sell_rules": {"take_profit_pct": 0.30, "stop_loss_pct": 0.5,
                        "max_hold_days": 5},
     })
+
+
+def _bt_run(pool_days=5, **kw):
+    """跑一次离线回测: 前 pool_days 天各选 1 只(持有 5 天 → 曲线 10 点)。"""
+    s = _strategy()
 
     def zf(d):
         for i, (code, _rate) in _POOL.items():
@@ -190,3 +200,79 @@ def test_report_validation_failure_does_not_break_run(monkeypatch):
     rep = _bt_run()
     assert rep["trades"] == 5
     assert "error" in rep["validation"]
+
+
+# ---------------- ⑦ payload 必须 JSON 严格(非有限值清成 None) ----------------
+
+def _bt_empty():
+    """空 feed 回测器: 只验 _validate 适配层, 不跑选股。"""
+    return backtest.Backtester(_strategy(), zt_feed=lambda d: [],
+                               kline_feed=lambda c: [])
+
+
+def test_json_safe_clears_non_finite():
+    """⑦ 移植源文件的 `_json_safe`: 非有限值 → None, 其余原样。"""
+    assert validation._json_safe(
+        {"a": float("nan"), "b": [float("inf"), 1.5], "c": "x"}
+    ) == {"a": None, "b": [None, 1.5], "c": "x"}
+    assert validation._json_safe(np.float64("-inf")) is None
+
+
+def test_validate_payload_is_json_strict():
+    """⑦ validation payload 必须过 allow_nan=False 的 json.dumps。
+
+    非有限夏普(净值触零/极端收益序列)经 CLI `json.dumps` 与网页 `jsonify`
+    会写成裸 NaN/Infinity —— 那不是合法 JSON(移植时丢掉 _json_safe 的缺口)。
+    """
+    bt = _bt_empty()
+    days = [(START + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(3)]
+    curve = [(d, 100.0 + i) for i, d in enumerate(days)]
+    # inf 收益 → 路径指标 NaN(3 笔才够蒙特卡洛的下限)
+    bad = [{"date": d, "return_pct": p}
+           for d, p in zip(days, [float("inf"), 10.0, 10.0])]
+    v = bt._validate(bad, curve)
+    json.dumps(v, allow_nan=False)          # 抛 ValueError = payload 里有裸 NaN
+    assert v["monte_carlo"]["actual_sharpe"] is None
+    # 正常序列不受影响: 有限值原样保留(清洗不能把好数据也抹成 None)
+    ok = bt._validate([{"date": d, "return_pct": p}
+                       for d, p in zip(days, [1.0, -0.5, 2.0])], curve)
+    json.dumps(ok, allow_nan=False)
+    assert isinstance(ok["monte_carlo"]["actual_sharpe"], float)
+
+
+# ---------------- ⑧ CLI 不传验证载荷 ----------------
+
+def _cli_main(monkeypatch, tmp_path, argv):
+    """跑一次 backtest.cli.main(): 假 Backtester 捕获 run() 的 kwargs。"""
+    captured = {}
+
+    class FakeBT:
+        def __init__(self, strategy, zt_feed=None, kline_feed=None):
+            pass
+
+        def run(self, s, e, **kw):
+            captured.update(kw)
+            return {"trades": 0}
+
+    (tmp_path / "bt_val.json").write_text(json.dumps(_strategy()),
+                                          encoding="utf-8")
+    monkeypatch.setattr(cli, "STRATEGIES_DIR", tmp_path)
+    monkeypatch.setattr(cli, "Backtester", FakeBT)
+    monkeypatch.setattr(sys, "argv", ["backtest.cli"] + argv)
+    return cli.main(), captured
+
+
+def test_cli_no_validate_flag_passes_validate_false(monkeypatch, tmp_path):
+    """⑧ `--no-validate` → run(validate=False); 不带该 flag → 默认仍跑。
+
+    validation payload 自带 sharpe_samples(1000+1000 个数)+ equity_paths
+    (≤30×400), 长窗口把 stdout 撑到 MB 级 —— 要精简时显式关。
+    """
+    base = ["--start", "20260701", "--end", "20260702",
+            "--strategy", "bt_val", "--no-market-data"]
+    rc, cap = _cli_main(monkeypatch, tmp_path, base + ["--no-validate"])
+    assert rc == 0
+    assert cap["validate"] is False
+    rc2, cap2 = _cli_main(monkeypatch, tmp_path, base)
+    assert rc2 == 0
+    assert cap2["validate"] is True          # 默认仍跑(规格: 可选、默认跑)

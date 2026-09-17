@@ -253,6 +253,31 @@ def test_backtest_injects_day_feed(client, monkeypatch):
     assert r.get_json()["report"]["day_feed"] is True
 
 
+def test_backtest_skips_validation_payload(client, monkeypatch):
+    """网页回测传 validate=False: validation 自带 sharpe_samples(2000 个数)
+    + equity_paths(≤30×400), 响应体会膨胀到 MB 级, 而网页不展示该字段。
+    (默认仍跑 —— 规格"可选、默认跑"; CLI 要精简用 --no-validate。)"""
+    captured = {}
+
+    class FakeBT:
+        def __init__(self, strategy, zt_feed=None, kline_feed=None):
+            pass
+
+        def run(self, s, e, sell_rules=None, progress=None, **kw):
+            captured.update(kw)
+            return {"trades": 1, "trading_days": 1, "gate_notes": [],
+                    "filter_stats": {}}
+
+    monkeypatch.setattr("prism.backtest.Backtester", FakeBT)
+    monkeypatch.setattr(app_module, "build_day_feed", None)
+    monkeypatch.setattr(app_module, "load_market_data",
+                        lambda: (None, None, None))
+    r = client.get(
+        "/api/backtest?strategy=first_board_v04&start=20260101&end=20260105")
+    assert r.status_code == 200
+    assert captured["validate"] is False, "网页不传验证载荷(体积)"
+
+
 def test_backtest_day_feed_failure_degrades_with_note(client, monkeypatch):
     """按日上下文装配失败 → 不阻塞回测(退化为无 day_feed) + 报告带 note。"""
     captured = {}

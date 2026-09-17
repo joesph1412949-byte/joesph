@@ -558,9 +558,11 @@ def _apply_intraday(payload, iso, stats):
             continue            # 缓存缺失 → 静默降级(该股该日 F2/F3 得 0)
         stats["got"] += 1
         item["sealed"] = bool(feat.get("sealed_close"))
-        # 一字板: 缓存没采到该日的日期**不设键** —— 未知 ≠ False(不造假),
-        # Backtester.run 按"未知"处理(不拦买入, 但计入 filter_stats)。
-        item["one_word"] = bool(feat.get("one_word"))
+        # 一字板: 缓存**没有该键**的日期不设键 —— 未知 ≠ False(不造假)。
+        # 旧版本缓存(采集时还没有 one_word 字段)会走到这里: 压成 bool(None)
+        # = False 就等于断言"已知买得到", Backtester 会放行 —— 宁可未知。
+        if "one_word" in feat:
+            item["one_word"] = bool(feat["one_word"])
         on_board_amt = feat.get("on_board_amt")
         float_mv = item.get("float_mv")
         if float_mv:
@@ -907,6 +909,11 @@ def main():
                          "按 0)。东财单股实测 40s+(公告端点 35.5s), 长窗口会"
                          "慢到不可用; 历史请用 python -m prism.fund_snapshot "
                          "--date YYYYMMDD 逐日回填后再跑回测")
+    ap.add_argument("--no-validate", dest="validate", action="store_false",
+                    help="不跑统计验证(蒙特卡洛/bootstrap/滚动前推)。默认跑"
+                         "(规格 §6: 可选、默认跑) —— 但 validation 自带 "
+                         "sharpe_samples(1000+1000 个数)+ equity_paths(≤30×400), "
+                         "长窗口会把 stdout 撑到 MB 级, 只关心净值时用本开关")
     args = ap.parse_args()
 
     start = _parse_date(args.start)
@@ -975,8 +982,10 @@ def main():
                          mkt=mkt, sector_map=sector_map, day_feed=day_feed)
         print(json.dumps(res, ensure_ascii=False, indent=2, default=str))
     else:
+        # validate 透传(默认 True); run_oos 未透出该开关(见报告 M8③)
         rep = bt.run(start, end, sell_rules=sell or None, progress=progress,
-                     mkt=mkt, sector_map=sector_map, day_feed=day_feed)
+                     mkt=mkt, sector_map=sector_map, day_feed=day_feed,
+                     validate=args.validate)
         print(json.dumps(rep, ensure_ascii=False, indent=2, default=str))
     return 0
 

@@ -748,7 +748,11 @@ def api_backtest():
                 feed_note = ("按日上下文装配失败 → N3/N4/N5/F1/F6 按静态参数"
                              "空转: %r" % exc)
         bt = Backtester(strategy, zt_feed=zt_feed, kline_feed=kline_feed)
-        rep = bt.run(s, e, mkt=mkt, sector_map=sector_map, day_feed=day_feed)
+        # validate=False(M8①): validation 自带 sharpe_samples(1000+1000 个数)
+        # + equity_paths(≤30×400), 响应体会膨胀到 MB 级 —— 而网页不展示该字段
+        # (只展示 sharpe_ratio 等净值口径指标)。默认跑的口径仍归 CLI。
+        rep = bt.run(s, e, mkt=mkt, sector_map=sector_map, day_feed=day_feed,
+                     validate=False)
         rep["market_data"] = mkt is not None
         rep["day_feed"] = day_feed is not None
         if md_note:
