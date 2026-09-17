@@ -18,10 +18,17 @@
 """
 import argparse
 import json
+import logging
 import sys
 from datetime import date, datetime
 
 from datasource.fundamental import FundamentalFeed
+
+logger = logging.getLogger("fund_snapshot")
+
+# 空代码表(索引无当日数据)的区分标记: 调用方(守护)据此打 WARNING —— 空池
+# 多半是"涨停池索引还没刷新", 当成采集成功就会静默丢掉当天 Y2/Y5。
+SKIPPED_EMPTY_POOL = "empty_pool"
 
 
 def _today():
@@ -71,14 +78,20 @@ def snapshot_once(codes, date=None, feed=None):
     compute_for_stock 自带 _cache_key/_save_cache, 重复采集天然幂等)。
     返回 {"saved": n, "failed": n}: saved=采到≥1 个因子值; failed=抛异常或
     一无所获(全因子 fail-open 空 dict, 记失败不虚报)。单股失败绝不阻塞其余。
+    两种 failed 都落 logger.warning 带原因(M2: 系统性失败不能只剩一个计数)。
+    codes 为空 → {"saved": 0, "failed": 0, "skipped": "empty_pool"}(I3:
+    与"真采了但一无所获"必须可区分 —— 守护据此打 WARNING 而不是"完成")。
+    日期校验(含未来日期拒绝)在空池判定**之前**(不因空池吞掉非法日期)。
     """
-    feed = feed or FundamentalFeed()
     asof = None
     if date is not None:
         asof = _parse_date(date)
         if asof > _today():
             raise ValueError(
                 "快照不采集未来日期(会写未来键污染回测): %s" % asof)
+    if not codes:
+        return {"saved": 0, "failed": 0, "skipped": SKIPPED_EMPTY_POOL}
+    feed = feed or FundamentalFeed()
     saved = failed = 0
     for code in codes:
         try:
@@ -86,13 +99,17 @@ def snapshot_once(codes, date=None, feed=None):
                 out = feed.compute_for_stock(code) or {}
             else:
                 out = feed.compute_for_stock(code, asof=asof) or {}
-        except Exception:
+        except Exception as exc:
             failed += 1
+            logger.warning("基本面快照采集失败 %s(%s): %r",
+                           code, asof or _today(), exc)
             continue
         if out:
             saved += 1
         else:
             failed += 1
+            logger.warning("基本面快照 %s(%s) 一无所获(全因子 fail-open 空结果, "
+                           "计 failed)", code, asof or _today())
     return {"saved": saved, "failed": failed}
 
 
@@ -100,7 +117,10 @@ def main(argv=None):
     """CLI: [--date YYYYMMDD] [--codes c1 c2 ...] → 打印 {"saved": n, "failed": n}。
 
     codes 缺省 = **快照基准日**的涨停池(本地 zt 索引; 今天 → 当日池, 指定历史日
-    → 该日池)。无数据 → 提示后 0 采集退出, 不算失败。
+    → 该日池)。无数据 → 提示后 0 采集退出(输出带 skipped=empty_pool, 不算失败)。
+    M1: --date 先解析/校验(非法或未来 → exit 2)再解析代码表 —— 旧实现先取
+    default_codes, 而它把 _parse_date 的 ValueError 吞成 [] → 非法日期被误报成
+    "索引无该日数据"并 exit 0。
     """
     ap = argparse.ArgumentParser(
         description="每日基本面快照采集(Y2/Y5, 规格 §7): 对当日涨停池逐只调 "
@@ -110,11 +130,21 @@ def main(argv=None):
     ap.add_argument("--codes", nargs="+", default=None,
                     help="代码表(缺省=快照基准日的涨停池, 读本地 zt 索引)")
     args = ap.parse_args(argv)
+    if args.date:
+        try:
+            day = _parse_date(args.date)
+            if day > _today():
+                raise ValueError(
+                    "快照不采集未来日期(会写未来键污染回测): %s" % day)
+        except ValueError as e:
+            print("错误: %s" % e, file=sys.stderr)
+            return 2
     codes = args.codes or default_codes(args.date)
     if not codes:
-        print("警告: 本地涨停池索引无该日数据 → 未采集(可用 --codes 指定)",
-              file=sys.stderr)
-        print(json.dumps({"saved": 0, "failed": 0}, ensure_ascii=False))
+        print("警告: 本地涨停池索引无该日数据(可能尚未刷新) → 未采集"
+              "(可用 --codes 指定, 或稍后重跑)", file=sys.stderr)
+        print(json.dumps({"saved": 0, "failed": 0,
+                          "skipped": SKIPPED_EMPTY_POOL}, ensure_ascii=False))
         return 0
     try:
         res = snapshot_once(codes, date=args.date)

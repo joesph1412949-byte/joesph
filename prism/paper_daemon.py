@@ -20,6 +20,7 @@ SETTLE_AFTER = schedule.SETTLE_AFTER
 POLL_SECONDS = 5                   # 模拟盘轮询间隔(纯内存记账, 可密)
 INDEX_CODE = "000001.SH"          # 上证指数: 交易日历来源
 ZT_REFRESH_INTERVAL = 6 * 3600    # 涨停池缓存刷新节流(秒)
+ZT_REFRESH_WAIT = 120             # 采集前等刷新线程的上限(秒, I3); 超时照常继续
 
 
 class PaperDaemon:
@@ -42,6 +43,7 @@ class PaperDaemon:
                 return r
         self.zt_refresh_fn = zt_refresh_fn
         self._zt_refresh_at = 0.0    # 上次刷新触发时刻(epoch秒, 0=未刷过)
+        self._zt_thread = None       # 最近一次刷新线程(I3: 采集前要等它结束)
         if fund_snapshot_fn is None:
             # 真实路径(规格 §7, Task 3): 当日涨停池逐只基本面快照(Y2/Y5 等),
             # 由 feed 自身落既有缓存; 同样懒 import + 可注入(测试假实现)
@@ -116,6 +118,8 @@ class PaperDaemon:
 
         节流检查与时间戳置位在调用线程做(tick 单线程, 先置位再孵化,
         防重复孵化); 整体 try/except 落日志 — 绝不阻塞/炸掉 tick 主循环。
+        线程存 self._zt_thread: 基本面快照采集前要 join 它(I3), 否则 15:05
+        索引还没重建完就会空采。
         """
         now = time.time()
         if now - self._zt_refresh_at < ZT_REFRESH_INTERVAL:
@@ -129,8 +133,9 @@ class PaperDaemon:
             except Exception as e:
                 LOG.warning("涨停池缓存刷新失败(忽略, 下个节流窗口重试): %r", e)
 
-        threading.Thread(target=_worker, daemon=True,
-                         name="zt-refresh").start()
+        self._zt_thread = threading.Thread(target=_worker, daemon=True,
+                                           name="zt-refresh")
+        self._zt_thread.start()
 
     # ---------- 基本面快照采集挂钩(规格 §7, Task 3, daemon 线程) ----------
     def _maybe_fund_snapshot(self):
@@ -139,11 +144,30 @@ class PaperDaemon:
         与 _maybe_refresh_zt 同模式: 注入式钩子(fund_snapshot_fn) + daemon
         线程 + 整体 try/except 落日志 —— 快照失败绝不影响选股结果/主循环。
         触发频率由调用点保证: 只在收盘选股分支里调(每日一次, 幂等键在选股侧)。
+
+        I3(审查修复): 默认钩子按**本地 zt 索引**取当日涨停池, 而索引正被
+        _maybe_refresh_zt 在**另一个线程**里重建 —— 15:05 时当日索引可能还没
+        生成, default_codes() 返回 [] → 空采(日志像成功, 当天 Y2/Y5 却永久
+        丢失)。所以采集前先 join 刷新线程(上限 ZT_REFRESH_WAIT 秒, 超时照常
+        继续并说明); 空池结果带 skipped → 打 WARNING, 绝不写成"采集完成"。
         """
         def _worker():
             try:
+                t = self._zt_thread
+                if t is not None and t.is_alive():
+                    t.join(ZT_REFRESH_WAIT)
+                    if t.is_alive():
+                        LOG.warning(
+                            "涨停池刷新 %d 秒未结束 → 照常采集(可能取到旧索引)",
+                            ZT_REFRESH_WAIT)
                 r = self.fund_snapshot_fn()
-                LOG.info("基本面快照采集完成: %r", r)
+                if isinstance(r, dict) and r.get("skipped"):
+                    LOG.warning(
+                        "基本面快照未采集(%s): 涨停池索引无当日数据, 可能尚未"
+                        "刷新 —— 当天 Y2/Y5 无历史可回补, 请手动补采: "
+                        "python -m prism.fund_snapshot", r["skipped"])
+                else:
+                    LOG.info("基本面快照采集完成: %r", r)
             except Exception as e:
                 LOG.warning("基本面快照采集失败(忽略, 不影响选股): %r", e)
 

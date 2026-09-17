@@ -575,6 +575,13 @@ def _apply_intraday(payload, iso, stats):
     return payload
 
 
+# 基本面因子的两类口径(I1 审查修复): 网络类只在"该日已采集"才有值(按天计覆盖);
+# Y1/Y8 由当日流通市值纯计算, 与缓存覆盖无关 —— 两类必须分开统计, 否则
+# "一天都没采过"的报告会写成满覆盖。
+_FUND_NET_KEYS = frozenset(("F7", "Y6", "Y7"))
+_FUND_CALC_KEYS = frozenset(("Y1", "Y8"))
+
+
 def _apply_fund(payload, day, fund_feed, stats):
     """把基本面因子快照合进 payload["stock"](规格 §7, Task 3)。
 
@@ -586,9 +593,17 @@ def _apply_fund(payload, day, fund_feed, stats):
     网络失败 fail-open 不阻塞: feed 整体异常 → 该股不给 fund(F7/Y6/Y7 等得 0),
     单日其余个股照常。fund 结果为空 dict → 同样不给(与 _pick 的
     stock.get("fund") or _fund_for 短路语义一致)。
-    stats: {"asked": n, "got": n} 累计覆盖计数(供 data_notes 汇总)。
+    stats: 覆盖计数(供 data_notes 汇总), 两类**分开**记(I1 审查修复):
+      asked/days  —— 问过的股票日 / 问过的天数(分母)
+      net_got/net_days —— 拿到 F7/Y6/Y7(网络类)的股票日 / 天数
+      calc_got     —— 拿到 Y1/Y8(纯计算)的股票日
+    网络类只有"该日已采集(缓存命中)"才有值, 而 Y1/Y8 由当日 float_mv 纯计算、
+    与缓存覆盖无关 —— 旧口径把"只有 Y1/Y8"也算成已覆盖, 于是"一天都没采过"
+    的报告会写成满覆盖, 并把 0 误归因于网络失败。
     """
     stock = payload.get("stock") or {}
+    stats["days"] = stats.get("days", 0) + 1     # 本日已问(分母: 天)
+    net_hit_today = False
     for code, item in stock.items():
         stats["asked"] += 1
         try:
@@ -600,29 +615,40 @@ def _apply_fund(payload, day, fund_feed, stats):
             continue
         for k in ("Y5", "Y2"):   # 快照类: 回测剔除(防未来), 保持现状
             fund.pop(k, None)
-        if fund:
-            stats["got"] += 1
-            item["fund"] = fund
-    if stats["got"] > stats.get("days_got", 0):
-        stats["days"] = stats.get("days", 0) + 1   # 本日至少采到一只 → 计 1 天
-        stats["days_got"] = stats["got"]
+        if not fund:
+            continue
+        if _FUND_NET_KEYS & set(fund):
+            stats["net_got"] = stats.get("net_got", 0) + 1
+            net_hit_today = True
+        if _FUND_CALC_KEYS & set(fund):
+            stats["calc_got"] = stats.get("calc_got", 0) + 1
+        item["fund"] = fund
+    if net_hit_today:
+        stats["net_days"] = stats.get("net_days", 0) + 1
     return payload
 
 
 def _refresh_fund_note(notes, stats):
     """基本面覆盖说明(单条, 随回放滚动自我覆盖) → run() 收进报告 data_notes。
 
-    stats: {"asked","got","days"} + "fetch"(是否显式联网取数, 见 --fetch-fund)。
+    I1(审查修复): 覆盖**按类拆开** —— F7/Y6/Y7 是网络类, 只有"该日已采集"
+    (缓存命中)才有值, 故按**天**计; Y1/Y8 由当日流通市值纯计算, 与缓存覆盖
+    无关, 单独说明。旧口径把"只有 Y1/Y8"的股票日也算成已覆盖 → "一天都没
+    采过"的报告写"个股日覆盖 181/181", 且把 0 归因于"网络失败/缺 float_mv",
+    真因其实是**该日未采集**。
     回测默认**只读缓存不联网**(2026-09-17 用户拍板): 东财单股取数实测 40s+
     (Y6 公告端点 35.5s), 全窗口 254 日 ≈100 小时不可行 → 未缓存的日子直接
     fail-open 0, 历史用 fund_snapshot 逐日回填。
     """
     mode = ("本次已联网取数(慢)" if stats.get("fetch")
-            else "回测默认只读基本面缓存、不联网")
-    note = ("基本面: 个股日覆盖 %d/%d (覆盖 %d 天; %s; 网络失败/缺 float_mv "
-            "静默降级 → Y1/Y8/F7/Y6/Y7 fail-open 0; 快照类 Y5/Y2 回测剔除防未来; "
-            "补历史: python -m prism.fund_snapshot --date YYYYMMDD)"
-            % (stats["got"], stats["asked"], stats.get("days", 0), mode))
+            else "回测默认只读基本面缓存不联网(联网取数需显式 --fetch-fund)")
+    note = ("基本面: F7/Y6/Y7 覆盖 %d/%d 天(网络类只在\"已采集日\"有值 —— "
+            "未采集的日子为 0; %s; 补历史: "
+            "python -m prism.fund_snapshot --date YYYYMMDD); "
+            "Y1/Y8 由当日流通市值纯计算, 不受缓存覆盖影响(个股日 %d/%d); "
+            "快照类 Y5/Y2 回测剔除防未来"
+            % (stats.get("net_days", 0), stats.get("days", 0), mode,
+               stats.get("calc_got", 0), stats["asked"]))
     for i, x in enumerate(notes):
         if x.startswith("基本面: "):
             notes[i] = note
@@ -689,7 +715,8 @@ def build_day_feed(start, end, *, use_intraday=False, progress=None,
     cache = {"pools": {}, "klines": {}, "floats": {}, "ctx": {},
              "tried_k": set(), "tried_f": set(), "done": 0,
              "intra": {"asked": 0, "got": 0},
-             "fund": {"asked": 0, "got": 0, "days": 0, "days_got": 0,
+             "fund": {"asked": 0, "days": 0, "net_days": 0, "net_got": 0,
+                      "calc_got": 0,
                       "fetch": not getattr(fund_feed, "offline", False)}}
     # use_intraday 的覆盖说明(单条) → run() 收进报告 data_notes(规格 §5)
     data_notes = []
