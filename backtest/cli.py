@@ -499,7 +499,12 @@ def _day_payload(d, pools, cal, klines, floats, indices):
             fv = (floats or {}).get(code)
             if fv:
                 item["float_vol"] = float(fv)
-                item["float_mv"] = float(fv) * close   # 同实盘口径: 股本 × 现价
+                # 同实盘口径: 股本 × 现价。缺股本 → 显式 None(不造假, 与实盘
+                # data.py "两者都为正才算否则 None" 同口径); Y1/Y8 拿到 None
+                # → 因子缺键 → fail-open 0(Task 3 池条目 float_mv 契约)。
+                item["float_mv"] = float(fv) * close
+            else:
+                item["float_mv"] = None
             stock[code] = item
 
     # ---- 门控 em: 今日最高连板 + 昨日池(N3/N4 口径同东财 get_market_stats) ----
@@ -566,6 +571,49 @@ def _apply_intraday(payload, iso, stats):
     return payload
 
 
+def _apply_fund(payload, day, fund_feed, stats):
+    """把基本面因子快照合进 payload["stock"](规格 §7, Task 3)。
+
+    stock[code]["fund"] 来自 compute_for_stock(code, float_mv=当日流通市值,
+    asof=决策日) —— asof 严格(防未来: F7 涨停池/Y6 公告/Y7 龙虎榜窗口不越
+    当日; feed 缓存键 code:YYYYMMDD 天然分日, 同 (code, 日) 只算一次)。
+    Y5(概念)/Y2(股东户数)是"当前快照"类接口, 对回测自带未来性 → 注入侧与
+    Backtester._fund_for 同口径剔除(保持现状, 宁缺勿假)。
+    网络失败 fail-open 不阻塞: feed 整体异常 → 该股不给 fund(F7/Y6/Y7 等得 0),
+    单日其余个股照常。fund 结果为空 dict → 同样不给(与 _pick 的
+    stock.get("fund") or _fund_for 短路语义一致)。
+    stats: {"asked": n, "got": n} 累计覆盖计数(供 data_notes 汇总)。
+    """
+    stock = payload.get("stock") or {}
+    for code, item in stock.items():
+        stats["asked"] += 1
+        try:
+            fund = dict(fund_feed.compute_for_stock(
+                code, float_mv=item.get("float_mv"), asof=day) or {})
+        except Exception as exc:
+            print("警告: 基本面快照 %s@%s 计算失败(fail-open 0): %r"
+                  % (code, day, exc), file=sys.stderr)
+            continue
+        for k in ("Y5", "Y2"):   # 快照类: 回测剔除(防未来), 保持现状
+            fund.pop(k, None)
+        if fund:
+            stats["got"] += 1
+            item["fund"] = fund
+    return payload
+
+
+def _refresh_fund_note(notes, stats):
+    """基本面覆盖说明(单条, 随回放滚动自我覆盖) → run() 收进报告 data_notes。"""
+    note = ("基本面: 个股日覆盖 %d/%d (网络失败/缺 float_mv 静默降级 → Y1/Y8/"
+            "F7/Y6/Y7 fail-open 0; 快照类 Y5/Y2 回测剔除防未来)"
+            % (stats["got"], stats["asked"]))
+    for i, x in enumerate(notes):
+        if x.startswith("基本面: "):
+            notes[i] = note
+            return
+    notes.append(note)
+
+
 def _refresh_intra_note(notes, stats):
     """覆盖说明(单条, 随回放滚动更新) → run() 收进报告 data_notes。"""
     note = ("1m特征: 个股日覆盖 %d/%d (缓存缺失静默降级 → F2/F3 fail-open 0; "
@@ -578,7 +626,8 @@ def _refresh_intra_note(notes, stats):
         notes.append(note)
 
 
-def build_day_feed(start, end, *, use_intraday=False, progress=None):
+def build_day_feed(start, end, *, use_intraday=False, progress=None,
+                   fund_feed=None):
     """装配回测的按日上下文 → day_feed(d) -> dict|None(规格 2026-09-16 §4)。
 
     **惰性构造**: 返回的 callable 首次被问到某日 d 时才取该日(及"昨日池"/近 5 日
@@ -592,6 +641,12 @@ def build_day_feed(start, end, *, use_intraday=False, progress=None):
         1m 特征合进 stock[code](sealed/tick/bt_seal_ratio, 复活 F2/F3 代理);
         只读缓存绝不下载 —— 缺失日期静默降级, 覆盖情况进报告 data_notes
         (补采集: python -m backtest.cli --build-intraday)。
+    fund_feed(Task 3, 规格 §7): FundamentalFeed 实例(测试可注入假实现)。
+        传入时每日把基本面因子快照合进 stock[code]["fund"](Y1/Y8 纯计算 +
+        F7/Y6/Y7 asof 窗口; Y5/Y2 快照类剔除防未来; 网络失败 fail-open 0,
+        覆盖情况进报告 data_notes)。None(缺省) → 不注入, 行为与旧版一致
+        (零网络零注入; 仅池条目 float_mv 由"键缺省"改为显式 None —— 消费方
+        .get() 语义不变)。
     progress(done, total): 已构造的区间交易日数 / 区间交易日总数(可选)。
     QMT 离线且无 zt 索引(无交易日历) → 返回恒 None 的 callable(等于不注入,
     静态参数照常生效), 并打印一行原因(不静默)。
@@ -615,7 +670,8 @@ def build_day_feed(start, end, *, use_intraday=False, progress=None):
     # 惰性缓存的全部状态: 池/日线/股本都按需取, 取过就记(空池、无数据也不重取)
     cache = {"pools": {}, "klines": {}, "floats": {}, "ctx": {},
              "tried_k": set(), "tried_f": set(), "done": 0,
-             "intra": {"asked": 0, "got": 0}}
+             "intra": {"asked": 0, "got": 0},
+             "fund": {"asked": 0, "got": 0}}
     # use_intraday 的覆盖说明(单条) → run() 收进报告 data_notes(规格 §5)
     data_notes = []
 
@@ -669,6 +725,12 @@ def build_day_feed(start, end, *, use_intraday=False, progress=None):
                     # 1m 特征只读缓存(绝不下载), 缺失静默降级(规格 §5)
                     _apply_intraday(cache["ctx"][iso], iso, cache["intra"])
                     _refresh_intra_note(data_notes, cache["intra"])
+                if fund_feed is not None:
+                    # 基本面快照(规格 §7, Task 3): 在 1m 注入之后刷新覆盖说明,
+                    # _refresh_fund_note 自我覆盖自己的槽位(互不挤占)
+                    _apply_fund(cache["ctx"][iso], cal_dates[i], fund_feed,
+                                cache["fund"])
+                    _refresh_fund_note(data_notes, cache["fund"])
             except Exception as exc:
                 print("警告: 按日上下文装配失败 %s: %r → 该日退回静态参数"
                       % (iso, exc), file=sys.stderr)
@@ -745,6 +807,21 @@ def load_market_data():
             suffix = ".SH" if c6.startswith("6") else ".SZ"
             sector_map[c6 + suffix] = rec["sector"]
     return mkt, sector_map, None
+
+
+def _fund_feed():
+    """真实基本面 feed(Task 3, 规格 §7): 与实盘 prism.data 同一实现与同一份缓存。
+
+    供 CLI main() / 网页端点注入 build_day_feed。导入/构造失败 → None
+    (不注入, Y1/Y8/F7/Y6/Y7 恒 0, 不阻塞回测, 打一行原因不静默)。
+    """
+    try:
+        from datasource.fundamental import FundamentalFeed
+        return FundamentalFeed()
+    except Exception as exc:
+        print("警告: 基本面 feed 不可用(%r) → Y1/Y8/F7/Y6/Y7 因子按 0 处理"
+              % exc, file=sys.stderr)
+        return None
 
 
 def main():
@@ -824,12 +901,14 @@ def main():
                 file=sys.stderr)
         # 按日上下文(N3/N4/N5/F1/F6 需要逐日快照; 静态参数只有一份)
         # use_intraday=True: 1m 特征只读已落盘缓存(F2/F3), 缺失静默降级
+        # fund_feed(Task 3): 基本面快照注入(Y1/Y8/F7/Y6/Y7 复活; 失败 fail-open)
         def _feed_progress(done, total):
             if done % 50 == 0:
                 print("  装配按日上下文 %d/%d" % (done, total), file=sys.stderr)
 
         day_feed = build_day_feed(start, end, use_intraday=True,
-                                  progress=_feed_progress)
+                                  progress=_feed_progress,
+                                  fund_feed=_fund_feed())
 
     if args.oos:
         res = bt.run_oos(start, end, sell_rules=sell or None, progress=progress,

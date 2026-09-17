@@ -27,7 +27,7 @@ class PaperDaemon:
     tick_once 触发。"""
 
     def __init__(self, account, ticks_fn=None, sleep_fn=None, now_fn=None,
-                 zt_refresh_fn=None):
+                 zt_refresh_fn=None, fund_snapshot_fn=None):
         self.account = account
         self.provider = None
         self.ticks_fn = ticks_fn
@@ -42,6 +42,13 @@ class PaperDaemon:
                 return r
         self.zt_refresh_fn = zt_refresh_fn
         self._zt_refresh_at = 0.0    # 上次刷新触发时刻(epoch秒, 0=未刷过)
+        if fund_snapshot_fn is None:
+            # 真实路径(规格 §7, Task 3): 当日涨停池逐只基本面快照(Y2/Y5 等),
+            # 由 feed 自身落既有缓存; 同样懒 import + 可注入(测试假实现)
+            def fund_snapshot_fn():
+                from prism import fund_snapshot
+                return fund_snapshot.snapshot_once(fund_snapshot.default_codes())
+        self.fund_snapshot_fn = fund_snapshot_fn
 
     # ---------- 时段 ----------
     def in_session(self, now):
@@ -125,6 +132,24 @@ class PaperDaemon:
         threading.Thread(target=_worker, daemon=True,
                          name="zt-refresh").start()
 
+    # ---------- 基本面快照采集挂钩(规格 §7, Task 3, daemon 线程) ----------
+    def _maybe_fund_snapshot(self):
+        """收盘选股后采集当日基本面快照(Y2/Y5 无历史可回补, 从今天起积累)。
+
+        与 _maybe_refresh_zt 同模式: 注入式钩子(fund_snapshot_fn) + daemon
+        线程 + 整体 try/except 落日志 —— 快照失败绝不影响选股结果/主循环。
+        触发频率由调用点保证: 只在收盘选股分支里调(每日一次, 幂等键在选股侧)。
+        """
+        def _worker():
+            try:
+                r = self.fund_snapshot_fn()
+                LOG.info("基本面快照采集完成: %r", r)
+            except Exception as e:
+                LOG.warning("基本面快照采集失败(忽略, 不影响选股): %r", e)
+
+        threading.Thread(target=_worker, daemon=True,
+                         name="fund-snapshot").start()
+
     # ---------- 单轮 ----------
     def tick_once(self, now=None):
         """一轮: 15:00后未结算→结算(幂等)+15:05收盘选股; 09:26-09:35 开盘
@@ -171,6 +196,9 @@ class PaperDaemon:
                          [p["code"] for p in out["pick"].get("picked", [])])
                 # 涨停池缓存保鲜(6h 节流, daemon 线程, 不阻塞)
                 self._maybe_refresh_zt()
+                # 基本面快照采集(规格 §7): 选股落定后当日涨停池逐只快照,
+                # daemon 线程 + 失败只落日志, 不影响选股返回与主循环
+                self._maybe_fund_snapshot()
             return out
         # 开盘买入窗口(spec §5): 09:26-09:35, 消费 for_date==今日 的计划;
         # 触发轮直接返回(买优先于盯盘), 计划被消费后下轮恢复正常盯盘

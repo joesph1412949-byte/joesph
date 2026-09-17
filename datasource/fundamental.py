@@ -7,6 +7,8 @@ import logging
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from shared.common import atomic_write
+
 # 缓存落盘位置: 统一收在 runtime/cache/ (本文件上两级 = 项目根)
 _DEFAULT_CACHE_PATH = (Path(__file__).resolve().parent.parent
                        / "runtime" / "cache" / "fundamental_cache.json")
@@ -95,8 +97,11 @@ class FundamentalFeed:
     def _save_cache(self):
         if not self.cache_path:
             return
-        with open(self.cache_path, "w", encoding="utf-8") as f:
-            json.dump(self._cache, f, ensure_ascii=False)
+        # 原子写(mkdir+tmp+fsync+os.replace, shared 底座): 回测逐日采集/快照/
+        # 实盘会并发写同一份缓存, 半截 JSON 会被 _load_cache 静默当空 → 历史
+        # 全丢, 必须整文件原子落地(Task 3, 规格 §7)。
+        atomic_write(self.cache_path,
+                     json.dumps(self._cache, ensure_ascii=False))
 
     def _cache_key(self, code, asof=None):
         """按基准日分日缓存: 同一只股在不同 asof 下是不同的数据快照。"""
@@ -347,7 +352,10 @@ class FundamentalFeed:
         asof: 数据基准日(防未来函数), 实盘不传=今天。
         注: Y2(股东户数, RPT_HOLDERNUMLATEST)与 Y5(概念标签)是"当前快照"类
         数据, 接口本身不提供历史时点; 回测接入时这两类天然带未来性, 由
-        调用方决定是否启用(见 Backtester fund_feed 文档)。"""
+        调用方决定是否启用(见 Backtester fund_feed 文档)。基准日 < 今天时
+        这两类**硬跳过**(不请求不落缓存) —— 硬算只能拿"今天"的值, 对该日是
+        未来数据, 且会把今天的值错记成那天的历史(污染 Y2/Y5 每日快照积累,
+        规格 §7); 窗口类(Y6/Y7/F7)按 asof 正常计算。"""
         key = self._cache_key(code, asof)
         if key in self._cache:
             return dict(self._cache[key])
@@ -364,12 +372,15 @@ class FundamentalFeed:
                 out["Y8"] = y8
         except Exception as e:
             logger.warning("东财因子 %s(%s) 计算失败, 回落手填: %r", "Y8", code, e)
-        for name, fn, kw in [("Y5", self._concepts, {}),
-                             ("F7", self._novel_concept, {"asof": asof}),
-                             ("Y7", self._dragon_tiger, {"asof": asof}),
-                             ("S5", self._financing, {}),
-                             ("Y2", self._shareholders, {}),
-                             ("Y6", self._event, {"asof": asof})]:
+        # 快照类(Y5/Y2): 接口无历史时点, 基准日在过去 → 计算即造假, 跳过
+        snapshot_ok = self._ref(asof) >= date.today()
+        for name, fn, kw in ([(x, f, {}) for x, f in
+                              (("Y5", self._concepts), ("Y2", self._shareholders))
+                              if snapshot_ok] +
+                             [("F7", self._novel_concept, {"asof": asof}),
+                              ("Y7", self._dragon_tiger, {"asof": asof}),
+                              ("S5", self._financing, {}),
+                              ("Y6", self._event, {"asof": asof})]):
             try:
                 res = fn(code, **kw)
                 if res is not None:

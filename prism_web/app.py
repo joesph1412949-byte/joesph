@@ -65,13 +65,14 @@ app = Flask(__name__)
 # 回测数据源(东财, backtest_cli): 导入失败 → /api/backtest 返回 500
 try:
     from backtest.cli import (zt_feed, kline_feed, load_market_data,   # noqa: F401
-                              build_day_feed)
+                              build_day_feed, _fund_feed)
     _BACKTEST_FEEDS_OK = True
 except Exception:
     zt_feed = None
     kline_feed = None
     load_market_data = None
     build_day_feed = None
+    _fund_feed = None
     _BACKTEST_FEEDS_OK = False
 
 
@@ -731,7 +732,12 @@ def api_backtest():
         day_feed, feed_note = None, None
         if build_day_feed is not None:
             try:
-                day_feed = build_day_feed(s, e, use_intraday=True)
+                # fund_feed(Task 3): 与 CLI 同口径注入基本面快照(Y1/Y8/F7/Y6/Y7;
+                # 网络/构造失败 → None = 不注入, 报告 data_notes 标覆盖)。
+                # 网页与 CLI 共用同一装配, 保持数字一致(2026-09-04 修复的教训)。
+                day_feed = build_day_feed(
+                    s, e, use_intraday=True,
+                    fund_feed=_fund_feed() if _fund_feed else None)
             except Exception as exc:
                 logger.warning("按日上下文装配失败: %r", exc, exc_info=True)
                 feed_note = ("按日上下文装配失败 → N3/N4/N5/F1/F6 按静态参数"

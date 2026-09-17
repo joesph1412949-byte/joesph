@@ -1,0 +1,522 @@
+# -*- coding: utf-8 -*-
+"""每日基本面快照采集(prism.fund_snapshot, 规格 §7) + 回测注入基本面 — 离线测试。
+
+覆盖:
+  ① snapshot_once(假 http 的 FundamentalFeed + tmp 缓存)落既有缓存, 键含日期
+  ② 重复调用幂等: 命中缓存不再发请求 / 同 key 覆盖不重复写
+  ③ 失败计数: 单股失败不阻塞其余; 一无所获(全因子 fail-open)计 failed
+  ④ 无未来约束: 拒绝未来日期(绝不写未来键); 非法日期 → ValueError
+  ⑤ default_codes: 本地涨停池索引 → 代码表(只读不触网)
+  ⑥ CLI main(): --codes/--date + JSON 结果
+  ⑦ build_day_feed 注入 fund: stock[code]["fund"](asof=当日, float_mv=当日),
+     Y5/Y2 快照类剔除(与 Backtester._fund_for 同口径), 网络失败 fail-open,
+     缺省(不传 fund_feed)行为不变(零注入)
+  ⑧ 池条目 float_mv: 有股本 → 股本×当日收盘; 缺 → None(不造假)
+  ⑨ 守护 15:05 选股后挂钩子: 可注入、异常只落日志不影响选股返回
+
+全离线: FundamentalFeed 经 http_get 注入罐装 JSON; 守护注入假钩子。
+"""
+import json
+import logging
+import sys
+import threading
+import time
+from datetime import date, datetime
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+import pytest
+
+import prism.fund_snapshot as fund_snapshot
+from datasource.fundamental import FundamentalFeed
+
+# ---------------- 假 http(datasource/tests 同款: 按 URL 子串路由) ----------------
+
+
+class FakeResp:
+    def __init__(self, payload):
+        self._p = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._p
+
+
+class FakeHTTP:
+    """按 URL/参数子串路由的假 http_get; 未匹配 → AssertionError(防意外联网)。"""
+
+    def __init__(self, routes=None, default_exc=None):
+        self.routes = routes or {}
+        self.default_exc = default_exc
+        self.calls = []
+
+    def __call__(self, url, params=None, headers=None, timeout=None):
+        self.calls.append((url, params))
+        if self.default_exc:
+            raise self.default_exc
+        probe = url + " " + repr(params or {})
+        for key, payload in self.routes.items():
+            if key in probe:
+                if callable(payload):
+                    payload = payload(params)
+                return FakeResp(payload)
+        raise AssertionError("未预期的请求: %s %r" % (url, params))
+
+
+def _ztpool_handler(pool_by_date):
+    def handler(params):
+        return {"data": {"pool": pool_by_date.get((params or {}).get("date"))}}
+    return handler
+
+
+def _base_routes(slist_total=0):
+    """全端点可用默认(空数据 → 各网络因子 0/None, 不抛)。"""
+    return {
+        "slist": {"data": {"diff": [], "total": slist_total}},
+        "getTopicZTPool": _ztpool_handler({}),
+        "RPT_DAILYBILLBOARD_DETAILSNEW": {"result": {"data": []}},
+        "RPT_HOLDERNUMLATEST": {"result": {"data": []}},
+        "np-anotice": {"data": {"list": []}},
+    }
+
+
+def _feed(tmp_path, routes=None, default_exc=None, **kw):
+    return FundamentalFeed(http_get=FakeHTTP(routes, default_exc),
+                           cache_path=tmp_path / "fund_cache.json", **kw)
+
+
+def _read_cache(tmp_path):
+    p = tmp_path / "fund_cache.json"
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+
+
+# ---------------- ① snapshot_once: 落缓存, 键含日期 ----------------
+
+def test_snapshot_once_writes_dated_cache_key(tmp_path):
+    """指定历史日 → compute_for_stock(asof=该日), 缓存键 = YYYYMMDD:code。
+
+    历史基准日: 窗口类(Y7/Y6)照常; 快照类 Y5/Y2 接口无历史时点 → 硬跳过
+    (不把今天的值错记成那天的历史, 见 datasource feed 的防未来测试)。
+    """
+    feed = _feed(tmp_path, _base_routes())
+    res = fund_snapshot.snapshot_once(["000001.SZ"], date="20260915", feed=feed)
+    assert res == {"saved": 1, "failed": 0}
+    cache = _read_cache(tmp_path)
+    assert "20260915:000001.SZ" in cache, "键必须含快照日期(按 asof 分日)"
+    entry = cache["20260915:000001.SZ"]
+    assert "Y7" in entry and "Y6" in entry, "窗口类按 asof 正常快照"
+    assert "Y5" not in entry and "Y2" not in entry, \
+        "历史基准日绝不许带当前快照值(无未来)"
+
+
+def test_snapshot_once_today_key_when_no_date(tmp_path):
+    """date=None → 今天: 不传 asof, 键 = 今日 YYYYMMDD:code; Y5/Y2 照常采。"""
+    feed = _feed(tmp_path, _base_routes(slist_total=3))
+    res = fund_snapshot.snapshot_once(["000001.SZ"], feed=feed)
+    assert res == {"saved": 1, "failed": 0}
+    today = date.today().strftime("%Y%m%d")
+    entry = _read_cache(tmp_path).get("%s:000001.SZ" % today) or {}
+    assert entry.get("Y5", {}).get("score") == 1, "当日快照采 Y5(Y2/Y5 目标因子)"
+
+
+def test_snapshot_once_multi_codes_counts(tmp_path):
+    feed = _feed(tmp_path, _base_routes())
+    res = fund_snapshot.snapshot_once(
+        ["000001.SZ", "600000.SH", "300001.SZ"], date="20260915", feed=feed)
+    assert res == {"saved": 3, "failed": 0}
+    cache = _read_cache(tmp_path)
+    assert "20260915:600000.SH" in cache and "20260915:300001.SZ" in cache
+
+
+# ---------------- ② 幂等: 同 key 覆盖不重复写 ----------------
+
+def test_snapshot_once_idempotent(tmp_path):
+    """重复采集: 缓存命中 → 不再发请求, 缓存文件逐字节不变。"""
+    feed = _feed(tmp_path, _base_routes())
+    r1 = fund_snapshot.snapshot_once(["000001.SZ"], date="20260915", feed=feed)
+    assert r1 == {"saved": 1, "failed": 0}
+    n_calls = len(feed.http_get.calls)
+    raw = (tmp_path / "fund_cache.json").read_text(encoding="utf-8")
+    r2 = fund_snapshot.snapshot_once(["000001.SZ"], date="20260915", feed=feed)
+    assert r2 == {"saved": 1, "failed": 0}
+    assert len(feed.http_get.calls) == n_calls, "命中缓存 → 绝不再发网络请求"
+    assert (tmp_path / "fund_cache.json").read_text(encoding="utf-8") == raw, \
+        "同 key 幂等: 覆盖写不改变文件"
+
+
+# ---------------- ③ 失败计数 ----------------
+
+def test_snapshot_once_counts_failures_and_continues(tmp_path):
+    """网络全挂 → 一无所获计 failed, 单股失败绝不阻塞其余/不抛。"""
+    feed = _feed(tmp_path, default_exc=RuntimeError("东财挂了"))
+    res = fund_snapshot.snapshot_once(["000001.SZ", "600000.SH"],
+                                      date="20260915", feed=feed)
+    assert res == {"saved": 0, "failed": 2}
+
+
+def test_snapshot_once_feed_raises_for_one_code(tmp_path):
+    """feed 对某股抛异常 → 该股 failed, 其余照常 saved。"""
+    real = _feed(tmp_path, _base_routes())
+
+    class _Flaky:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def compute_for_stock(self, code, float_mv=None, asof=None):
+            if code == "000002.SZ":
+                raise RuntimeError("boom")
+            return self._inner.compute_for_stock(code, float_mv=float_mv,
+                                                 asof=asof)
+
+    res = fund_snapshot.snapshot_once(["000001.SZ", "000002.SZ"],
+                                      date="20260915", feed=_Flaky(real))
+    assert res == {"saved": 1, "failed": 1}
+    assert "20260915:000001.SZ" in _read_cache(tmp_path)
+
+
+# ---------------- ④ 无未来约束 ----------------
+
+def test_snapshot_once_rejects_future_date(tmp_path):
+    """未来日期 → 拒绝(绝不写未来键: 否则回测会把今天的数据当那天的事实)。"""
+    feed = _feed(tmp_path, _base_routes())
+    with pytest.raises(ValueError):
+        fund_snapshot.snapshot_once(["000001.SZ"], date="29991231", feed=feed)
+    assert _read_cache(tmp_path) == {}, "不能留下未来键"
+
+
+def test_snapshot_once_rejects_bad_date(tmp_path):
+    feed = _feed(tmp_path, _base_routes())
+    with pytest.raises(ValueError):
+        fund_snapshot.snapshot_once(["000001.SZ"], date="not-a-date", feed=feed)
+    with pytest.raises(ValueError):
+        fund_snapshot.snapshot_once(["000001.SZ"], date="202609", feed=feed)
+
+
+def test_snapshot_once_accepts_date_object(tmp_path):
+    feed = _feed(tmp_path, _base_routes())
+    res = fund_snapshot.snapshot_once(["000001.SZ"], date=date(2026, 9, 15),
+                                      feed=feed)
+    assert res == {"saved": 1, "failed": 0}
+    assert "20260915:000001.SZ" in _read_cache(tmp_path)
+
+
+# ---------------- ⑤ default_codes(本地索引, 不触网) ----------------
+
+def test_default_codes_reads_local_zt_index(monkeypatch):
+    from prism import zt_history
+    monkeypatch.setattr(zt_history, "qmt_zt_feed",
+                        lambda d8: [{"code": "600000.SH", "boards": 1},
+                                    {"code": "000001.SZ", "boards": 1}])
+    assert fund_snapshot.default_codes() == ["600000.SH", "000001.SZ"]
+    assert fund_snapshot.default_codes("20260915") == ["600000.SH", "000001.SZ"]
+
+
+def test_default_codes_empty_when_no_pool(monkeypatch):
+    from prism import zt_history
+    monkeypatch.setattr(zt_history, "qmt_zt_feed", lambda d8: [])
+    assert fund_snapshot.default_codes() == []
+
+
+def test_default_codes_swallows_index_errors(monkeypatch):
+    from prism import zt_history
+
+    def boom(d8):
+        raise RuntimeError("索引坏了")
+    monkeypatch.setattr(zt_history, "qmt_zt_feed", boom)
+    assert fund_snapshot.default_codes() == []
+
+
+# ---------------- ⑥ CLI main() ----------------
+
+def test_main_runs_with_codes_and_prints_result(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(fund_snapshot, "FundamentalFeed",
+                        lambda: _feed(tmp_path, _base_routes()))
+    rc = fund_snapshot.main(["--date", "20260915",
+                             "--codes", "000001.SZ", "600000.SH"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out.strip())
+    assert out == {"saved": 2, "failed": 0}
+
+
+def test_main_defaults_to_local_pool(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(fund_snapshot, "FundamentalFeed",
+                        lambda: _feed(tmp_path, _base_routes()))
+    seen = []
+
+    def fake_default(day=None):
+        seen.append(day)
+        return ["000001.SZ"]
+    monkeypatch.setattr(fund_snapshot, "default_codes", fake_default)
+    rc = fund_snapshot.main(["--date", "20260915"])
+    assert rc == 0
+    assert seen == ["20260915"], "缺省代码表必须按快照基准日取该日涨停池"
+    assert json.loads(capsys.readouterr().out.strip()) == {"saved": 1, "failed": 0}
+
+
+def test_main_empty_pool_reports_zero_and_warns(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(fund_snapshot, "FundamentalFeed",
+                        lambda: _feed(tmp_path, _base_routes()))
+    monkeypatch.setattr(fund_snapshot, "default_codes",
+                        lambda day=None: [])
+    rc = fund_snapshot.main([])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "未采集" in captured.err
+    assert json.loads(captured.out.strip()) == {"saved": 0, "failed": 0}
+
+
+def test_main_bad_date_exits_nonzero(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(fund_snapshot, "FundamentalFeed",
+                        lambda: _feed(tmp_path, _base_routes()))
+    rc = fund_snapshot.main(["--date", "garbage", "--codes", "000001.SZ"])
+    assert rc == 2
+
+
+# ---------------- ⑦/⑧ build_day_feed 注入 fund + 池条目 float_mv ----------------
+
+_CAL = [date(2026, 9, 1), date(2026, 9, 2), date(2026, 9, 3)]
+_POOLS = {
+    _CAL[0]: [{"code": "600000.SH", "boards": 1}],
+    _CAL[1]: [{"code": "600000.SH", "boards": 1},
+              {"code": "000001.SZ", "boards": 1}],
+    _CAL[2]: [{"code": "000001.SZ", "boards": 1}],
+}
+_IDX = {
+    "000001.SH": [(d.strftime("%Y-%m-%d"), 3800.0 + i, 4.0e8, 8.7e11)
+                  for i, d in enumerate(_CAL)],
+    "399001.SZ": [(d.strftime("%Y-%m-%d"), 13000.0 + i, 5.0e8, 9.6e11)
+                  for i, d in enumerate(_CAL)],
+}
+_CLOSES = [10.0, 11.0, 12.0]     # 三日收盘(升序)
+_CODES = ("600000.SH", "000001.SZ")
+
+
+def _klines():
+    out = {}
+    for c in _CODES:
+        out[c] = [(d.strftime("%Y-%m-%d"), x, x * 1.02, x * 0.98, x, 2500.0)
+                  for d, x in zip(_CAL, _CLOSES)]
+    return out
+
+
+def _stub_day_io(monkeypatch, float_volumes=None):
+    """桩掉 build_day_feed 的四类 IO(日历/指数/池/K线/股本), 全离线。"""
+    import backtest.cli as cli
+    kl = _klines()
+    pools_by_d8 = {d.strftime("%Y%m%d"): v for d, v in _POOLS.items()}
+
+    def fake_zt(d8):
+        return [dict(s) for s in pools_by_d8.get(d8, [])]
+    monkeypatch.setattr(cli, "_get_zt_index",
+                        lambda: {d.strftime("%Y%m%d"): 1 for d in _CAL})
+    monkeypatch.setattr(cli, "_index_daily", lambda code, *a, **k: list(_IDX[code]))
+    monkeypatch.setattr(cli, "zt_feed", fake_zt)
+    monkeypatch.setattr(cli, "_batch_klines",
+                        lambda codes: {c: kl[c] for c in codes if c in kl})
+    monkeypatch.setattr(cli, "_float_volumes",
+                        lambda codes: dict(float_volumes or {}))
+    return cli
+
+
+class _FakeFundFeed:
+    """假基本面 feed: 记录 (code, float_mv, asof); 返回含快照类 Y5/Y2 的固定集。"""
+
+    def __init__(self, fail_codes=()):
+        self.calls = []
+        self.fail_codes = set(fail_codes)
+
+    def compute_for_stock(self, code, float_mv=None, asof=None):
+        if code in self.fail_codes:
+            raise RuntimeError("网络挂了")
+        self.calls.append((code, float_mv, asof))
+        return {"Y1": {"score": 1, "note": "y1"},
+                "Y5": {"score": 1, "note": "y5-snapshot"},
+                "Y2": {"score": 1, "note": "y2-snapshot"},
+                "F7": {"score": 0, "note": "f7"}}
+
+
+def test_build_day_feed_injects_fund_asof_float_mv(monkeypatch):
+    """stock[code]["fund"] 注入: asof=当日, float_mv=当日股本×收盘; 幂等不重复算。"""
+    cli = _stub_day_io(monkeypatch, {"600000.SH": 3.0e9})
+    ffeed = _FakeFundFeed()
+    feed = cli.build_day_feed(_CAL[0], _CAL[2], fund_feed=ffeed)
+    ctx1 = feed(_CAL[1])
+    st = ctx1["stock"]["600000.SH"]
+    # Y5/Y2 是"当前快照"类, 回测必剔除(与 Backtester._fund_for 同口径, 保持现状)
+    assert st["fund"] == {"Y1": {"score": 1, "note": "y1"},
+                          "F7": {"score": 0, "note": "f7"}}
+    code, float_mv, asof = ffeed.calls[0]
+    assert code == "600000.SH"
+    assert float_mv == pytest.approx(3.0e9 * 11.0), "float_mv = 股本×当日收盘"
+    assert asof == _CAL[1], "asof 必须=决策日(防未来)"
+    # 同日再请求 → 命中 payload 缓存, 不重复计算
+    n = len(ffeed.calls)
+    feed(_CAL[1])
+    assert len(ffeed.calls) == n
+
+
+def test_build_day_feed_no_float_mv_passes_none(monkeypatch):
+    """缺股本 → float_mv=None(Y1/Y8 由 compute 内 fail-open 缺键)。"""
+    cli = _stub_day_io(monkeypatch, {})          # 谁都没给股本
+    ffeed = _FakeFundFeed()
+    feed = cli.build_day_feed(_CAL[0], _CAL[2], fund_feed=ffeed)
+    ctx = feed(_CAL[2])
+    st = ctx["stock"]["000001.SZ"]
+    assert st["fund"]["Y1"] == {"score": 1, "note": "y1"}   # fund 照常注入
+    code, float_mv, asof = ffeed.calls[-1]
+    assert float_mv is None, "缺股本 → None, 不造假"
+
+
+def test_build_day_feed_fund_failure_fail_open(monkeypatch):
+    """feed 对某股炸 → 该股不给 fund(得 0), 整日上下文照常返回。"""
+    cli = _stub_day_io(monkeypatch, {})
+    ffeed = _FakeFundFeed(fail_codes={"000001.SZ"})
+    feed = cli.build_day_feed(_CAL[0], _CAL[2], fund_feed=ffeed)
+    ctx = feed(_CAL[2])
+    assert "fund" not in ctx["stock"]["000001.SZ"]
+    # 其余日期照常
+    ctx1 = feed(_CAL[1])
+    assert ctx1["stock"]["600000.SH"]["fund"]["Y1"]["score"] == 1
+
+
+def test_build_day_feed_without_fund_feed_unchanged(monkeypatch):
+    """缺省(不传 fund_feed) → 行为不变: stock 无 fund 键(零网络、零注入)。"""
+    cli = _stub_day_io(monkeypatch, {})
+    feed = cli.build_day_feed(_CAL[0], _CAL[2])
+    ctx = feed(_CAL[2])
+    assert "fund" not in ctx["stock"]["000001.SZ"]
+
+
+def test_day_payload_float_mv_none_when_missing():
+    """池条目 float_mv 契约: 有股本 → 股本×收盘; 缺 → 显式 None(float_vol 仍缺省不造假)。"""
+    from backtest.cli import _day_payload
+    kl = _klines()
+    pools = {k: v for k, v in _POOLS.items()}
+    p = _day_payload(_CAL[1], pools, _CAL, kl, {"600000.SH": 3.0e9}, {})
+    st = p["stock"]["600000.SH"]
+    assert st["float_vol"] == 3.0e9 and st["float_mv"] == pytest.approx(3.0e9 * 11.0)
+    p2 = _day_payload(_CAL[2], pools, _CAL, kl, {}, {})
+    st2 = p2["stock"]["000001.SZ"]
+    assert st2["float_mv"] is None, "缺股本 → float_mv=None"
+    assert "float_vol" not in st2, "缺股本不造假(维持既有口径)"
+
+
+# ---------------- ⑨ 守护 15:05 选股后挂钩子 ----------------
+
+_CAND = [{"code": "600000.SH", "up_stop_price": 10.0,
+          "scores": {"composite": 5.0}}]
+
+
+class _FakeProvider:
+    def __init__(self):
+        from prism.context import FactorContext
+        self._ctx = FactorContext
+
+    def build_market_context(self):
+        return self._ctx(code="__MARKET__", limit_ups=_CAND)
+
+    def get_limit_ups(self):
+        return _CAND
+
+    def build_stock_context(self, code, **kw):
+        return self._ctx(code=code)
+
+    def invalidate(self):
+        pass
+
+    class ds:
+        @staticmethod
+        def get_full_market_ticks():
+            return {"600000.SH": {"lastPrice": 9.8}}
+
+        @staticmethod
+        def get_kline(code, days=1):
+            import pandas as pd
+            return pd.DataFrame({"close": [9.8], "low": [9.7],
+                                 "high": [10.0]}, index=["20260917"])
+
+
+def _daemon(tmp_path, monkeypatch, fund_snapshot_fn):
+    from prism.paper import PaperAccount
+    from prism.paper_daemon import PaperDaemon
+    import prism.engine
+    monkeypatch.setattr(
+        prism.engine, "run_screen",
+        lambda s, m, gate_factors=None, stock_contexts=None:
+        {"environment_ok": False, "gate_score": 0, "candidates": [],
+         "summary": {"candidate_count": 0}})
+    acc = PaperAccount(state_path=tmp_path / "paper.json")
+    acc.init_account(created="2026-09-01")
+    d = PaperDaemon(acc, zt_refresh_fn=lambda: {"injected_noop": True},
+                    fund_snapshot_fn=fund_snapshot_fn)
+    d.provider = _FakeProvider()
+    return d, acc
+
+
+def _patch_pick(acc, monkeypatch):
+    """假 pick: 与真 pick_top5_at_close 同样登记幂等键(真实现 ts_key="pickT"+slot)。"""
+    def fake_pick(provider, now=None, slot=None):
+        acc.state["screens_done"].append("pickT%s" % slot)
+        return {"picked": [], "env_ok": True}
+    monkeypatch.setattr(acc, "pick_top5_at_close", fake_pick)
+
+
+def test_daemon_pick_triggers_fund_snapshot(tmp_path, monkeypatch):
+    """收盘选股分支: pick 落定后触发基本面快照钩子(daemon 线程)。"""
+    done, calls = threading.Event(), []
+
+    def fake_snap():
+        calls.append(1)
+        done.set()
+        return {"saved": 1, "failed": 0}
+    d, acc = _daemon(tmp_path, monkeypatch, fake_snap)
+    _patch_pick(acc, monkeypatch)
+    out = d.tick_once(now=datetime(2026, 9, 17, 15, 6))
+    assert out["action"] == "pick"
+    assert done.wait(5), "选股后必须触发基本面快照采集"
+    assert calls == [1]
+
+
+def test_daemon_fund_snapshot_failure_does_not_break_pick(tmp_path, monkeypatch,
+                                                          caplog):
+    """钩子炸 → 只落 warning, 选股返回值原样; 后续 tick 正常。"""
+    entered = threading.Event()
+
+    def boom():
+        entered.set()
+        raise RuntimeError("快照炸了")
+    d, acc = _daemon(tmp_path, monkeypatch, boom)
+    _patch_pick(acc, monkeypatch)
+    with caplog.at_level(logging.WARNING, logger="paper_daemon"):
+        out = d.tick_once(now=datetime(2026, 9, 17, 15, 6))
+    assert out["action"] == "pick"
+    assert out["pick"]["env_ok"] is True, "选股结果不受钩子异常影响"
+    assert entered.wait(5)
+    for _ in range(100):                     # 等 worker 落日志(有界轮询)
+        if "基本面快照采集失败" in caplog.text:
+            break
+        time.sleep(0.05)
+    assert "基本面快照采集失败" in caplog.text
+    out = d.tick_once(now=datetime(2026, 9, 17, 15, 10))
+    assert out["action"] == "idle", "主循环不受影响"
+
+
+def test_daemon_fund_snapshot_not_fired_outside_pick(tmp_path, monkeypatch):
+    """非选股 tick(午休 idle)不触发钩子。"""
+    calls = []
+    d, acc = _daemon(tmp_path, monkeypatch, lambda: calls.append(1))
+    out = d.tick_once(now=datetime(2026, 9, 17, 12, 0))
+    assert out["action"] == "idle"
+    assert calls == []
+
+
+def test_daemon_default_fund_snapshot_fn_exists(tmp_path):
+    """不注入时也有默认钩子(真实路径), 且与 zt_refresh_fn 同为可注入点。"""
+    from prism.paper import PaperAccount
+    from prism.paper_daemon import PaperDaemon
+    acc = PaperAccount(state_path=tmp_path / "d.json")
+    acc.init_account(created="2026-09-01")
+    d = PaperDaemon(acc)
+    assert callable(d.fund_snapshot_fn)

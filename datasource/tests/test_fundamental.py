@@ -413,3 +413,32 @@ def test_ztpool_today_cached_shared_across_stocks():
     assert len(ztpool_total) == len(ztpool_after_first)
     assert sum(1 for u, p in http.calls
                if "getTopicZTPool" in u and (p or {}).get("date") == today) == 1
+
+
+# ---------- 快照类(Y5/Y2)对过去基准日必须跳过(防未来数据错记成历史) ----------
+def test_compute_for_stock_past_asof_skips_snapshot_factors():
+    """基准日 < 今天 → Y5(概念)/Y2(股东户数)硬跳过, 不请求不落缓存。
+
+    这两类接口不提供历史时点(类 docstring 自述): 硬算只能拿"今天"的值,
+    对过去基准日是未来数据, 且会把今天的值错记成那天的快照 —— 污染
+    Y2/Y5 每日真实历史积累(规格 §7)。窗口类(Y7/Y6)不受影响照常计算。
+    """
+    gdhs = [_holder_row("000001", -800)]              # 若硬算会命中 Y2=1
+    slist_diff = [_concept_board("储能"), _concept_board("机器人"),
+                  _concept_board("低空经济")]          # 若硬算会命中 Y5=1
+    http = FakeHTTP(_base_routes(slist_diff=slist_diff, gdhs=gdhs))
+    f = FundamentalFeed(http_get=http, cache_path=None)
+    out = f.compute_for_stock("000001.SZ", asof=TODAY - timedelta(days=10))
+    assert "Y5" not in out and "Y2" not in out, "过去基准日绝不许带当前快照值"
+    assert "Y7" in out, "窗口类(Y7)照常按 asof 计算"
+
+
+def test_compute_for_stock_today_asof_keeps_snapshot_factors():
+    """基准日 = 今天(显式 asof=今天) → Y5/Y2 照常计算(当日快照, 实盘/每日采集用)。"""
+    gdhs = [_holder_row("000001", -800)]
+    slist_diff = [_concept_board("储能"), _concept_board("机器人"),
+                  _concept_board("低空经济")]
+    http = FakeHTTP(_base_routes(slist_diff=slist_diff, gdhs=gdhs))
+    f = FundamentalFeed(http_get=http, cache_path=None)
+    out = f.compute_for_stock("000001.SZ", asof=TODAY)
+    assert out["Y5"]["score"] == 1 and out["Y2"]["score"] == 1

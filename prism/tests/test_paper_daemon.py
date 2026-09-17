@@ -60,7 +60,8 @@ def _daemon(tmp_path, monkeypatch, now_fn=None, ticks=None):
     acc.init_account(created="2026-09-01")
     d = PaperDaemon(acc, ticks_fn=(lambda: ticks) if ticks else None,
                     now_fn=now_fn,
-                    zt_refresh_fn=lambda: {"injected_noop": True})
+                    zt_refresh_fn=lambda: {"injected_noop": True},
+                    fund_snapshot_fn=lambda: {"injected_noop": True})
     d.provider = _FakeProvider()
     return d, acc
 
