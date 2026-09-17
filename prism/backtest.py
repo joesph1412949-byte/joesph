@@ -28,6 +28,12 @@
 注意: 回测里用到的因子必须在 registry 注册(测试用 @factor 装饰器注入
 N1/A1 等假因子); 引擎不依赖 prism.factors 的真实因子(它们需要真实行情,
 回测只有 K线, 但适配层保证"真实形态"的 K线类因子可命中)。
+
+A股成交约束(规格 2026-09-16 §6, 借鉴 Vibe-Trading `engines/china_a.py`, MIT):
+  买入侧跳过一字板(`day_feed["stock"][code]["one_word"]`, 1m 特征; 缺失=未知
+  不拦但记数)、资金层按 100 股整手取整、佣金 `max(名义额×费率, ¥5)`。
+卖出侧跌停顺延沿用既有 exit_rules。报告新增 `validation`(蒙特卡洛/bootstrap/
+滚动前推, 见 prism/validation.py), 计算失败不影响回测返回。
 """
 import logging
 from concurrent.futures import ThreadPoolExecutor
@@ -38,6 +44,7 @@ import pandas as pd
 from shared.exit_rules import ExitRule
 from prism import registry as reg
 from prism import sector_score
+from prism import validation
 from prism.context import FactorContext
 from prism.engine import compute_model_scores, load_strategy
 
@@ -203,13 +210,27 @@ def _slice_mkt(mkt, asof):
     return out
 
 
+class _VTrade:
+    """统计验证用的交易适配(prism 的 trade 是 dict, 移植函数按属性读)。
+
+    移植函数只用到两个属性: `pnl`(路径序列) 与 `entry_time`(归窗口)。
+    """
+
+    __slots__ = ("pnl", "entry_time")
+
+    def __init__(self, pnl, entry_time):
+        self.pnl = pnl
+        self.entry_time = entry_time
+
+
 class Backtester:
     """真实策略回放 + 交易模拟。"""
 
     def __init__(self, strategy, zt_feed, kline_feed,
                  fee_rate=0.00025, slippage=0.001, position_ratio=0.3,
                  stamp_duty=0.0005, transfer_fee=0.00001,
-                 initial_capital=1000000.0, max_positions=5, fund_feed=None):
+                 initial_capital=1000000.0, max_positions=5, fund_feed=None,
+                 min_commission=5.0):
         self.strategy = load_strategy(strategy)
         self.zt_feed = zt_feed
         self.kline_feed = kline_feed
@@ -223,6 +244,10 @@ class Backtester:
         self.slippage = slippage            # 滑点(买+卖-, 默认0.1%)
         self.stamp_duty = stamp_duty        # 印花税(仅卖出, A股默认0.05%)
         self.transfer_fee = transfer_fee    # 过户费(双向, 默认万0.1)
+        # 最低佣金(借鉴 Vibe-Trading china_a.commission_min, MIT): 单笔佣金
+        # max(名义额×fee_rate, min_commission)。**每次买入各算一次**(A股按笔)。
+        # 想回到"完全零成本"的老口径: fee_rate=0 且 min_commission=0。
+        self.min_commission = min_commission
         self.position_ratio = position_ratio   # 单笔资金上限(占初始资金比例)
         self.initial_capital = initial_capital # 初始资金(净值模拟基准, 默认100万)
         self.max_positions = max_positions     # 最大同时持仓数(默认5, 资金约束)
@@ -237,7 +262,9 @@ class Backtester:
     @staticmethod
     def _new_filter_stats():
         return {"days": 0, "gate_blocked_days": 0, "candidates": 0,
-                "filtered_min_model": 0, "filtered_sector": 0}
+                "filtered_min_model": 0, "filtered_sector": 0,
+                # 一字板成交约束(规格 §6): 拦下的笔数 / one_word 不可得(未知)的笔数
+                "filtered_one_word": 0, "one_word_unknown": 0}
 
     def _pool_for(self, d):
         key = d.strftime("%Y%m%d")
@@ -494,7 +521,8 @@ class Backtester:
 
     # ---------------- 主流程 ----------------
     def run(self, start_date, end_date, sell_rules=None, progress=None,
-            em=None, ticks=None, mkt=None, sector_map=None, day_feed=None):
+            em=None, ticks=None, mkt=None, sector_map=None, day_feed=None,
+            validate=True):
         """回放 [start_date, end_date]。返回报告 dict(与旧 backtest 同构)。
 
         sell_rules: {take_profit_pct, stop_loss_pct, max_hold_days},
@@ -511,12 +539,13 @@ class Backtester:
         键(全部可选):
           em / ticks / index_kline / sh_index_kline / stock
         其中 stock = {code: {sealed, tick, up_price, last, last_close,
-        float_vol, float_mv, fund}}。每日取一次, 同名键优先于上面的静态
-        参数; 缺键/返回 None → 退回静态参数(旧调用与旧测试不受影响)。
+        float_vol, float_mv, fund, one_word}}。每日取一次, 同名键优先于上面的
+        静态参数; 缺键/返回 None → 退回静态参数(旧调用与旧测试不受影响)。
         防未来函数由调用方保证: 只放 <= 当日的快照(backtest.cli.
         build_day_feed 已按日切片)。
         策略开启 sector_score(v5)时: 板块评分 >threshold 才买(fail-closed),
         trade 记 sector_score/pos_mult, 单笔投入按 pos_mult 放大。
+        validate: 是否跑统计验证(规格 §6, 默认 True)。计算失败不影响回测返回。
         """
         defaults = {"take_profit_pct": 0.08, "stop_loss_pct": 0.05,
                     "max_hold_days": 5}
@@ -556,6 +585,9 @@ class Backtester:
             if pool:
                 dates.append(d)
                 self._filter_stats["days"] += 1
+                # 一字板成交约束(规格 §6, 借鉴 china_a 涨跌停口径): 逐股查
+                # one_word(1m 特征)。缺失 = 未知 —— 不拦(不造假), 只记数。
+                stock_map = day_ctx.get("stock") or {}
                 for code, boards, theme, composite, sec_score in self._pick(
                         pool, asof=d,
                         em=_day_field(day_ctx, "em", em),
@@ -564,6 +596,13 @@ class Backtester:
                         index_kline=day_ctx.get("index_kline"),
                         sh_index_kline=day_ctx.get("sh_index_kline"),
                         stock_extra=day_ctx.get("stock")):
+                    one_word = (stock_map.get(code) or {}).get("one_word")
+                    if one_word is None:
+                        self._filter_stats["one_word_unknown"] += 1
+                    elif one_word:
+                        # 一字板全天封死 → 买不到, 该笔不建仓
+                        self._filter_stats["filtered_one_word"] += 1
+                        continue
                     kline = self._kline_for(code)
                     tr = self._simulate_trade(code, kline, d, rules)
                     if tr:
@@ -594,7 +633,42 @@ class Backtester:
         return self._report(trades, dates, gate_notes=gate_notes,
                             equity_stats=eq_stats, skipped_cash=skipped,
                             filter_stats=self._filter_stats,
-                            data_notes=data_notes)
+                            data_notes=data_notes,
+                            validation=self._validate(trades, curve)
+                            if validate else {})
+
+    # ---------------- 统计验证(规格 §6) ----------------
+    def _validate(self, trades, curve):
+        """报告 `validation` 字段: 蒙特卡洛 / bootstrap / 滚动前推。
+
+        移植自 Vibe-Trading(MIT) `agent/backtest/validation.py`(见
+        prism/validation.py)。prism 的交易是 dict、净值是 (日期串, 净值) 列表,
+        这里做一次鸭子类型适配(移植函数只读 .pnl / .entry_time):
+          - pnl 序列用**每笔收益率(%)**, 路径基准 100 → 与实际净值同量纲;
+          - entry_time 用 ISO 日期串, 与净值曲线索引(日期串)可直接比较。
+        样本不足时三个函数各自返回 error dict(移植保真的校验分支)。
+        **整段兜住异常**: 验证只是附加信息, 失败绝不能影响回测返回。
+        """
+        try:
+            seq = [_VTrade(t.get("return_pct") or 0.0, t.get("date"))
+                   for t in trades]
+            equity = pd.Series([nav for _d, nav in curve],
+                               index=[d for d, _nav in curve])
+            return {
+                # 口径披露(不静默): 移植函数按"逐笔路径 + 252 年化"算夏普, 而
+                # prism 的 trade 序列是每笔收益率 → 绝对夏普只在"≈每日一笔"时
+                # 可比; p 值/置信区间不受影响。报告的权威夏普用 sharpe_ratio
+                # (逐日净值口径, _equity_stats)。
+                "note": "蒙特卡洛/滚动前推的路径序列 = 每笔收益率(%), 基准100, "
+                        "年化系数 252 沿用移植口径(≈每日一笔才可直接比); "
+                        "绝对夏普请看报告 sharpe_ratio(逐日净值口径)",
+                "monte_carlo": validation.monte_carlo_test(seq, 100.0),
+                "bootstrap": validation.bootstrap_sharpe_ci(equity),
+                "walk_forward": validation.walk_forward_analysis(equity, seq),
+            }
+        except Exception as exc:
+            logger.warning("validation 计算失败(不影响回测结果): %r", exc)
+            return {"error": repr(exc)}
 
     # ---------------- 交易模拟 ----------------
     def _simulate_trade(self, code, kline, entry_date, rules):
@@ -703,12 +777,14 @@ class Backtester:
         for day in all_days:
             ev = events.get(day, {"sell": [], "buy": []})
             # 1) 卖出: 回款 本金×(1+收益率), 从持仓移除(按 uid 精确匹配)
+            # 收益率取**持仓里存的那份**(h[2]): 建仓时已按 A股成交约束调整
+            # (100股整手 / ¥5最低佣金), 不能用 trade 原始 return_pct。
             for t in ev["sell"]:
                 uid = "%s|%s" % (t["date"], t["code"])
                 for i, h in enumerate(holdings):
                     if h[0] == uid:
                         holdings.pop(i)
-                        cash += h[1] * (1 + t["return_pct"] / 100.0)
+                        cash += h[1] * (1 + h[2] / 100.0)
                         break
                 # 未成交的买入(不在持仓) → 不回款
             # 2) 买入: 按当日净值×仓位比例投入, 现金足且持仓未满
@@ -719,16 +795,47 @@ class Backtester:
                 # 引用泄漏变量, 当日多笔买入共用无关交易的乘数)
                 mult = float(t.get("pos_mult") or 1.0)
                 per_trade = day_nav * self.position_ratio * mult
-                if cash >= per_trade and len(holdings) < self.max_positions:
-                    cash -= per_trade
+                invest, ret = self._trade_notional(per_trade, t)
+                if invest is None:
+                    skipped += 1          # 资金不足一手 → 买不到
+                    continue
+                if cash >= invest and len(holdings) < self.max_positions:
+                    cash -= invest
                     holdings.append(("%s|%s" % (t["date"], t["code"]),
-                                     per_trade, t["return_pct"]))
+                                     invest, ret))
                 else:
                     skipped += 1
             # 3) 当日净值: 现金 + 持仓按成本计(持有期内保守按成本)
             nav = cash + sum(p for _u, p, _r in holdings)
             curve.append((day, round(nav, 2)))
         return curve, skipped
+
+    def _trade_notional(self, amount, trade):
+        """本笔实际成交金额 + 计入净值模拟的收益率(A股成交约束)。
+
+        借鉴: Vibe-Trading `agent/backtest/engines/china_a.py` (MIT)
+          - `round_size`: 100 股整手向下取整(不足一手买不到, 退市/零股只能卖)
+          - `calc_commission`: 佣金 `max(名义额×费率, ¥5)`
+
+        返回 (invest, return_pct); 买不到(不足一手) → (None, None)。
+        为什么在资金层: 两个约束都取决于**本笔名义额**, 而名义额只有资金模拟
+        知道(`_simulate_trade` 是单股口径, 与手数无关)。佣金下限的差额在这里
+        摊进收益率(比例佣金 `_simulate_trade` 已按 buy_price 计过)。
+        缺买入价(手工构造的 trades, 如既有测试) → 不取整、不加下限(旧口径),
+        避免"没有价格还硬编一个手数"。
+        """
+        ret = float(trade.get("return_pct") or 0.0)
+        price = trade.get("entry")
+        if not price or price <= 0:
+            return amount, ret
+        shares = int(amount / price / 100) * 100      # 100 股整手
+        if shares < 100:
+            return None, None
+        invest = shares * price
+        floor = self.min_commission - invest * self.fee_rate   # 下限与比例佣金之差
+        if floor > 0:
+            ret -= floor / invest * 100
+        return invest, ret
 
     @staticmethod
     def _equity_stats(curve, initial_capital):
@@ -765,7 +872,7 @@ class Backtester:
     # ---------------- 统计 ----------------
     @staticmethod
     def _report(trades, dates, gate_notes, equity_stats, skipped_cash=0,
-                filter_stats=None, data_notes=None):
+                filter_stats=None, data_notes=None, validation=None):
         """汇总回测报告。
 
         equity_stats: _equity_stats 的结果(基于资金模拟净值曲线), 含
@@ -773,12 +880,16 @@ class Backtester:
         filter_stats: 过滤统计(门控拦了几天/候选被 min_model/板块过滤多少只)——
         零交易时用于归因, 避免"静默零交易"。
         data_notes: 数据覆盖说明(day_feed 携带, 如 1m 特征缓存覆盖/降级)——
-        让"缺数据"可追溯而不是静默 fail-open。"""
+        让"缺数据"可追溯而不是静默 fail-open。
+        validation: 统计验证结果(规格 §6, 蒙特卡洛/bootstrap/滚动前推)。
+        **两个分支共用同一份 base**: 有交易分支曾经漏掉 data_notes 键(既有
+        bug: 有交易的报告一律丢失数据可得性说明), 统一由 base 承载。"""
         n = len(trades)
         base = {"trading_days": len(dates), "trades": n,
                 "gate_notes": gate_notes or [], "skipped_cash": skipped_cash,
                 "filter_stats": filter_stats or {},
-                "data_notes": list(data_notes or [])}
+                "data_notes": list(data_notes or []),
+                "validation": validation or {}}
         if n == 0:
             base.update({"win_rate": None, "avg_return_pct": None,
                          "profit_loss_ratio": None, "max_drawdown_pct": None,
@@ -804,10 +915,7 @@ class Backtester:
         # 平均交易成本(占买入价比例, %)
         costs = [t.get("cost_pct") for t in trades if t.get("cost_pct") is not None]
         avg_cost = (sum(costs) / len(costs)) if costs else None
-        return {
-            "trading_days": len(dates), "trades": n,
-            "gate_notes": gate_notes or [], "skipped_cash": skipped_cash,
-            "filter_stats": filter_stats or {},
+        return dict(base, **{
             "win_rate": round(win_rate, 4),
             "avg_return_pct": round(avg_ret, 2),
             "profit_loss_ratio": round(pl_ratio, 2) if pl_ratio else None,
@@ -816,7 +924,7 @@ class Backtester:
             "avg_cost_pct": round(avg_cost, 3) if avg_cost is not None else None,
             "sharpe_ratio": sharpe,
             "trade_log": trade_log,
-        }
+        })
 
     # ---------------- 防过拟合: 样本外验证 ----------------
     def run_oos(self, start_date, end_date, split_ratio=0.5,

@@ -547,6 +547,7 @@ def _apply_intraday(payload, iso, stats):
       tick          = {timetag: 首封时刻毫秒(与实盘同解析路径), lastPrice=收盘,
                        lastClose=昨收, amount=板上成交额}
       bt_seal_ratio = on_board_amt / float_mv(float_mv 缺 → 不给, F3 走实盘口径)
+      one_word      = 一字板(规格 §6 成交约束: 买入侧判定"买不到")
     stats: {"asked": n, "got": n} 累计覆盖计数(供 data_notes 汇总)。
     """
     stock = payload.get("stock") or {}
@@ -557,6 +558,9 @@ def _apply_intraday(payload, iso, stats):
             continue            # 缓存缺失 → 静默降级(该股该日 F2/F3 得 0)
         stats["got"] += 1
         item["sealed"] = bool(feat.get("sealed_close"))
+        # 一字板: 缓存没采到该日的日期**不设键** —— 未知 ≠ False(不造假),
+        # Backtester.run 按"未知"处理(不拦买入, 但计入 filter_stats)。
+        item["one_word"] = bool(feat.get("one_word"))
         on_board_amt = feat.get("on_board_amt")
         float_mv = item.get("float_mv")
         if float_mv:

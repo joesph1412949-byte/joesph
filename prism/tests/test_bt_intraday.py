@@ -426,6 +426,21 @@ def test_build_day_feed_without_intraday_unchanged_and_no_notes(monkeypatch, tmp
     assert not getattr(feed, "data_notes", [])
 
 
+def test_build_day_feed_intraday_carries_one_word(monkeypatch, tmp_path):
+    """⑥ one_word 接线(规格 §6 成交约束): 缓存有该日 → 带布尔;
+    缓存缺该日 → **不设键**(未知 ≠ False, Backtester 按未知处理)。"""
+    _intra_io(monkeypatch, tmp_path)
+    st = cli.build_day_feed(date(2026, 7, 6), date(2026, 7, 7),
+                            use_intraday=True)(DAY)["stock"]["600000.SH"]
+    assert st["one_word"] is False        # _INTRA_FEAT["one_word"] = False
+    # 缺缓存: one_word 键不存在(不是 False) —— 回测侧据此判"未知"。
+    # 换独立目录(bt_intraday 按月分片带 memo, 键含 FEATURE_DIR → 不复用旧缓存)
+    _intra_io(monkeypatch, tmp_path / "nocache", with_cache=False)
+    st2 = cli.build_day_feed(date(2026, 7, 6), date(2026, 7, 7),
+                             use_intraday=True)(DAY)["stock"]["600000.SH"]
+    assert "one_word" not in st2
+
+
 # ---------------- ⑦ 报告 data_notes ----------------
 
 def test_report_includes_data_notes_from_feed():
