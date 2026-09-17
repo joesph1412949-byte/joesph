@@ -80,6 +80,9 @@ run(..., day_feed=None)
 
 新增 `python -m prism.fund_snapshot`：收盘后对当日涨停池（或指定代码表）调用 `FundamentalFeed.compute_for_stock`（不传 asof = 当日快照）并落 `runtime/cache/fundamental_cache.json`（既有缓存格式，按 `code:YYYYMMDD` 键）→ 从今天起积累真实历史。守护 15:05 选股后挂钩子（复用既有 `zt_refresh_fn` 模式）；也可手动跑。
 
+> **09-17 用户拍板：回测侧基本面默认只读缓存不联网**（东财单股 40s+，全窗口≈100h 不可行）；`--fetch-fund` 显式开启；历史用 `fund_snapshot` 逐日回填。
+> 实现：`FundamentalFeed(offline=True)` 跳过全部网络因子（Y5/Y2/F7/Y7/S5/Y6）、Y1/Y8 纯计算照算、**且绝不写缓存**（离线空/半截结果落盘会被 `compute_for_stock` 的缓存短路钉进历史，联网后与每日快照再也补不上）；`backtest.cli._fund_feed(fetch=False)` 默认 offline，`--fetch-fund` 才联网；`prism_web` 端点一律 offline（HTTP 请求绝不能因取数永不返回）；**唯一联网采集入口是 `prism.fund_snapshot`**（必须联网）。
+
 ## 8. 报告与网页
 
 回测报告新增：

@@ -735,6 +735,11 @@ def api_backtest():
                 # fund_feed(Task 3): 与 CLI 同口径注入基本面快照(Y1/Y8/F7/Y6/Y7;
                 # 网络/构造失败 → None = 不注入, 报告 data_notes 标覆盖)。
                 # 网页与 CLI 共用同一装配, 保持数字一致(2026-09-04 修复的教训)。
+                # **网页一律 offline(不传 fetch): 这是刻意的** —— 东财单股取数
+                # 实测 40s+, 而标量 timeout 只管 connect + 每次 socket read,
+                # 不限总时长, 联网取数会让 HTTP 请求"永不返回"(2026-09-17 实测
+                # 卡死 27 分钟被强杀)。网页只读已采集缓存, 补数据走 CLI:
+                # python -m prism.fund_snapshot --date YYYYMMDD
                 day_feed = build_day_feed(
                     s, e, use_intraday=True,
                     fund_feed=_fund_feed() if _fund_feed else None)

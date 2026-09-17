@@ -599,14 +599,26 @@ def _apply_fund(payload, day, fund_feed, stats):
         if fund:
             stats["got"] += 1
             item["fund"] = fund
+    if stats["got"] > stats.get("days_got", 0):
+        stats["days"] = stats.get("days", 0) + 1   # 本日至少采到一只 → 计 1 天
+        stats["days_got"] = stats["got"]
     return payload
 
 
 def _refresh_fund_note(notes, stats):
-    """基本面覆盖说明(单条, 随回放滚动自我覆盖) → run() 收进报告 data_notes。"""
-    note = ("基本面: 个股日覆盖 %d/%d (网络失败/缺 float_mv 静默降级 → Y1/Y8/"
-            "F7/Y6/Y7 fail-open 0; 快照类 Y5/Y2 回测剔除防未来)"
-            % (stats["got"], stats["asked"]))
+    """基本面覆盖说明(单条, 随回放滚动自我覆盖) → run() 收进报告 data_notes。
+
+    stats: {"asked","got","days"} + "fetch"(是否显式联网取数, 见 --fetch-fund)。
+    回测默认**只读缓存不联网**(2026-09-17 用户拍板): 东财单股取数实测 40s+
+    (Y6 公告端点 35.5s), 全窗口 254 日 ≈100 小时不可行 → 未缓存的日子直接
+    fail-open 0, 历史用 fund_snapshot 逐日回填。
+    """
+    mode = ("本次已联网取数(慢)" if stats.get("fetch")
+            else "回测默认只读基本面缓存、不联网")
+    note = ("基本面: 个股日覆盖 %d/%d (覆盖 %d 天; %s; 网络失败/缺 float_mv "
+            "静默降级 → Y1/Y8/F7/Y6/Y7 fail-open 0; 快照类 Y5/Y2 回测剔除防未来; "
+            "补历史: python -m prism.fund_snapshot --date YYYYMMDD)"
+            % (stats["got"], stats["asked"], stats.get("days", 0), mode))
     for i, x in enumerate(notes):
         if x.startswith("基本面: "):
             notes[i] = note
@@ -644,9 +656,11 @@ def build_day_feed(start, end, *, use_intraday=False, progress=None,
     fund_feed(Task 3, 规格 §7): FundamentalFeed 实例(测试可注入假实现)。
         传入时每日把基本面因子快照合进 stock[code]["fund"](Y1/Y8 纯计算 +
         F7/Y6/Y7 asof 窗口; Y5/Y2 快照类剔除防未来; 网络失败 fail-open 0,
-        覆盖情况进报告 data_notes)。None(缺省) → 不注入, 行为与旧版一致
-        (零网络零注入; 仅池条目 float_mv 由"键缺省"改为显式 None —— 消费方
-        .get() 语义不变)。
+        覆盖情况进报告 data_notes)。**回测默认传 offline=True 的 feed: 只读
+        缓存不联网**(2026-09-17 拍板, 见 `_fund_feed`); offline feed 未命中的
+        日子不给 fund → 因子得 0, 且绝不写缓存。None(缺省) → 不注入, 行为与
+        旧版一致(零网络零注入; 仅池条目 float_mv 由"键缺省"改为显式 None ——
+        消费方 .get() 语义不变)。
     progress(done, total): 已构造的区间交易日数 / 区间交易日总数(可选)。
     QMT 离线且无 zt 索引(无交易日历) → 返回恒 None 的 callable(等于不注入,
     静态参数照常生效), 并打印一行原因(不静默)。
@@ -671,7 +685,8 @@ def build_day_feed(start, end, *, use_intraday=False, progress=None,
     cache = {"pools": {}, "klines": {}, "floats": {}, "ctx": {},
              "tried_k": set(), "tried_f": set(), "done": 0,
              "intra": {"asked": 0, "got": 0},
-             "fund": {"asked": 0, "got": 0}}
+             "fund": {"asked": 0, "got": 0, "days": 0, "days_got": 0,
+                      "fetch": not getattr(fund_feed, "offline", False)}}
     # use_intraday 的覆盖说明(单条) → run() 收进报告 data_notes(规格 §5)
     data_notes = []
 
@@ -809,15 +824,22 @@ def load_market_data():
     return mkt, sector_map, None
 
 
-def _fund_feed():
+def _fund_feed(fetch=False):
     """真实基本面 feed(Task 3, 规格 §7): 与实盘 prism.data 同一实现与同一份缓存。
 
-    供 CLI main() / 网页端点注入 build_day_feed。导入/构造失败 → None
-    (不注入, Y1/Y8/F7/Y6/Y7 恒 0, 不阻塞回测, 打一行原因不静默)。
+    **默认 offline=True: 回测只读缓存、绝不联网**(2026-09-17 用户拍板)。
+    东财单股取数实测 40s+(`np-anotice-stock` 公告端点 35.5s, 标量 timeout 只管
+    connect+每次 socket read, 不覆盖 DNS 解析也不限总时长 → 服务端慢速分片返回
+    可远超 5s), 全窗口 254 日 ≈100 小时不可行 → 回测只消费已采集缓存, 未缓存的
+    日子 fail-open 0; 历史用 `python -m prism.fund_snapshot --date YYYYMMDD` 逐日
+    回填。`fetch=True`(--fetch-fund, 显式选择)才联网取数。
+
+    导入/构造失败 → None(不注入, Y1/Y8/F7/Y6/Y7 恒 0, 不阻塞回测, 打一行原因
+    不静默)。
     """
     try:
         from datasource.fundamental import FundamentalFeed
-        return FundamentalFeed()
+        return FundamentalFeed(offline=not fetch)
     except Exception as exc:
         print("警告: 基本面 feed 不可用(%r) → Y1/Y8/F7/Y6/Y7 因子按 0 处理"
               % exc, file=sys.stderr)
@@ -848,6 +870,12 @@ def main():
                     help="显式采集 1 分钟特征(逐日涨停池 → QMT 批量下载 → "
                          "特征落盘 runtime/cache/bt_intraday)。**只有本命令"
                          "会触发下载**; 普通回测/网页请求只读已落盘缓存")
+    ap.add_argument("--fetch-fund", dest="fetch_fund", action="store_true",
+                    help="基本面**联网取数**(默认关: 只读 runtime/cache/"
+                         "fundamental_cache.json, 未缓存的日子 Y1/Y8/F7/Y6/Y7 "
+                         "按 0)。东财单股实测 40s+(公告端点 35.5s), 长窗口会"
+                         "慢到不可用; 历史请用 python -m prism.fund_snapshot "
+                         "--date YYYYMMDD 逐日回填后再跑回测")
     args = ap.parse_args()
 
     start = _parse_date(args.start)
@@ -901,14 +929,15 @@ def main():
                 file=sys.stderr)
         # 按日上下文(N3/N4/N5/F1/F6 需要逐日快照; 静态参数只有一份)
         # use_intraday=True: 1m 特征只读已落盘缓存(F2/F3), 缺失静默降级
-        # fund_feed(Task 3): 基本面快照注入(Y1/Y8/F7/Y6/Y7 复活; 失败 fail-open)
+        # fund_feed(Task 3): 基本面快照注入(Y1/Y8/F7/Y6/Y7); 默认只读缓存不联网,
+        # --fetch-fund 才联网(2026-09-17 拍板, 见 _fund_feed docstring)
         def _feed_progress(done, total):
             if done % 50 == 0:
                 print("  装配按日上下文 %d/%d" % (done, total), file=sys.stderr)
 
         day_feed = build_day_feed(start, end, use_intraday=True,
                                   progress=_feed_progress,
-                                  fund_feed=_fund_feed())
+                                  fund_feed=_fund_feed(args.fetch_fund))
 
     if args.oos:
         res = bt.run_oos(start, end, sell_rules=sell or None, progress=progress,

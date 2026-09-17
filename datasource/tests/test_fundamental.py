@@ -3,6 +3,7 @@
 Y5(slist)/F7(ztpool)/Y7、Y2(datacenter)/Y6(ann) 响应形状各异, FakeHTTP 按 URL/参数子串分发。
 """
 import sys
+import json
 from datetime import date, timedelta
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -442,3 +443,59 @@ def test_compute_for_stock_today_asof_keeps_snapshot_factors():
     f = FundamentalFeed(http_get=http, cache_path=None)
     out = f.compute_for_stock("000001.SZ", asof=TODAY)
     assert out["Y5"]["score"] == 1 and out["Y2"]["score"] == 1
+
+
+# ---------- offline: 回测侧默认只读缓存, 绝不联网(2026-09-17 用户拍板) ----------
+def test_offline_makes_zero_network_calls(tmp_path):
+    """offline=True → 全部网络因子(Y5/Y2/F7/Y7/S5/Y6)跳过, 一次请求都不发。
+
+    实测背景: 东财单股取数 40s+(`np-anotice-stock` 35.5s), 全窗口 254 日
+    ≈100 小时 → 回测侧只读缓存, 联网是显式选择。
+    """
+    http = FakeHTTP(_base_routes(slist_diff=[_concept_board("储能")] * 3))
+    f = FundamentalFeed(http_get=http, cache_path=tmp_path / "c.json",
+                        offline=True)
+    out = f.compute_for_stock("000001.SZ", float_mv=50e8)
+    assert http.calls == [], "offline 绝不许发任何网络请求"
+    assert sorted(out) == ["Y1", "Y8"], "只有纯计算因子(Y1/Y8)可离线算"
+    assert out["Y1"]["score"] == 1 and out["Y8"]["score"] == 1
+
+
+def test_offline_without_float_mv_yields_empty(tmp_path):
+    """offline 且无 float_mv → 空 dict(Y1/Y8 都算不出), 依然零请求。"""
+    http = FakeHTTP(_base_routes())
+    f = FundamentalFeed(http_get=http, cache_path=tmp_path / "c.json",
+                        offline=True)
+    assert f.compute_for_stock("000001.SZ") == {}
+    assert http.calls == []
+
+
+def test_offline_returns_cached_value_readonly(tmp_path):
+    """offline 命中既有缓存 → 照常返回缓存值(含 Y5/Y2 等联网因子), 只读不写。"""
+    p = tmp_path / "c.json"
+    key = "%s:000001.SZ" % TODAY.strftime("%Y%m%d")
+    cached = {"Y5": {"score": 1, "note": "缓存里的概念"},
+              "Y2": {"score": 1, "note": "缓存里的股东户数"}}
+    p.write_text(json.dumps({key: cached}, ensure_ascii=False), encoding="utf-8")
+    before = p.read_text(encoding="utf-8")
+    http = FakeHTTP(_base_routes())
+    f = FundamentalFeed(http_get=http, cache_path=p, offline=True)
+    out = f.compute_for_stock("000001.SZ")
+    assert out == cached, "命中缓存必须原样返回(含联网因子)"
+    assert http.calls == []
+    assert p.read_text(encoding="utf-8") == before, "offline 只读不写"
+
+
+def test_offline_never_writes_cache_on_miss(tmp_path):
+    """offline 未命中 → **绝不写缓存**: 空/半截结果一旦落盘会被钉进历史。
+
+    `compute_for_stock` 开头 `if key in self._cache: return` 会短路 —— 离线时
+    写进去的"只有 Y1/Y8"条目, 之后联网运行与每日快照再也补不上该日真实值。
+    """
+    p = tmp_path / "c.json"
+    http = FakeHTTP(_base_routes(slist_diff=[_concept_board("储能")] * 3))
+    f = FundamentalFeed(http_get=http, cache_path=p, offline=True)
+    f.compute_for_stock("000001.SZ", float_mv=50e8)
+    assert not p.exists(), "offline 未命中不许落盘"
+    assert f._cache == {}, "内存缓存也不许记(否则同进程后续会短路)"
+

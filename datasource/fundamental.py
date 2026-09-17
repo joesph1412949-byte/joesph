@@ -69,17 +69,27 @@ class FundamentalFeed:
     asof: 数据基准日(date, 默认 None=今天)。防未来函数的关键:
       龙虎榜(Y7)/公告(Y6)/涨停池(F7)都按 asof 切窗口, 缓存键也按 asof 分日。
       实盘(计算今天)不传即用今天, 行为不变; 回测若接入本 feed, 必须传
-      asof=回测选股日, 否则会读到回测日之后的数据(未来函数, 回测虚高)。"""
+      asof=回测选股日, 否则会读到回测日之后的数据(未来函数, 回测虚高)。
+    offline(2026-09-17 用户拍板): True = **回测侧只读缓存, 绝不联网**。
+      跳过全部网络因子(Y5/Y2/F7/Y7/S5/Y6), Y1/Y8 纯计算照算(用传入 float_mv);
+      命中既有缓存照常返回缓存值(含联网因子)。动机: 东财单股取数实测 40s+
+      (其中 Y6 公告端点 35.5s), 全窗口 254 日 ≈100 小时不可行 → 历史靠
+      `python -m prism.fund_snapshot --date YYYYMMDD` 逐日回填, 回测只消费。
+      **offline 绝不写缓存**(含未命中与已命中两种情形): 否则"离线缺失 → 只有
+      Y1/Y8 的空/半截结果"会被钉进历史 —— `compute_for_stock` 开头
+      `if key in self._cache: return` 会短路, 之后联网运行与每日快照再也补不上
+      该日的真实值(缓存是 append-only 的事实记录, 不该被降级结果污染)。"""
 
     HEADERS = {"User-Agent": "Mozilla/5.0",
                "Referer": "http://quote.eastmoney.com/"}
 
     def __init__(self, http_get=None, cache_path=_DEFAULT_CACHE_PATH,
-                 timeout=5.0, asof=None):
+                 timeout=5.0, asof=None, offline=False):
         self.http_get = http_get or _default_http_get
         self.cache_path = cache_path
         self.timeout = timeout
         self.asof = asof
+        self.offline = offline
         self._cache = self._load_cache() if cache_path else {}
 
     def _ref(self, asof=None):
@@ -355,10 +365,23 @@ class FundamentalFeed:
         调用方决定是否启用(见 Backtester fund_feed 文档)。基准日 < 今天时
         这两类**硬跳过**(不请求不落缓存) —— 硬算只能拿"今天"的值, 对该日是
         未来数据, 且会把今天的值错记成那天的历史(污染 Y2/Y5 每日快照积累,
-        规格 §7); 窗口类(Y6/Y7/F7)按 asof 正常计算。"""
+        规格 §7); 窗口类(Y6/Y7/F7)按 asof 正常计算。
+        offline=True(回测侧, 2026-09-17 拍板): 只读缓存 + 只算 Y1/Y8,
+        **零网络、零落盘**(见类 docstring)。"""
         key = self._cache_key(code, asof)
         if key in self._cache:
             return dict(self._cache[key])
+        if self.offline:
+            # 只算纯计算因子, 不请求、不写缓存(离线结果不许钉进历史)
+            out = {}
+            for name, fn in (("Y1", self._small_cap), ("Y8", self._mid_cap)):
+                try:
+                    res = fn(float_mv)
+                    if res is not None:
+                        out[name] = res
+                except Exception as e:
+                    logger.warning("离线因子 %s(%s) 计算失败: %r", name, code, e)
+            return out
         out = {}
         try:
             y1 = self._small_cap(float_mv)

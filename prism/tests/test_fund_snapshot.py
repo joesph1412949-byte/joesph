@@ -403,6 +403,94 @@ def test_day_payload_float_mv_none_when_missing():
     assert "float_vol" not in st2, "缺股本不造假(维持既有口径)"
 
 
+# ---------------- ⑩ 回测侧默认离线: 只读基本面缓存, 绝不联网(2026-09-17 拍板) -------
+
+def test_fund_feed_defaults_offline():
+    """`_fund_feed()` 默认 offline=True(回测不联网); 显式 fetch=True 才联网。"""
+    from backtest.cli import _fund_feed
+    assert _fund_feed().offline is True, "回测默认必须只读缓存"
+    assert _fund_feed(fetch=True).offline is False, "显式开启才联网"
+
+
+def _seed_cache(tmp_path, day, codes):
+    """预置既有缓存(键 YYYYMMDD:code, 同既有格式) → 模拟"该日已采过"。"""
+    p = tmp_path / "fund_cache.json"
+    d8 = day.strftime("%Y%m%d") if hasattr(day, "strftime") else str(day)
+    data = {("%s:%s" % (d8, c)):
+            {"Y5": {"score": 1, "note": "cached"},
+             "Y7": {"score": 0, "note": "cached"}}
+            for c in codes}
+    p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    return p
+
+
+def test_build_day_feed_offline_reads_cache_only(monkeypatch, tmp_path):
+    """offline feed 经 build_day_feed 注入: 已缓存日有 fund, 未缓存日**无 fund 键**。
+
+    这是回测侧"默认只读缓存"的行为证据: 未缓存 → fail-open(不给 fund),
+    既不联网也不落盘(不把空结果钉进历史)。
+    """
+    from datasource.fundamental import FundamentalFeed
+    cli = _stub_day_io(monkeypatch, {})
+    cache = _seed_cache(tmp_path, _CAL[2], ["000001.SZ"])   # 只有第 3 天已采
+    feed = cli.build_day_feed(
+        _CAL[0], _CAL[2],
+        fund_feed=FundamentalFeed(cache_path=cache, offline=True))
+    # 未缓存日(第 2 天有 2 根K线, 进 stock): 无 fund 键(fail-open)
+    raw = cache.read_text(encoding="utf-8")
+    st1 = feed(_CAL[1])["stock"]["600000.SH"]
+    assert "fund" not in st1, "未缓存日不给 fund(离线 fail-open)"
+    # 已缓存日: fund 来自缓存(注意 Y5/Y2 仍按回测口径剔除)
+    st = feed(_CAL[2])["stock"]["000001.SZ"]
+    assert st["fund"] == {"Y7": {"score": 0, "note": "cached"}}, \
+        "已缓存日必须注入 fund, 且 Y5/Y2 照旧剔除"
+    assert cache.read_text(encoding="utf-8") == raw, "offline 不许写缓存"
+
+
+def test_build_day_feed_offline_never_writes_new_cache(monkeypatch, tmp_path):
+    """offline 全程跑完 → 缓存文件里不出现任何新键(未命中就是不落盘)。"""
+    from datasource.fundamental import FundamentalFeed
+    cli = _stub_day_io(monkeypatch, {})
+    cache = tmp_path / "empty_cache.json"
+    feed = cli.build_day_feed(
+        _CAL[0], _CAL[2],
+        fund_feed=FundamentalFeed(cache_path=cache, offline=True))
+    for d in _CAL:
+        feed(d)
+    assert not cache.exists(), "offline 回测绝不许产生缓存写入"
+
+
+def test_fund_note_states_offline_and_backfill_cmd(monkeypatch, tmp_path):
+    """data_notes 新增说明: 覆盖天数 + "默认只读缓存不联网" + 逐日回填命令。"""
+    from datasource.fundamental import FundamentalFeed
+    cli = _stub_day_io(monkeypatch, {})
+    cache = _seed_cache(tmp_path, _CAL[1], ["600000.SH"])
+    feed = cli.build_day_feed(
+        _CAL[0], _CAL[2],
+        fund_feed=FundamentalFeed(cache_path=cache, offline=True))
+    feed(_CAL[1])
+    notes = [n for n in feed.data_notes if n.startswith("基本面")]
+    assert len(notes) == 1, "基本面说明必须只有一条(自我覆盖, 不挤占)"
+    n = notes[0]
+    assert "只读" in n and "不联网" in n, "必须声明默认离线"
+    assert "1/" in n, "必须给出覆盖天数"
+    assert "python -m prism.fund_snapshot --date YYYYMMDD" in n, "必须给出回填命令"
+    assert "已联网取数" not in n, "默认离线不许标成已联网"
+
+
+def test_fund_note_marks_fetch_mode(monkeypatch, tmp_path):
+    """--fetch-fund(联网) → 同一条说明要标注「本次已联网取数(慢)」。"""
+    from datasource.fundamental import FundamentalFeed
+    cli = _stub_day_io(monkeypatch, {})
+    cache = _seed_cache(tmp_path, _CAL[1], ["600000.SH"])
+    feed = cli.build_day_feed(
+        _CAL[0], _CAL[2],
+        fund_feed=FundamentalFeed(cache_path=cache, offline=False))
+    feed(_CAL[1])
+    n = [x for x in feed.data_notes if x.startswith("基本面")][0]
+    assert "本次已联网取数" in n and "慢" in n
+
+
 # ---------------- ⑨ 守护 15:05 选股后挂钩子 ----------------
 
 _CAND = [{"code": "600000.SH", "up_stop_price": 10.0,
