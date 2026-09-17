@@ -726,10 +726,12 @@ def api_backtest():
         # 不接则 N3/N4/N5/F1/F6 恒 0 —— 网页回测成了残废版, 与已复活的 CLI 口径
         # 不一致。惰性构造(首次请求某日才算那天), 装配失败不阻塞回测: 退化为无
         # day_feed(= 旧行为), 报告 gate_notes 带原因(不静默)。
+        # use_intraday=True(Task 2): 1m 特征**只读已落盘缓存**(F2/F3 代理),
+        # 缓存缺失静默降级进报告 data_notes —— 网页请求路径绝不触发 1m 下载。
         day_feed, feed_note = None, None
         if build_day_feed is not None:
             try:
-                day_feed = build_day_feed(s, e, use_intraday=False)
+                day_feed = build_day_feed(s, e, use_intraday=True)
             except Exception as exc:
                 logger.warning("按日上下文装配失败: %r", exc, exc_info=True)
                 feed_note = ("按日上下文装配失败 → N3/N4/N5/F1/F6 按静态参数"

@@ -21,6 +21,7 @@ except Exception:
     requests = None
 
 from shared.common import limit_ratio_for_code, with_market_suffix
+from prism import bt_intraday
 from prism.backtest import Backtester, _parse_kline_date
 from prism.engine import load_strategy
 from prism.strategies import STRATEGIES_DIR
@@ -530,6 +531,53 @@ def _day_payload(d, pools, cal, klines, floats, indices):
             "stock": stock}
 
 
+def _apply_intraday(payload, iso, stats):
+    """把 1m 特征缓存里的封板信息合进 payload["stock"](规格 §5, Task 2)。
+
+    **只读已落盘缓存, 绝不下载** —— 下载只发生在显式采集命令
+    (python -m backtest.cli --build-intraday); 缓存缺失的日期静默降级
+    (stock 不带 sealed/tick/bt_seal_ratio → F2/F3 fail-open 0)。
+    合成的字段(与实盘同型):
+      sealed        = 特征 sealed_close(收盘是否仍封)
+      tick          = {timetag: 首封时刻毫秒(与实盘同解析路径), lastPrice=收盘,
+                       lastClose=昨收, amount=板上成交额}
+      bt_seal_ratio = on_board_amt / float_mv(float_mv 缺 → 不给, F3 走实盘口径)
+    stats: {"asked": n, "got": n} 累计覆盖计数(供 data_notes 汇总)。
+    """
+    stock = payload.get("stock") or {}
+    for code, item in stock.items():
+        feat = bt_intraday.features_for(code, iso)
+        stats["asked"] += 1
+        if not feat:
+            continue            # 缓存缺失 → 静默降级(该股该日 F2/F3 得 0)
+        stats["got"] += 1
+        item["sealed"] = bool(feat.get("sealed_close"))
+        on_board_amt = feat.get("on_board_amt")
+        float_mv = item.get("float_mv")
+        if float_mv:
+            item["bt_seal_ratio"] = float(on_board_amt or 0.0) / float_mv
+        tick = {"lastPrice": item.get("last"),
+                "lastClose": item.get("last_close"),
+                "amount": float(on_board_amt or 0.0)}
+        timetag = bt_intraday.seal_timetag(iso, feat.get("first_seal_hm"))
+        if timetag is not None:
+            tick["timetag"] = timetag
+        item["tick"] = tick
+    return payload
+
+
+def _refresh_intra_note(notes, stats):
+    """覆盖说明(单条, 随回放滚动更新) → run() 收进报告 data_notes。"""
+    note = ("1m特征: 个股日覆盖 %d/%d (缓存缺失静默降级 → F2/F3 fail-open 0; "
+            "早于 2025-09-15 无 1m 数据。补采集: "
+            "python -m backtest.cli --build-intraday)"
+            % (stats["got"], stats["asked"]))
+    if notes:
+        notes[0] = note
+    else:
+        notes.append(note)
+
+
 def build_day_feed(start, end, *, use_intraday=False, progress=None):
     """装配回测的按日上下文 → day_feed(d) -> dict|None(规格 2026-09-16 §4)。
 
@@ -540,8 +588,10 @@ def build_day_feed(start, end, *, use_intraday=False, progress=None):
     每字段都只含 <= 当日的本地数据(QMT 日线 + zt 涨停池历史), 防未来函数由
     _day_payload 的逐日切片保证。区间外的日子返回 None → run() 退回静态参数。
 
-    use_intraday: 1 分钟特征层(封板时间/封单代理, Task 2 实现) —— 本版只保留
-    接口, 传 True 暂不改变输出。
+    use_intraday: 1 分钟特征层(规格 §5, Task 2): True 时每日把**已缓存**的
+        1m 特征合进 stock[code](sealed/tick/bt_seal_ratio, 复活 F2/F3 代理);
+        只读缓存绝不下载 —— 缺失日期静默降级, 覆盖情况进报告 data_notes
+        (补采集: python -m backtest.cli --build-intraday)。
     progress(done, total): 已构造的区间交易日数 / 区间交易日总数(可选)。
     QMT 离线且无 zt 索引(无交易日历) → 返回恒 None 的 callable(等于不注入,
     静态参数照常生效), 并打印一行原因(不静默)。
@@ -564,7 +614,10 @@ def build_day_feed(start, end, *, use_intraday=False, progress=None):
     replay_total = sum(1 for x in cal if x >= start_iso)
     # 惰性缓存的全部状态: 池/日线/股本都按需取, 取过就记(空池、无数据也不重取)
     cache = {"pools": {}, "klines": {}, "floats": {}, "ctx": {},
-             "tried_k": set(), "tried_f": set(), "done": 0}
+             "tried_k": set(), "tried_f": set(), "done": 0,
+             "intra": {"asked": 0, "got": 0}}
+    # use_intraday 的覆盖说明(单条) → run() 收进报告 data_notes(规格 §5)
+    data_notes = []
 
     def _pools_at(i):
         """cal[i] 当日的涨停池(按需取 + 缓存)。"""
@@ -612,6 +665,10 @@ def build_day_feed(start, end, *, use_intraday=False, progress=None):
                     _need_klines([s.get("code")
                                   for s in list(pool) + list(prev)]),
                     _need_floats([s.get("code") for s in pool]), indices)
+                if use_intraday:
+                    # 1m 特征只读缓存(绝不下载), 缺失静默降级(规格 §5)
+                    _apply_intraday(cache["ctx"][iso], iso, cache["intra"])
+                    _refresh_intra_note(data_notes, cache["intra"])
             except Exception as exc:
                 print("警告: 按日上下文装配失败 %s: %r → 该日退回静态参数"
                       % (iso, exc), file=sys.stderr)
@@ -625,9 +682,34 @@ def build_day_feed(start, end, *, use_intraday=False, progress=None):
     print("按日上下文: 惰性构造 %d 个交易日(首次请求某日才取该日池/日线, 之后命中"
           "缓存) / 指数 %d/2 / 1m特征%s" % (
               replay_total, n_idx,
-              "未实现(Task2, use_intraday 本次不生效)" if use_intraday
-              else "未启用"), file=sys.stderr)
+              "启用(只读已缓存特征, 缺失日期降级; 采集: python -m backtest.cli "
+              "--build-intraday)" if use_intraday else "未启用"), file=sys.stderr)
+    feed.data_notes = data_notes       # run() 收进报告 data_notes
     return feed
+
+
+def _pool_codes_by_day(start, end):
+    """[start, end] 逐日涨停池 → {ISO 日期: [codes]}(1m 特征采集的输入)。
+
+    交易日历与 build_day_feed 同源(zt 索引 ∪ 指数日线, 真实交易日);
+    只取区间内的日子(区间前只作上下文, 不用采特征)。
+    """
+    lo = (start - timedelta(days=_FEED_PAD_DAYS)).strftime("%Y%m%d")
+    hi = end.strftime("%Y%m%d")
+    indices = {c: _index_daily(c, lo, hi) for c in _INDEX_CODES}
+    cal = [x for x in _calendar_days(
+        [r[0] for rows in indices.values() for r in rows])
+        if start.strftime("%Y-%m-%d") <= x <= end.strftime("%Y-%m-%d")]
+    out = {}
+    for iso in cal:
+        try:
+            pool = zt_feed(iso.replace("-", "")) or []
+        except Exception:
+            pool = []
+        codes = [s.get("code") for s in pool if s.get("code")]
+        if codes:
+            out[iso] = codes
+    return out
 
 
 # ---------------------------------------------------------------- main
@@ -684,10 +766,31 @@ def main():
                          "(day_feed)。默认注入 —— 否则 N6-N8/F8/F9/SEC1-4/SEC6 "
                          "共 10 个因子静默失效, 且 N3/N4/N5/F1/F6 拿不到逐日"
                          "快照(回测结果不能用来评估它们)")
+    ap.add_argument("--build-intraday", dest="build_intraday",
+                    action="store_true",
+                    help="显式采集 1 分钟特征(逐日涨停池 → QMT 批量下载 → "
+                         "特征落盘 runtime/cache/bt_intraday)。**只有本命令"
+                         "会触发下载**; 普通回测/网页请求只读已落盘缓存")
     args = ap.parse_args()
 
     start = _parse_date(args.start)
     end = _parse_date(args.end)
+    if args.build_intraday:
+        codes_by_day = _pool_codes_by_day(start, end)
+        n_days = len(codes_by_day)
+        print("1m 特征采集: %d 个交易日 / %d 只(股,日)... "
+              % (n_days, sum(len(v) for v in codes_by_day.values())),
+              file=sys.stderr)
+
+        def _dl_progress(done, total):
+            if total and done % 100 == 0:
+                print("  1m 特征 %d/%d (股,日)" % (done, total),
+                      file=sys.stderr)
+
+        res = bt_intraday.download_features(codes_by_day,
+                                            progress=_dl_progress)
+        print(json.dumps({"days": n_days, **res}, ensure_ascii=False))
+        return 0
     sp = STRATEGIES_DIR / ("%s.json" % args.strategy)
     if not sp.exists():
         print("策略不存在: %s (可用: %s)" % (
@@ -720,11 +823,13 @@ def main():
                 len(mkt["sector"]), len(mkt["global"]), len(sector_map)),
                 file=sys.stderr)
         # 按日上下文(N3/N4/N5/F1/F6 需要逐日快照; 静态参数只有一份)
+        # use_intraday=True: 1m 特征只读已落盘缓存(F2/F3), 缺失静默降级
         def _feed_progress(done, total):
             if done % 50 == 0:
                 print("  装配按日上下文 %d/%d" % (done, total), file=sys.stderr)
 
-        day_feed = build_day_feed(start, end, progress=_feed_progress)
+        day_feed = build_day_feed(start, end, use_intraday=True,
+                                  progress=_feed_progress)
 
     if args.oos:
         res = bt.run_oos(start, end, sell_rules=sell or None, progress=progress,

@@ -588,9 +588,13 @@ class Backtester:
         # 净值模拟: 资金约束下的净值曲线 → 总收益/回撤/夏普(真实口径)
         curve, skipped = self._simulate_equity(trades)
         eq_stats = self._equity_stats(curve, self.initial_capital)
+        # data_notes: day_feed 自带的覆盖说明(如 1m 特征覆盖/缺失降级, 规格 §5);
+        # feed 是普通 callable 时无该属性 → [](报告结构统一)。
+        data_notes = list(getattr(day_feed, "data_notes", None) or [])
         return self._report(trades, dates, gate_notes=gate_notes,
                             equity_stats=eq_stats, skipped_cash=skipped,
-                            filter_stats=self._filter_stats)
+                            filter_stats=self._filter_stats,
+                            data_notes=data_notes)
 
     # ---------------- 交易模拟 ----------------
     def _simulate_trade(self, code, kline, entry_date, rules):
@@ -761,17 +765,20 @@ class Backtester:
     # ---------------- 统计 ----------------
     @staticmethod
     def _report(trades, dates, gate_notes, equity_stats, skipped_cash=0,
-                filter_stats=None):
+                filter_stats=None, data_notes=None):
         """汇总回测报告。
 
         equity_stats: _equity_stats 的结果(基于资金模拟净值曲线), 含
         total_return_pct/max_drawdown_pct/sharpe_ratio。
         filter_stats: 过滤统计(门控拦了几天/候选被 min_model/板块过滤多少只)——
-        零交易时用于归因, 避免"静默零交易"。"""
+        零交易时用于归因, 避免"静默零交易"。
+        data_notes: 数据覆盖说明(day_feed 携带, 如 1m 特征缓存覆盖/降级)——
+        让"缺数据"可追溯而不是静默 fail-open。"""
         n = len(trades)
         base = {"trading_days": len(dates), "trades": n,
                 "gate_notes": gate_notes or [], "skipped_cash": skipped_cash,
-                "filter_stats": filter_stats or {}}
+                "filter_stats": filter_stats or {},
+                "data_notes": list(data_notes or [])}
         if n == 0:
             base.update({"win_rate": None, "avg_return_pct": None,
                          "profit_loss_ratio": None, "max_drawdown_pct": None,

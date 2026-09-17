@@ -236,6 +236,7 @@ def test_backtest_injects_day_feed(client, monkeypatch):
 
     def fake_build(start, end, **kw):
         captured["feed_range"] = (start, end)
+        captured["feed_kw"] = kw
         return sentinel
 
     monkeypatch.setattr("prism.backtest.Backtester", FakeBT)
@@ -247,6 +248,8 @@ def test_backtest_injects_day_feed(client, monkeypatch):
     assert r.status_code == 200
     assert captured["feed_range"] == (date(2026, 1, 1), date(2026, 1, 5))
     assert captured["day_feed"] is sentinel, "day_feed 必须传给 run()"
+    assert captured["feed_kw"].get("use_intraday") is True, \
+        "1m 特征只读缓存(绝不下载), 网页与 CLI 同口径启用"
     assert r.get_json()["report"]["day_feed"] is True
 
 
