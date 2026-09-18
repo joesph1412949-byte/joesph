@@ -53,6 +53,45 @@ def now_hhmm(now=None):
     return (now or datetime.now()).strftime("%H:%M")
 
 
+def prev_close(tick, daily, fallback=None):
+    """做T中枢 ref 的"前收": 优先**最后一根已完成日K的收盘**。
+
+    tick 只在其交易日**新于**日K末根时才采信 —— 盘前 QMT 的 tick 快照还停在上一
+    交易日盘中那一份, 其 lastClose 指向更早一天, 直接采信会把 ref 钉错一个交易日
+    (账本当轮就缓存 ref → 全天档位全错)。日K拿不到 → 回落 tick(旧行为, 不抛)。
+
+    返回 (价格, 来源): 'daily' 日K末根 | 'tick_newer' tick 更新于日K |
+    'tick_fallback' 日K缺失回落 tick。
+    """
+    t, d = tick or {}, daily or {}
+    tclose = _num(t.get("last_close")) or _num(fallback)
+    dclose = _num(d.get("close"))
+    if dclose > 0:
+        tdate, ddate = t.get("date"), d.get("date")
+        if tclose > 0 and tdate and ddate and tdate > ddate:
+            return tclose, "tick_newer"
+        return dclose, "daily"
+    if tclose > 0:
+        return tclose, "tick_fallback"
+    return None, ""
+
+
+def _tick_date(t):
+    """tick 所属交易日(YYYYMMDD, 本地时区); 取不到 → None。
+
+    xtdata.get_full_tick 实测只给 'time'(毫秒时间戳), 没有 'timetag'。
+    """
+    ts = _num(t.get("time"))
+    if ts > 1e11:                       # 13 位毫秒 → 秒
+        ts /= 1000.0
+    if ts <= 1e8:
+        return None
+    try:
+        return datetime.fromtimestamp(ts).strftime("%Y%m%d")
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
 # ---------------------------------------------------------------- 后端
 
 class XtdataBackend:
@@ -85,10 +124,23 @@ class XtdataBackend:
                 "high": _num(t.get("high")),
                 "low": _num(t.get("low")),
                 "last_close": _num(t.get("lastClose")),
+                "date": _tick_date(t),          # 该 tick 所属交易日(定 ref 比新旧用)
                 "volume": _num(t.get("volume")),
                 "amount": _num(t.get("amount")),
             }
         return out
+
+    def daily_last(self, code):
+        """最后一根日K → {"date": "YYYYMMDD", "close": float}; 取不到 → None。
+
+        定 ref 用(count=1 只取末根, 不多拉历史)。
+        """
+        try:
+            data = self._mod().get_market_data_ex(
+                ["close"], [code], period="1d", count=1)
+        except Exception:
+            return None
+        return _df_last_bar((data or {}).get(code))
 
     def closes(self, code, count=80):
         xtdata = None
@@ -163,6 +215,14 @@ class SampleBackend:
             }
         return out
 
+    def daily_last(self, code):
+        """样本模式不提供日K末根 → None(上层回落 tick, 维持原行为)。
+
+        样本的 tick 已经把 CSV 末根当"当日"用, 再暴露末根会与它同一天 → 两个口径
+        打架, 样本/离线演示的 ref 会从"前收"漂成"末根收盘"。
+        """
+        return None
+
 
 def _num(v, default=0.0):
     try:
@@ -182,6 +242,22 @@ def _df_closes(df):
     except Exception:
         return []
     return [float(x) for x in col if x is not None and x == x]
+
+
+def _df_last_bar(df):
+    """日K末根 → {"date": "YYYYMMDD", "close": float}; 空/垃圾 → None(fail-open)。"""
+    try:
+        if df is None or len(df) == 0:
+            return None
+        close = float(df["close"].iloc[-1])
+        # period='1d' 的 index 实测是 'YYYYMMDD'; DatetimeIndex 也归一化到同一形状
+        date = str(df.index[-1]).replace("-", "").split(" ")[0][:8]
+    except Exception:
+        return None
+    # NaN / 0 价 / 日期不成形 → 这根不可用
+    if close != close or close <= 0 or not date.isdigit():
+        return None
+    return {"date": date, "close": close}
 
 
 # ---------------------------------------------------------------- 门面
@@ -218,17 +294,28 @@ class MarketFeed:
             return self.fallback.closes(code, count)
         return None
 
+    def daily_last(self, code):
+        """最后一根已完成日K的 {"date","close"}; backend 没这能力/取不到 → None。"""
+        f = getattr(self.backend, "daily_last", None)
+        if f is None:
+            return None
+        try:
+            return f(code)
+        except Exception:
+            return None
+
     def snapshot(self, code, count=80, sigma_window=60):
-        """单标的完整上下文: tick + 指标。行情缺失 → None。"""
+        """单标的完整上下文: tick + 指标 + 日K末根。行情缺失 → None。"""
         t = (self.ticks([code]) or {}).get(code)
-        closes = self.closes(code, count)
+        closes = self.closes(code, count)       # 先取日K: 本地不够时会补下载一次
         if not t and not closes:
             return None
+        daily = self.daily_last(code)           # 定 ref 的权威前收(拿不到 → None)
         ind = indicators(closes, sigma_window) if closes else indicators([])
         if t:
             # 用真实 tick 的现价/最高/最低覆盖样本推出来的值
             ind["last"] = t.get("last") or ind["last"]
-        return {"code": code, "tick": t or {}, "ind": ind,
+        return {"code": code, "tick": t or {}, "ind": ind, "daily": daily,
                 "source": self.last_source or "unknown"}
 
     def hhmm(self):

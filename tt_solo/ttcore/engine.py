@@ -159,12 +159,16 @@ class TTEngine:
         ref = self.ledger.get_ref(code)
         ref_src = "ledger"
         if not ref or ref <= 0:
-            ref = tick.get("open") if self.grid_cfg.get("ref_mode") == "open" \
-                else last_close
+            if self.grid_cfg.get("ref_mode") == "open":
+                ref, src = tick.get("open"), "open"
+            else:
+                # 前收口径: 优先最后一根已完成日K的收盘。盘前 tick 快照还停在上一
+                # 交易日, 直接采信其 lastClose 会把中枢钉错一个交易日。
+                ref, src = market.prev_close(tick, snap.get("daily"),
+                                             last_close)
             if ref and ref > 0:
                 self.ledger.set_ref(code, ref)
-                ref_src = "open" if self.grid_cfg.get("ref_mode") == "open" \
-                    else "prev_close"
+                ref_src = src
 
         ladder = grid.build_ladder(ref, band, sym.get("n_units")
                                    or self.grid_cfg.get("n_units", 5)) \
