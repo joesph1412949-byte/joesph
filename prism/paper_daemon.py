@@ -171,9 +171,24 @@ class PaperDaemon:
         I3 补强(2026-09-18): 空池还可能是"索引里确实没有当日池(尚未刷新)"
         —— 光告警救不回当天数据。空池时**无视节流强制刷新一次索引再重试一次**
         采集(重试仍空才告警, 只重试一次, 不空转)。
+
+        I1 修复(2026-09-18): 网络全挂时 `snapshot_once` 返回
+        {"saved": 0, "failed": 40}(**无 skipped 键**) —— 旧 `_empty` 只看
+        skipped → 既不走重试也不打 WARNING, 直接落 INFO"采集完成"; 而 pick 分支
+        每日只跑一次(screens_done 幂等键) → 当天不会再有第二次采集, Y2/Y5 按
+        设计无历史可回补 ⇒ 一次瞬时失败 = 那天快照永久缺失, 日志却写"完成"。
+        现在"saved==0 且 failed>0"也走同一条"强制刷新 + 重试一次"路径。
+        `saved>0 且 failed>0`(部分成功)**不算失败**, 照常 INFO(如实带计数)。
         """
-        def _empty(r):
-            return isinstance(r, dict) and r.get("skipped")
+        def _failed(r):
+            """空池(skipped)或全股取数失败(saved==0 且 failed>0) → True。
+
+            部分成功(saved>0, failed>0)不是失败: 至少采到了一部分。
+            """
+            if not isinstance(r, dict):
+                return False
+            return bool(r.get("skipped")) or (
+                not r.get("saved") and bool(r.get("failed")))
 
         def _worker():
             try:
@@ -185,19 +200,28 @@ class PaperDaemon:
                             "涨停池刷新 %d 秒未结束 → 照常采集(可能取到旧索引)",
                             ZT_REFRESH_WAIT)
                 r = self.fund_snapshot_fn()
-                if _empty(r):
-                    # 空池多半是索引里还没有当日池(节流把 15:05 那次刷新挡掉)
-                    # → 强制刷新后重试一次, 别把当天的 Y2/Y5 直接丢掉
-                    LOG.info("基本面快照空池(%s) → 无视节流强制刷新后重试一次",
-                             r["skipped"])
+                if _failed(r):
+                    # 空池多半是索引里还没有当日池(节流把 15:05 那次刷新挡掉);
+                    # 全失败多半是瞬时网络/接口故障 → 都强制刷新后重试一次,
+                    # 别把当天的 Y2/Y5 直接丢掉
+                    LOG.info("基本面快照未采到(%s) → 无视节流强制刷新后重试一次",
+                             r.get("skipped") or "全股取数失败 saved=%s failed=%s"
+                             % (r.get("saved"), r.get("failed")))
                     self._force_zt_refresh_and_wait()
                     r = self.fund_snapshot_fn()
-                if _empty(r):
-                    LOG.warning(
-                        "基本面快照未采集(%s): 涨停池索引里没有当日池 —— "
-                        "若今天非交易日或索引尚未刷新属正常; 否则当天 Y2/Y5 "
-                        "无历史可回补, 请手动补采: python -m prism.fund_snapshot",
-                        r["skipped"])
+                if _failed(r):
+                    if r.get("skipped"):
+                        LOG.warning(
+                            "基本面快照未采集(%s): 涨停池索引里没有当日池 —— "
+                            "若今天非交易日或索引尚未刷新属正常; 否则当天 Y2/Y5 "
+                            "无历史可回补, 请手动补采: python -m prism.fund_snapshot",
+                            r["skipped"])
+                    else:
+                        LOG.warning(
+                            "基本面快照未采集(重试后仍全部 %s 只取数失败): "
+                            "网络/接口异常 —— 当天 Y2/Y5 无历史可回补, "
+                            "请手动补采: python -m prism.fund_snapshot",
+                            r.get("failed"))
                 else:
                     LOG.info("基本面快照采集完成: %r", r)
             except Exception as e:

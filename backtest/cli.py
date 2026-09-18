@@ -672,8 +672,8 @@ def _refresh_intra_note(notes, stats):
     """
     note = ("1m特征: 个股日覆盖 %d/%d (缓存缺失静默降级 → F2/F3 fail-open 0; "
             "缺 one_word 时买入不拦(未知), 计入 filter_stats.one_word_unknown; "
-            "早于 2025-09-15 无 1m 数据。补采集: "
-            "python -m backtest.cli --build-intraday)"
+            "早于 2025-09-16 无 1m 数据(QMT 保留边界); 另有 20260615~18 共 4 天"
+            "为采集缺口, 可补采: python -m backtest.cli --build-intraday)"
             % (stats["got"], stats["asked"]))
     if notes:
         notes[0] = note
@@ -987,6 +987,13 @@ def main():
         day_feed = build_day_feed(start, end, use_intraday=True,
                                   progress=_feed_progress,
                                   fund_feed=_fund_feed(args.fetch_fund))
+    else:
+        # M4: 基本面注入挂在 day_feed 里(二者同源) → --no-market-data 会把它
+        # 连同 --fetch-fund 一起吞掉。行为不改(验收语义不变), 但必须明说一声,
+        # 否则用户只能从 "Y1/Y8/F7/Y6/Y7 全 0" 反推。
+        print("提示: --no-market-data 同时关闭基本面注入(fund_feed 与 day_feed "
+              "同源), --fetch-fund 也被一并吞掉; 如需基本面请去掉 "
+              "--no-market-data", file=sys.stderr)
 
     if args.oos:
         res = bt.run_oos(start, end, sell_rules=sell or None, progress=progress,

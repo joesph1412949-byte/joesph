@@ -303,3 +303,40 @@ def test_build_index_writes_index_file(zt_tmp_paths):
     assert not (zt_tmp_paths / ".zt_history_index.pkl.tmp").exists()
     r = zt.prev_day_pool(today=date(2026, 9, 7))
     assert r == {"date": "2026-09-04", "codes": ["600000.SH"]}
+
+
+# ---------------- A: 原子落盘 tmp 名唯一(同进程并发写者不互踩) ----------------
+
+def test_atomic_pickle_concurrent_writers_do_not_share_tmp(zt_tmp_paths):
+    """A: 同进程两个写者并发 `_atomic_pickle` 同一文件, 不许互踩(tmp 名必须唯一)。
+
+    旧实现 tmp 名固定 `path+'.tmp'`: 两个线程同时写同一个 tmp → 前者的
+    os.replace 与后者的 write_bytes 撞车 → PermissionError/FileNotFoundError
+    (实测 200 轮里 94 轮抛错), 或发布半截 pkl; 而 `_load_cache`/`_load_index`
+    把坏文件**静默当 {}** ⇒ 90 天 zt 缓存被无声清零(不是报错, 是消失)。
+
+    现实触发: 守护"强制刷新+重试"在首个刷新线程 join 超时后**照样起第二个刷新
+    线程**(paper_daemon._force_zt_refresh_and_wait), 冷缓存 90 天×全 A 股可达
+    >120s。修法: tmp 名带 pid+线程 id(与 shared/common.atomic_write 同一手法)。
+    """
+    import threading
+
+    p = zt_tmp_paths / ".zt_history_cache.pkl"
+    errs = []
+
+    def writer(obj):
+        try:
+            zt._atomic_pickle(p, obj)
+        except Exception as e:                 # PermissionError / FileNotFoundError
+            errs.append(repr(e))
+
+    for _ in range(50):                        # 单轮约 47% 复现 → 50 轮必炸
+        ts = [threading.Thread(target=writer, args=({"who": w},))
+              for w in ("a", "b")]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(5)
+        assert not errs, "并发写者互踩同一个 tmp: %s" % errs[:3]
+        assert pickle.loads(p.read_bytes()) in ({"who": "a"}, {"who": "b"}), \
+            "落盘必须是一个写者的完整结果(不许半截/串写)"

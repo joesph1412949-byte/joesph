@@ -17,6 +17,7 @@ import logging
 import os
 import pickle
 import sys
+import threading
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -108,11 +109,29 @@ def _df_to_records(df):
     return {"dates": dates, "close": closes, "pre": pre}
 
 
+# 同进程写者串行锁(A, 2026-09-18): 唯一 tmp 名只解决"互踩同一个 tmp"; 两个线程
+# 同时 os.replace 到**同一个目标**在 Windows 上仍会 PermissionError(实测: 只改
+# tmp 名 200 轮仍炸 26 轮, 加锁后 0 轮)。跨进程靠唯一 tmp 名, 进程内靠这把锁。
+# ponytail: 全局一把锁 —— 写盘是低频(采集/刷新)操作, 不构成瓶颈; 真变重再按路径分锁。
+_WRITE_LOCK = threading.Lock()
+
+
 def _atomic_pickle(path, obj):
-    """原子写 pickle: 先写 tmp 再 os.replace(中断不留半个文件)。"""
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_bytes(pickle.dumps(obj, protocol=4))
-    os.replace(str(tmp), str(path))
+    """原子写 pickle: 先写 tmp 再 os.replace(中断不留半个文件)。
+
+    tmp 名带 pid+线程 id(A, 2026-09-18; 与 shared/common.atomic_write 同一手法):
+    固定的 `path+'.tmp'` 在**同进程多写者**下会互踩 —— 两个线程同时写同一个 tmp,
+    前者的 os.replace 撞上后者的 write_bytes → PermissionError/FileNotFoundError
+    (实测 200 轮 94 轮抛错), 或发布半截 pkl; 而 `_load_cache`/`_load_index` 把
+    坏文件**静默当 {}** ⇒ 90 天 zt 缓存被无声清零。现实触发: 守护的"强制刷新+
+    重试"在首个刷新线程 join 超时后照样起第二个刷新线程(冷缓存 90 天×全 A 股
+    可达 >120s)。
+    """
+    tmp = path.with_name("%s.%d.%d.tmp" % (path.name, os.getpid(),
+                                           threading.get_ident()))
+    with _WRITE_LOCK:
+        tmp.write_bytes(pickle.dumps(obj, protocol=4))
+        os.replace(str(tmp), str(path))
 
 
 def _merge_tail(old, rec, start_fmt):

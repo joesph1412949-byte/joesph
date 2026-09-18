@@ -26,6 +26,11 @@ Y8_MID_MIN = 30e8           # 中市值启动: 30亿 ≤ 流通市值 < 100亿(�
 Y8_MID_MAX = 100e8
 Y5_MIN_CONCEPTS = 3         # 多概念: 概念标签 >= 3
 RECENT_DAYS = 5             # "近 N 日" 窗口(题材新颖/事件/龙虎榜)
+# 网络类因子(联网路径"真的取到数了"的证据): 一个都没成功 = 本次取数整体失败,
+# 结果不许落盘(I3, 见 compute_for_stock)。含 Y5/Y2(快照类) —— 它们同样来自
+# 网络, 且**无历史可回补**: 若因 F7/Y6/Y7 全挂就把它们一起丢掉, 等于把"当天
+# 快照永久缺失"换个位置再挖一遍(与守护 I1 同一类数据丢失)。
+NET_FACTORS = ("Y5", "Y2", "F7", "Y7", "Y6")
 
 # 利好关键词(公告 → Y6 事件催化)
 EVENT_KEYWORDS = ["预增", "中标", "重组", "增持", "回购", "签约", "获批"]
@@ -110,8 +115,20 @@ class FundamentalFeed:
         # 原子写(mkdir+tmp+fsync+os.replace, shared 底座): 回测逐日采集/快照/
         # 实盘会并发写同一份缓存, 半截 JSON 会被 _load_cache 静默当空 → 历史
         # 全丢, 必须整文件原子落地(Task 3, 规格 §7)。
+        # I2: 整文件回写前**先读回磁盘并合并** —— self._cache 是 __init__ 时载入
+        # 的那一份快照, 长寿命实例(prism.data.DataProvider.fund_feed 实盘/盯盘
+        # 只建一次)回写时会把"启动之后由别的写者(prism.fund_snapshot CLI / 守护
+        # 快照线程)新增的键"整批删掉, 两边还都报成功 —— 丢的正是本批次要积累的
+        # Y2/Y5 日快照与 --date 回填历史。磁盘独有的键必须保留; 同键以本进程
+        # 内存值为准(那是刚算出来的更新)。
+        # ponytail: 读-改-写不是原子的(无跨进程锁): 两个写者若在同一瞬间各读到
+        # 旧盘再各自落盘, 仍可能互相盖掉刚落的新键 —— 窗口已从"整个进程生命周期"
+        # 缩到"一次写盘", 实盘两个写者(守护快照线程 / fund_snapshot CLI)频率极低,
+        # 够用; 真观测到丢键再加文件锁。
+        disk = self._load_cache()
+        disk.update(self._cache)
         atomic_write(self.cache_path,
-                     json.dumps(self._cache, ensure_ascii=False))
+                     json.dumps(disk, ensure_ascii=False))
 
     def _cache_key(self, code, asof=None):
         """按基准日分日缓存: 同一只股在不同 asof 下是不同的数据快照。"""
@@ -407,7 +424,9 @@ class FundamentalFeed:
         offline=True(回测侧, 2026-09-17 拍板): 只读缓存 + 只算 Y1/Y8,
         **零网络、零落盘**(见类 docstring)。
         命中缓存时按当日 float_mv 补齐缺的 Y1/Y8(C1): 快照条目不带 float_mv,
-        不补就会被短路钉成 0(见 `_complete_calc_factors`)。"""
+        不补就会被短路钉成 0(见 `_complete_calc_factors`)。
+        I3: offline=False 且网络类因子(NET_FACTORS)一个都没成功 → 视为取数失败,
+        半截条目**不落盘**(留待重试), 否则会被开头短路永久钉死。"""
         key = self._cache_key(code, asof)
         if key in self._cache:
             return self._complete_calc_factors(key, self._cache[key], float_mv)
@@ -450,6 +469,17 @@ class FundamentalFeed:
                     out[name] = res
             except Exception as e:
                 logger.warning("东财因子 %s(%s) 计算失败, 回落手填: %r", name, code, e)
+        if not any(n in out for n in NET_FACTORS):
+            # I3: 网络类因子一个都没成功(结果只剩 Y1/Y8 这类纯计算值) → 视为
+            # "取数失败", **不落盘**, 留待下次重试。落盘就会被开头 `if key in
+            # self._cache: return` 永久短路 —— 该 (股,日) 的 F7/Y6/Y7 永远是 0,
+            # 之后 fund_snapshot --date 补采/重试命中同键被短路, `_complete_calc_
+            # factors` 只补 Y1/Y8 ⇒ 永久缺失; 而 backtest 的"已覆盖"判定是"该日
+            # 任一网络类有值" ⇒ 这些天被统计成"已采集", 覆盖数偏乐观。
+            # 部分成功(任一网络类有值)照常落盘: 尤其 Y5/Y2 无历史可回补。
+            logger.warning("东财因子 %s(%s) 网络类全部失败 → 不落盘(留待重试)",
+                           "/".join(NET_FACTORS), code)
+            return out
         self._cache[key] = out
         self._save_cache()
         return out

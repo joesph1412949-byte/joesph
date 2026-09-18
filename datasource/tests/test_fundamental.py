@@ -499,3 +499,101 @@ def test_offline_never_writes_cache_on_miss(tmp_path):
     assert not p.exists(), "offline 未命中不许落盘"
     assert f._cache == {}, "内存缓存也不许记(否则同进程后续会短路)"
 
+
+# ---------- I2: 回写前先读回磁盘合并(跨写者不丢更新) ----------
+def test_save_cache_keeps_keys_added_by_other_writer(tmp_path):
+    """I2: 长寿命 feed 的整文件回写必须先合并磁盘 —— 别的写者新增的键不许被抹掉。
+
+    实盘/盯盘进程的 `prism.data.DataProvider.fund_feed` 只建一次(__init__ 时
+    load 一次缓存); 这之后快照 CLI / 守护快照线程新增的 (股,日) 键, 必须活过
+    它的下一次 `_save_cache` —— 否则丢的正是本批次要积累的 Y2/Y5 日快照与
+    `--date` 回填历史, 且两边都报成功。
+    """
+    p = tmp_path / "c.json"
+    http = FakeHTTP(_base_routes(slist_diff=[_concept_board("储能")] * 3))
+    # 长寿命实例: 此刻磁盘还不存在 → 它的内存缓存从空开始(实盘/盯盘的真实形态)
+    long_lived = FundamentalFeed(http_get=http, cache_path=p)
+    day = TODAY.strftime("%Y%m%d")
+    snap_key = "%s:000001.SZ" % day
+    # 另一个写者(快照 CLI / 守护线程)写入它的键
+    FundamentalFeed(http_get=http, cache_path=p).compute_for_stock(
+        "000001.SZ", asof=TODAY)
+    assert snap_key in json.loads(p.read_text(encoding="utf-8"))
+
+    long_lived.compute_for_stock("000002.SZ", asof=TODAY)
+    disk = json.loads(p.read_text(encoding="utf-8"))
+    assert snap_key in disk, "别的写者新增的键被整文件回写抹掉了(跨写者丢更新)"
+    assert "%s:000002.SZ" % day in disk, "本进程的键照常写入"
+
+
+def test_save_cache_memory_value_wins_for_duplicate_key(tmp_path):
+    """I2: 同一个键两边都有 → 以本进程内存值为准(磁盘同键不许盖回内存值)。"""
+    p = tmp_path / "c.json"
+    key = "%s:000001.SZ" % TODAY.strftime("%Y%m%d")
+    p.write_text(json.dumps({key: {"Y6": {"score": 0, "note": "磁盘旧值"}}},
+                            ensure_ascii=False), encoding="utf-8")
+    f = FundamentalFeed(http_get=FakeHTTP(_base_routes()), cache_path=p)
+    f._cache[key] = {"Y6": {"score": 1, "note": "本进程新算的"}}
+    f._save_cache()
+    assert json.loads(p.read_text(encoding="utf-8"))[key] == \
+        {"Y6": {"score": 1, "note": "本进程新算的"}}, "内存值必须优先"
+
+
+# ---------- I3: 联网路径的"半截条目"绝不落盘 ----------
+_DOWN = RuntimeError("东财全挂")
+
+
+def test_online_all_network_factors_failed_not_persisted(tmp_path):
+    """I3: 联网路径下网络类因子一个都没成功 → 半截条目**不落盘**(留待重试)。
+
+    落盘就会被开头 `if key in self._cache: return` 永久短路 → 该 (股,日) 的
+    F7/Y6/Y7 永远是 0, 而 backtest 的"已覆盖"判定(该日任一网络类有值)又把这些
+    天统计成"已采集" —— 覆盖数偏乐观。
+    """
+    p = tmp_path / "c.json"
+    key = "%s:000001.SZ" % TODAY.strftime("%Y%m%d")
+    f = FundamentalFeed(http_get=FakeHTTP(default_exc=_DOWN), cache_path=p)
+    out = f.compute_for_stock("000001.SZ", float_mv=50e8)
+    assert {"Y1", "Y8"} <= set(out), "纯计算因子照常返回(fail-open 不抛)"
+    assert not [n for n in ("Y5", "Y2", "F7", "Y7", "Y6") if n in out], \
+        "网络全挂 → 一个网络类因子都没有"
+    disk = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    assert key not in disk, "网络类全失败的半截条目绝不能落盘"
+    assert key not in f._cache, "内存缓存也不许记(否则同进程后续一律短路)"
+
+
+def test_online_network_failure_retried_after_recovery(tmp_path):
+    """I3: 上轮网络全挂不落盘 → 网络恢复后**真的重取**(不被半截缓存短路)并落盘。"""
+    p = tmp_path / "c.json"
+    key = "%s:000001.SZ" % TODAY.strftime("%Y%m%d")
+    FundamentalFeed(http_get=FakeHTTP(default_exc=_DOWN),
+                    cache_path=p).compute_for_stock("000001.SZ", float_mv=50e8)
+    assert key not in (json.loads(p.read_text(encoding="utf-8"))
+                       if p.exists() else {})
+
+    http = FakeHTTP(_base_routes(slist_diff=[_concept_board("储能")] * 3))
+    out = FundamentalFeed(http_get=http, cache_path=p).compute_for_stock(
+        "000001.SZ", float_mv=50e8)
+    assert http.calls, "网络恢复后必须真的重新请求(旧实现被半截缓存短路 → 0 次)"
+    assert {"Y6", "Y7"} <= set(out), "网络类因子这次必须真取到"
+    assert key in json.loads(p.read_text(encoding="utf-8")), "取到了才落盘"
+
+
+def test_online_partial_network_success_still_persisted(tmp_path):
+    """I3: 网络类至少有一个成功 → 照常落盘(不许因个别端点挂掉就不落)。
+
+    尤其 Y5/Y2 是**无历史可回补**的快照类: 拿 F7/Y6/Y7 的失败去连坐它们,
+    等于把 I1 的"当天永久丢失"换个位置再挖一遍。
+    """
+    p = tmp_path / "c.json"
+    key = "%s:000001.SZ" % TODAY.strftime("%Y%m%d")
+    routes = _base_routes(slist_diff=[_concept_board("储能")] * 3)
+    routes["getTopicZTPool"] = RuntimeError("zt 端点挂")   # F7 挂, Y5/Y6/Y7 正常
+    http = FakeHTTP(routes)
+    out = FundamentalFeed(http_get=http, cache_path=p).compute_for_stock(
+        "000001.SZ", float_mv=50e8)
+    assert "F7" not in out, "F7 端点挂了 → 该因子 fail-open 缺键"
+    assert {"Y5", "Y6", "Y7"} <= set(out), "其余网络类照常"
+    assert json.loads(p.read_text(encoding="utf-8"))[key] == out, \
+        "有网络类成功 → 必须落盘"
+

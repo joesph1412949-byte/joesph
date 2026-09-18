@@ -518,6 +518,36 @@ def test_fund_feed_defaults_offline():
     assert _fund_feed(fetch=True).offline is False, "显式开启才联网"
 
 
+def test_cli_no_market_data_warns_fund_injection_off(monkeypatch, tmp_path,
+                                                     capsys):
+    """M4: `--no-market-data` 会连带关掉基本面注入(fund_feed 与 day_feed 同源)。
+
+    行为不改(验收语义不变), 但必须打一行 stderr 提示 —— 否则用户只能从
+    "Y1/Y8/F7/Y6/Y7 全 0"反推, 连 `--fetch-fund` 都被一起吞掉。
+    """
+    import backtest.cli as cli
+
+    class FakeBT:                      # 真回测太长: 只走解析/装配路径
+        def __init__(self, strategy, zt_feed=None, kline_feed=None):
+            pass
+
+        def run(self, s, e, **kw):
+            return {"trades": 0}
+
+    (tmp_path / "bt_m4.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(cli, "STRATEGIES_DIR", tmp_path)
+    monkeypatch.setattr(cli, "load_strategy", lambda sp: object())   # 不碰因子库
+    monkeypatch.setattr(cli, "Backtester", FakeBT)
+    monkeypatch.setattr(sys, "argv", [
+        "backtest.cli", "--start", "20260701", "--end", "20260702",
+        "--strategy", "bt_m4", "--no-market-data", "--fetch-fund"])
+    assert cli.main() == 0
+    err = capsys.readouterr().err
+    assert "--no-market-data" in err and "基本面" in err, \
+        "必须明说基本面注入也被关了(否则全 0 只能靠反推)"
+    assert "day_feed" in err and "--fetch-fund" in err, "点明同源与一并吞掉"
+
+
 def _seed_cache(tmp_path, day, codes):
     """预置既有缓存(键 YYYYMMDD:code, 同既有格式) → 模拟"该日已采过"。"""
     p = tmp_path / "fund_cache.json"
@@ -855,7 +885,83 @@ def test_daemon_fund_snapshot_empty_pool_warns_not_success(tmp_path, monkeypatch
     assert "基本面快照采集完成" not in caplog.text, "空池不许长得像成功"
 
 
+def test_daemon_fund_snapshot_all_failed_retries_then_warns(tmp_path, monkeypatch,
+                                                            caplog):
+    """I1: 全股取数失败(saved=0, failed>0, **无 skipped 键**)也是失败。
+
+    真凶: `snapshot_once` 在网络全挂时返回 {"saved": 0, "failed": 40}, 旧 _empty()
+    只看 skipped → 不走强制刷新+重试, 也不打 WARNING, 直接落 INFO"采集完成" ——
+    而 pick 分支每日只跑一次(screens_done 幂等键) → 当天不会再采; Y2/Y5 无历史
+    可回补 ⇒ 一次瞬时失败 = 那天快照永久缺失, 日志却写"完成"。
+    """
+    calls = []
+
+    def fake_snap():
+        calls.append(1)
+        return {"saved": 0, "failed": 40}
+    d, acc = _daemon(tmp_path, monkeypatch, fake_snap)
+    d.zt_refresh_fn = lambda: {"ok": True}
+    _patch_pick(acc, monkeypatch)
+    with caplog.at_level(logging.INFO, logger="paper_daemon"):
+        out = d.tick_once(now=datetime(2026, 9, 17, 15, 6))
+        assert out["action"] == "pick"
+        assert _wait_until(lambda: len(calls) >= 2, 5.0), "全失败必须重试一次"
+        assert _wait_until(lambda: "未采集" in caplog.text, 5.0)
+        time.sleep(0.3)                     # 给"万一无限重试"留出暴露窗口
+    assert len(calls) == 2, "只重试一次: 仍失败就告警, 不空转"
+    assert "WARNING" in caplog.text, "重试后仍全失败必须 WARNING"
+    assert "基本面快照采集完成" not in caplog.text, "全失败绝不许写成采集完成"
+    assert "Y2/Y5" in caplog.text and "无历史可回补" in caplog.text
+    assert "python -m prism.fund_snapshot" in caplog.text, "必须给出手动补采命令"
+
+
+def test_daemon_fund_snapshot_all_failed_then_retry_success(tmp_path, monkeypatch,
+                                                            caplog):
+    """I1: 首次全失败 → 强制刷新后重试成功 → INFO 完成(不带失败告警文案)。"""
+    calls = []
+
+    def fake_snap():
+        calls.append(1)
+        if len(calls) == 1:
+            return {"saved": 0, "failed": 40}
+        return {"saved": 5, "failed": 0}
+    d, acc = _daemon(tmp_path, monkeypatch, fake_snap)
+    d.zt_refresh_fn = lambda: {"ok": True}
+    _patch_pick(acc, monkeypatch)
+    with caplog.at_level(logging.INFO, logger="paper_daemon"):
+        out = d.tick_once(now=datetime(2026, 9, 17, 15, 6))
+        assert out["action"] == "pick"
+        assert _wait_until(lambda: "采集完成" in caplog.text, 5.0)
+        time.sleep(0.3)
+    assert len(calls) == 2, "重试一次即成功, 不许多打"
+    assert "未采集" not in caplog.text, "恢复成功就不该有失败告警"
+    assert "'saved': 5" in caplog.text, "如实带上 saved 数字"
+
+
+def test_daemon_fund_snapshot_partial_success_is_complete(tmp_path, monkeypatch,
+                                                          caplog):
+    """I1: 部分成功(saved>0 且 failed>0)**不算失败** → 直接 INFO, 不重试。"""
+    calls = []
+
+    def fake_snap():
+        calls.append(1)
+        return {"saved": 3, "failed": 2}
+    d, acc = _daemon(tmp_path, monkeypatch, fake_snap)
+    d.zt_refresh_fn = lambda: {"ok": True}
+    _patch_pick(acc, monkeypatch)
+    with caplog.at_level(logging.INFO, logger="paper_daemon"):
+        out = d.tick_once(now=datetime(2026, 9, 17, 15, 6))
+        assert out["action"] == "pick"
+        assert _wait_until(lambda: "采集完成" in caplog.text, 5.0)
+        time.sleep(0.3)
+    assert len(calls) == 1, "部分成功不是失败, 不许重试"
+    assert "未采集" not in caplog.text
+    assert "'saved': 3" in caplog.text and "'failed': 2" in caplog.text, \
+        "如实带上 saved/failed 数字"
+
+
 def test_daemon_default_fund_snapshot_fn_exists(tmp_path):
+    """不注入时也有默认钩子(真实路径), 且与 zt_refresh_fn 同为可注入点。"""
     """不注入时也有默认钩子(真实路径), 且与 zt_refresh_fn 同为可注入点。"""
     from prism.paper import PaperAccount
     from prism.paper_daemon import PaperDaemon

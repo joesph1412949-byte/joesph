@@ -507,3 +507,19 @@ def test_intra_note_states_one_word_unknown_bucket():
         "必须点明计数去处(报告 filter_stats.one_word_unknown)"
     assert "不拦" in n and "未知" in n, "必须说明处置: 未知 → 不拦"
 
+
+def test_intra_note_states_real_1m_boundary_and_gap():
+    """B: 边界文案必须与实测缓存一致 —— 最早有数据的是 **2025-09-16**(09-15
+    当天也是 0 条), 且必须点名 20260615~18 这 4 天**采集缺口**(可补, 需 QMT)。
+
+    旧文案写"早于 2025-09-15 无 1m 数据": 把边界说早了 1 天, 且对 4 天缺口
+    只字不提 —— 用户看到覆盖数偏低只能靠翻缓存猜。
+    """
+    notes = []
+    cli._refresh_intra_note(notes, {"got": 1, "asked": 2})
+    n = notes[0]
+    assert "早于 2025-09-16" in n, "边界必须是 09-16 之前(09-15 当天也 0 条)"
+    assert "2025-09-15 无" not in n, "旧文案把边界说早了 1 天"
+    assert "20260615~18" in n and "缺口" in n, "必须点名 4 天采集缺口"
+    assert "--build-intraday" in n, "缺口可补 → 必须给出补采命令"
+
