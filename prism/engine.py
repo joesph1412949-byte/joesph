@@ -4,7 +4,6 @@
 与旧 screen.py 的输出结构保持同构, 网页/绩效/桥无缝对接。
 """
 import json
-import os
 from datetime import datetime
 from pathlib import Path
 

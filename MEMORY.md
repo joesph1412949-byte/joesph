@@ -20,7 +20,7 @@
 | 实盘（tt 做T策略） | **已接 miniQMT 外部直连**（09-14 晚决策，见「路线回退」节）。代码/测试/闸门就绪，**放行条需每日重写**，`dry_run` 默认仍 True，`--live` 才真报单。**09-18 已修「盘前 ref 取错日」**（见下） |
 | 真实账户 | 账号 **88869979**；09-17 07:47 实读总资产 **271,808.12**、4 只持仓（全部 `可卖==持仓`，可做T） |
 | Git | **master 与 origin 同步**（09-18 两次推送：`f205fed..1d2b55b`、`1d2b55b..51eac57`）；回测复活批次 + tt ref 修复 + 一轮 bug 猎杀修复全部上远端。**push 前仍必须先问用户** |
-| QMT | 09-18 14:31 / 23:00 实测**离线**（`xtdata.connect()` 抛「无法连接xtquant服务」）→ 回测会走网络回退、慢/易卡；**跑长任务前先探一次** |
+| QMT | **09-18 23:32 实测在线**（`xtdata.connect()` 成功返回 IPythonApiClient, 服务 127.0.0.1:58610）—— 同日 14:31 曾离线, 状态会变; **跑长任务前仍先探一次**。注意: **xtquant 逐码调用会硬崩进程**（68 只逐个 download_history_data2 直接崩到 Python 异常都捕获不了）→ 必须批量一次下载 |
 
 **最容易踩的 5 个坑（血泪教训，务必先看）**：
 1. **Bash 工具在本机会随机挂掉**（`dirname/head/grep: command not found`）→ 立刻切 **PowerShell 工具**，把输出 `Out-File -Encoding utf8` 再 Read，别在 Bash 上重试。
@@ -65,6 +65,9 @@
   · **只读 bug 猎手 + 终审复评各抓到一批真缺陷**（`1903efa` 修）：①守护把"全股失败 `{"saved":0,"failed":40}`"当成功 → 当天 Y2/Y5（不可回补）永久丢失却说"采集完成" ②**整文件回写缓存 → 跨写者丢更新**（长寿命 feed 会抹掉快照线程/CLI 新增的键；`atomic_write` 的 pid+tid tmp 名只保证"不写坏"、不保证"不丢写"） ③联网半截条目（网络类一个都没成功仍落盘）被缓存短路**永久钉死** ④`--no-market-data` 连带静默关掉基本面注入。
   · **`os.replace` 的 Windows 真坑**（`9349b3c` + `51eac57`）：**只要目标文件被任何读句柄打开，`os.replace` 就抛 `PermissionError(13, 拒绝访问)`** —— 加"按路径写锁"只解决写-写互踩；修法是给 `os.replace` 加**有界退避重试**（只重试 PermissionError / winerror∈{5,32}，上限 ~1s，耗尽抛出）。**三份原子写实现都要带**：`shared/common.atomic_write`、`prism/zt_history._atomic_pickle`、`tt_solo/ttcore/_vendor.atomic_write`。修后 5 次全量连绿（实现者 3 次 + 控制者 2 次）。
   · 缓存合并还补了"**读失败不覆盖**"（`_load_cache` 读异常曾被当 `{}` ⇒ 合并退化成整文件覆盖 = 原病）。
+  · **原子写统一**（`af2f60f` + `36feb07`）：`prism_web/app.py`×3 与 `prism/engine.py`×1 不再手写 `tmp+os.replace`，改走 `shared.common.atomic_write`（唯一 tmp 名 + fsync + 退避重试 + 失败清理一次拿全）；`zt_history._atomic_pickle` 与 `tt_solo/ttcore/_vendor.atomic_write` 补齐"失败即清理 tmp"；4 处"恒真空的 tmp 残留断言"改回真守卫（负控：放一个假残留时旧断言仍通过、新断言失败）。**全量 1135 绿连跑 4 次**（实现者 2 + 控制者 2）。
+  · push 收尾：`1d2b55b..51eac57`、`19316c2`、`19316c2..36feb07` —— **master 与 origin 完全同步**。
+  · 已知遗留（非阻塞）：`prism/engine.py` 的 `import os` 已随统一原子写变为无用（已删）；`prism/paper.py` 无需改（它本就走 `atomic_write`）。
 
 - **tt_solo 批次：做T策略抽成自包含项目 + 仪表盘重建**（09-16，spec/plan 见 `docs/superpowers/{specs,plans}/2026-09-16-tt-solo-extract*`）：`tt/`（24 文件/4362 行）+ `tt_web/` → **`tt_solo/`（唯一实现，旧目录已删）**。
   · **结构**：`tt_solo/ttcore/`（11 模块：`_vendor`/grid/risk/state/broker/market/config/engine/executor/daemon/arm_today）+ `tt_solo/dashboard/`（Flask + 前端，**:5011**）+ `tests/`（**221 绿**）+ `tools/compare_legacy.py`。
