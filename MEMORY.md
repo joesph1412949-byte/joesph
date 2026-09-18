@@ -14,13 +14,13 @@
 
 | 维度 | 状态 |
 |---|---|
-| 测试基线 | **七路径 1058 绿**（09-18 控制者亲测 `298d586`：`python -m pytest prism/tests prism_web/tests datasource/tests tt_solo/tests tt_solo/dashboard/tests qmt_sync/tests tests -q --import-mode=importlib --basetemp=D:/cc-joesph/pt_bt219` = `1058 passed, 25 warnings in 88.70s`；证据 `.superpowers/sdd/final-fix-verify-full-out.txt`）。做T侧单跑 265 绿（tt_solo 198 + dashboard 23 + qmt_sync 27 + 根 17）。**口径校正**：老记录里的「945/995」是 6 路径（漏 `tt_solo/dashboard/tests` 23 例），别再用 |
+| 测试基线 | **七路径 1134 绿 / 0 失败**（09-18 深夜控制者连跑两次 `51eac57`：`1134 passed, 25 warnings in 106.27s / 104.20s`；证据 `.superpowers/sdd/final-verify-232.txt`、`final-verify-233.txt`）。⚠️ **用例数不是可靠指纹**：另一会话当时有未跟踪的测试文件（`prism/tests/test_first_board_review.py` 等）会被一并收集（1099↔1134 跳），**"零失败"才是不变量**。做T侧单跑 265 绿（tt_solo 198 + dashboard 23 + qmt_sync 27 + 根 17）。**口径校正**：老记录里的「945/995」是 6 路径（漏 `tt_solo/dashboard/tests` 23 例），别再用 |
 | 模拟盘 | 守护**当前未运行**（09-17 23:38 起过一次 paper_daemon + prism_web，09-18 14:30 实测只剩一个回测进程）；账本仍 1,000,000 现金、**零持仓** |
 | 实盘（prism 主策略） | **未上线**。代码已通（`prism/live_daemon.py`），三步验收一步未做 |
-| 实盘（tt 做T策略） | **已接 miniQMT 外部直连**（09-14 晚决策，见「路线回退」节）。代码/测试/闸门就绪，**放行条需每日重写**，`dry_run` 默认仍 True，`--live` 才真报单 |
+| 实盘（tt 做T策略） | **已接 miniQMT 外部直连**（09-14 晚决策，见「路线回退」节）。代码/测试/闸门就绪，**放行条需每日重写**，`dry_run` 默认仍 True，`--live` 才真报单。**09-18 已修「盘前 ref 取错日」**（见下） |
 | 真实账户 | 账号 **88869979**；09-17 07:47 实读总资产 **271,808.12**、4 只持仓（全部 `可卖==持仓`，可做T） |
-| Git | 本地领先 origin：**09-17/18 回测复活批次 7 个提交（`5bd45c5`/`8cccbfd`/`e509dc2`/`3783878`/`173e36c`/`86c9110`/`298d586`）未推送**，等用户拍板；**push 前仍必须先问用户** |
-| QMT | 09-18 14:31 实测**离线**（`xtdata.connect()` 抛「无法连接xtquant服务」）→ 回测会走网络回退、慢/易卡；**跑长任务前先探一次** |
+| Git | **master 与 origin 同步**（09-18 两次推送：`f205fed..1d2b55b`、`1d2b55b..51eac57`）；回测复活批次 + tt ref 修复 + 一轮 bug 猎杀修复全部上远端。**push 前仍必须先问用户** |
+| QMT | 09-18 14:31 / 23:00 实测**离线**（`xtdata.connect()` 抛「无法连接xtquant服务」）→ 回测会走网络回退、慢/易卡；**跑长任务前先探一次** |
 
 **最容易踩的 5 个坑（血泪教训，务必先看）**：
 1. **Bash 工具在本机会随机挂掉**（`dirname/head/grep: command not found`）→ 立刻切 **PowerShell 工具**，把输出 `Out-File -Encoding utf8` 再 Read，别在 Bash 上重试。
@@ -58,6 +58,13 @@
   · 同轮修掉：守护在 15:00~15:05 重启时仍可能整日空采（6h 节流挡住当日刷新）→ 空池强制刷新+重试一次；验收报告 1m 缺口归因改正（15 日 = 11 日保留边界 + **4 日 20260615~18 待补采**）；报告 §7.4 不可复现的"复跑逐字节相同"改成如实表述 + sha256 落档；`atomic_write` 的 tmp 名加 pid+线程 id（该缓存有多个写者，固定 tmp 名会互相踩）。
   · **未闭环（需用户拍板或等 QMT 在线）**：①验收口径"≥26/28"字面为 **25/28**（Y2/Y5 是规格要求的设计剔除，S2 经探针取证本窗口确实不触发）②`S2`（量价堆积密度）是否调参/改定义 ③`20260615~18` 那 4 天 1m 补采 + 重跑验收（C1 修复后 20260910 的 3 个股票日会补齐，影响 ≤3 股日）④本批 7 个提交**未 push**。
   · 遗留 Minor 清单在 `.superpowers/sdd/progress.md`（Task 3 八条、Task 4 八条、Task 5 六条、终审十三条中已修 12 条）。
+
+- **09-18 晚追加：push + 一轮 bug 猎杀修复**（用户拍板"push，再看看有没有其他bug"）：
+  · **push 两次**：`f205fed..1d2b55b`（复活批次 8 个提交）→ `1d2b55b..51eac57`（后 4 个修复提交）。核过 `Joesph_key.pem`/`.workbuddy/`/`_ui_backup_*` **从未入库**。
+  · **tt `ref` 盘前取错日**（原「🔴 高优先 #0」）**已修**（`303b860`）：`market.prev_close(tick, daily, fallback)` 让中枢**优先取最后一根已完成日K的收盘**，只有 tick 的交易日**新于**日K末根时才采信 tick，日K取不到才回落 tick；`ref_src` 如实记 `daily`/`tick_newer`/`tick_fallback`。tt_solo 219 绿。
+  · **只读 bug 猎手 + 终审复评各抓到一批真缺陷**（`1903efa` 修）：①守护把"全股失败 `{"saved":0,"failed":40}`"当成功 → 当天 Y2/Y5（不可回补）永久丢失却说"采集完成" ②**整文件回写缓存 → 跨写者丢更新**（长寿命 feed 会抹掉快照线程/CLI 新增的键；`atomic_write` 的 pid+tid tmp 名只保证"不写坏"、不保证"不丢写"） ③联网半截条目（网络类一个都没成功仍落盘）被缓存短路**永久钉死** ④`--no-market-data` 连带静默关掉基本面注入。
+  · **`os.replace` 的 Windows 真坑**（`9349b3c` + `51eac57`）：**只要目标文件被任何读句柄打开，`os.replace` 就抛 `PermissionError(13, 拒绝访问)`** —— 加"按路径写锁"只解决写-写互踩；修法是给 `os.replace` 加**有界退避重试**（只重试 PermissionError / winerror∈{5,32}，上限 ~1s，耗尽抛出）。**三份原子写实现都要带**：`shared/common.atomic_write`、`prism/zt_history._atomic_pickle`、`tt_solo/ttcore/_vendor.atomic_write`。修后 5 次全量连绿（实现者 3 次 + 控制者 2 次）。
+  · 缓存合并还补了"**读失败不覆盖**"（`_load_cache` 读异常曾被当 `{}` ⇒ 合并退化成整文件覆盖 = 原病）。
 
 - **tt_solo 批次：做T策略抽成自包含项目 + 仪表盘重建**（09-16，spec/plan 见 `docs/superpowers/{specs,plans}/2026-09-16-tt-solo-extract*`）：`tt/`（24 文件/4362 行）+ `tt_web/` → **`tt_solo/`（唯一实现，旧目录已删）**。
   · **结构**：`tt_solo/ttcore/`（11 模块：`_vendor`/grid/risk/state/broker/market/config/engine/executor/daemon/arm_today）+ `tt_solo/dashboard/`（Flask + 前端，**:5011**）+ `tests/`（**221 绿**）+ `tools/compare_legacy.py`。
@@ -123,6 +130,7 @@
 - **分级写护栏**（09-15/16，d75b1b3+852c1be，为公网部署准备）：**判据唯一真相 = `shared.common.is_local_request(cf_ip, remote_addr)`**——请求头有 `CF-Connecting-IP`（只有 CF 边缘会注入）→ 远程档；无头且 remote_addr 为 loopback/RFC1918 → 本机档（**坑：cloudflared 在本机回环转发，直接看 remote_addr 会把隧道请求误判成本机**）。远程可：选股/新建策略/刷新涨停池+全部看板；远程禁（403「此操作仅限本机执行(交易闸门类)」）：prism_web 设默认策略/手填因子/模拟盘暂停恢复/绩效回填 + tt_web 做T急停/每日放行。`_LOCAL_ONLY` 按函数名集合（白名单方向：新增写路由默认可用）。将来切 CF Access 邮箱白名单只改 is_local_request 一个函数
 - **DSH × OpenCode Go（09-08）**：opencode.ai/zen/go 网关 09-05 起强制 `x-opencode-session` 头，缺失返 400 MissingSessionID（"Console Go"）；DSH 官方已知问题（discussion 5495 未修）。本机已修：`C:\Users\28037\.dsh\settings.yaml` → `llm-pi-ai.providers` 6 个 opencode 供应商补 `headers: { 'x-opencode-session': 'dsh-opencode-go-joesph' }`（备份 .bak-20260908；llm-pi-ai 适配器逐请求读配置，通常免重启）。**09-08 当天实测生效**（下一条消息即不再 400）。若 aux 路径仍 400 需动 deepseek-harness 仓库 llm-pi-ai 代码（重建 profile）
 - **DSH 接入 OpenCode Go 的 DeepSeek V4.1 Flash（09-15）**：官方 Go 文档确认该型号 **Go 专属**（Zen 端点表里没有），model ID `deepseek-v4.1-flash`，端点 `https://opencode.ai/zen/go/v1/chat/completions`（OpenAI 兼容）；线上实证 `GET https://opencode.ai/zen/go/v1/models` 返回该 id。**坑：只改 settings.yaml 会 fail-closed 报错**——DSH 内置 pi-ai 目录快照（08-24）没有这个型号，`resolveRouteModels` 里 `api = request.api ?? base?.api ?? routeApi` 全为 undefined（该路由目录同时含 anthropic-messages/openai-completions/openai-responses 三种协议 → `sharedCatalogApi` 返回 undefined），而 schema 的 `modelProfile` **不允许逐模型写 `api`**、路由级 `api` 又会把 minimax-m3/grok-4.5 一起改协议（不可行）。**修法两处**：① `…\pi-ai\dist\providers\data\opencode-go.json` 的 `openai-completions` 段补一条（照抄 deepseek-v4-flash 的 compat：`thinkingFormat:deepseek` / `maxTokensField:max_tokens` / `requiresReasoningContentOnAssistantMessages:true`；`.manifest.json` 只被读生成时间戳，**不校验哈希**）② `settings.yaml` 的 opencode-go models 列表加一条（备份 `.bak-20260915`）。**该 JSON 是进程启动静态 import → 必须重启 DSH 一次才生效**（settings 逐请求读，目录不是）。DSH 升级会覆盖 node_modules 补丁 → 需重打（新版目录通常已含该型号）
+- **DSH Desktop 升级 2.0.4 → 2.0.11（09-18）**：全自动脚本（校验官方 sha256 → 关旧版 → `/S /currentuser` 静默装 → 补 pi-ai 目录 → 重开），四个文件都在 `C:\Users\28037\Downloads\`：`dsh-upgrade-2.0.11.ps1` / `dsh-upgrade.log` / `dsh-upgrade-result.txt` / 回滚包 `DSH-Desktop-2.0.4-x64-Setup-rollback.exe`。**实测结论**：内核 0.1.2-alpha.1 → **0.1.5-rc.2**；**2.0.10 起取消 ASAR**，资源目录变 `resources\app\`（`app.asar.unpacked` 已消失）→ 补丁路径随之改变（脚本用候选路径+递归兜底）；**新版目录仍不带 `deepseek-v4.1-flash`（原 21 个型号）**，脚本按克隆 `deepseek-v4-flash` 自动补成 22 个（无 BOM、幂等、缺模板则跳过不写坏），路由实测通。安装目录未变（`C:\Users\28037\DSH Desktop`，per-user 免 UAC），`~/.dsh` 配置与 6 个 opencode 供应商 headers 原样保留
 - **DSH 调用变慢的实测归因（09-18）**：统计 **3450 次真实请求 / 14 个会话**（数据源 `.dsh/sessions/**/session.jsonl.zstd`；**多帧 zstd 必须用 `zstandard.stream_reader`**——同步或单帧解压只出第一帧，会把 1.9MB 的会话误判成空会话；每请求用量藏在 `assistant/chunk` 且 `chunk.type=="usage"`，`inputTokens`=新增未缓存、`cacheReadTokens`=命中缓存）。**结论：不是新模型、也不是接入的问题**——v4.1-flash(effort=max) TTFT 中位 **3.5s**，与旧 v4-flash(max) 4.0s 持平；v4-flash(high) 2.6s；glm-5.3-flash(max) **2.0s** 最快。真正的"慢"来自三处：
   1. **网关偶发挂死**：一次请求**零字节挂 4850s（81 分钟）**，DSH `llm/retry`（策略含 EMPTY_RESPONSE/RATE_LIMIT/SERVER/TIMEOUT/TRANSPORT）重试后 6s 成功；当前会话另有 90s/30s/27s 流中断档。**5 分钟空闲看门狗（`streamIdleTimeoutMs` 默认 3e5）没兜住**（疑似只在拿到响应头后才开始计时，未证实）→ 兜底用路由级 **`timeoutMs`**（schema 有该字段；pi-ai 当 HTTP 总超时传给底层客户端，`openai-completions.js` L182）
   2. **`reasoningEffort: max` 确实生效**（不是装饰）：`detectCompat` 对 deepseek/glm 自动置 `supportsReasoningEffort: true`（排除名单只有 grok/zai/moonshot/together/cloudflare/nvidia/ant-ling）→ DSH 真发 `reasoning_effort`。实测网关：glm-5.3-flash 给 max 思考 **1674 字符/18s**，不给该参数仅 **77 字符/6.5s**。复杂轮次生成 40-70s、推理块 100+ 是主观"慢"的主因
@@ -393,12 +401,11 @@ prism/ 主引擎 → 写 JSON → D:/QMT_SIGNALS/real/pending/*.json
 
 ## 🔴 高优先（阻塞实盘 / 有资金风险）
 
-0. **⚠️【09-17 新发现】盘前运行会把 `ref` 钉成前前一天的收盘（真 bug，未修）**
-   - **现象**：09-17 07:47 盘前跑 `TTEngine.plan()`，长电 `ref=28.500`；而 9/16 收盘是 **28.46**、9/15 收盘才是 28.50。
-   - **根因**：`market.XtdataBackend.ticks()` 取 `tick["lastClose"]`。**盘前 QMT 的 tick 快照仍是上一交易日盘中那份**，其 `lastClose` 指向更早一天 → 引擎 `symbol_context()` 优先用 `tick.last_close` 当 `ref`，**整整错一个交易日**。
-   - **影响面（关键）**：`ledger.get_ref()` 在**当天第一轮**就把 ref 缓存下来（`ref_src="ledger"`，当日不再变）→ **盘前启动守护 = 全天档位基于错误中枢**。盘中（09:15 后 tick 刷新）启动则正确。
-   - **修法建议**：`ref` 改用「最后一根已完成日K的收盘」（`get_market_data_ex` 末根），仅当 tick 的交易日**新于**日K末根时才采信 tick。
-   - **临时绕过**：**别在盘前启动守护，等 09:30 之后再开**。
+0. **✅【09-17 发现 / 09-18 已修】盘前运行会把 `ref` 钉成前前一天的收盘**（`303b860`）
+   - 现象：09-17 07:47 盘前跑 `TTEngine.plan()`，长电 `ref=28.500`；而 9/16 收盘 **28.46**、9/15 收盘才是 28.50 → 整整错一个交易日。
+   - 根因：`market.XtdataBackend.ticks()` 的 `tick["lastClose"]` 在盘前仍是**上一交易日盘中那份**快照；引擎 `symbol_context()` 优先用它当 `ref`。而 `ledger.get_ref()` 当天第一轮即缓存 ⇒ **盘前启动守护 = 全天档位基于错误中枢**。
+   - 修法（已落地）：`market.prev_close(tick, daily, fallback)` —— **优先最后一根已完成日K的收盘**，仅当 tick 的交易日**新于**日K末根时才采信 tick，日K取不到则回落 tick；`ref_src` 记 `daily`/`tick_newer`/`tick_fallback`。
+   - ⏳ 仍未做：QMT 在线后**盘前实跑一次**验证（`python -m ttcore.daemon --direct --once`，核对 `ref_src=="daily"` 且 `ref == 上一交易日收盘`）。
 
 1. **tt 3 条必改项 —— 已全部处置**（09-14 晚）：
    - 桥端日去重键 `stock_code` → ✅ **已修为 `order_id`**（`qmt/bridge/signal_bridge_real.py` 新增 `_dedup_key()`；外部直连通道本就不走桥，但走 A2 时必需）
@@ -415,7 +422,7 @@ prism/ 主引擎 → 写 JSON → D:/QMT_SIGNALS/real/pending/*.json
 6. **重复 web 进程**：`prism_web/app.py` 曾有两个实例（14248 占 5000 / 16604 冗余），启动器只查端口监听，双开可能漏网 → 建议改成按进程名查。（09-18 14:30 又见到一次双开）
 7. **守护断连不自动重启**（60×10s 后需人工）→ 考虑接 `ops/watchdog.py`。
 8. **`ops/watchdog.py` 服务清单**仍配着 legacy `strategy_web`（端口 5000 实际已被 prism_web 占用）。
-9. **`git push`**：**回测复活批次 7 个提交（`5bd45c5`/`8cccbfd`/`e509dc2`/`3783878`/`173e36c`/`86c9110`/`298d586`）尚未推送**，等用户拍板；**push 前必须先问**。
+9. **`git push`**：✅ **09-18 已推送**（`f205fed..1d2b55b` + `1d2b55b..51eac57`）；下次 push 前仍必须问用户。
 10. **回测复活批次的遗留 Minor**（`.superpowers/sdd/progress.md` 有全文，均非阻塞）：Task 3 八条（网络类覆盖只按"天"计 / `ZT_REFRESH_WAIT` 超时分支无测试 / 守护空池告警在周中节假日误报 / `--date ""` 仍 exit 0 / Y1/Y8 文案缺"缺 float_mv"归因 等）、Task 4 八条（买入腿盖戳与兜底分支不自洽 / 盖戳非幂等 / `--oos` 付双份 validation 载荷 等）。
 11. **`S2`（量价堆积密度）在本窗口零命中**：探针实测 16341 次评估里"60日≥20天放量"与"60日振幅≤10%"**从未同时成立** → 不是数据缺失，是**因子条件对该宇宙近乎不可达**。**等用户拍板**：调参（属策略变更）/ 承认它只适合别的场景。同时验收口径"28 个评分因子 ≥26 命中"字面为 **25/28**（Y2/Y5 为规格要求的设计剔除）→ 也需用户拍板分母口径。
 12. **1m 特征缺口**：`20260615~18` **4 个交易日是采集缺口（可补）** + `2025-09-01~09-15` 11 日早于 QMT 保留边界（不可得，那段 F2/F3 恒 0 已披露）。补采命令（需 QMT 在线）：`python -m backtest.cli --start 20260615 --end 20260618 --build-intraday`；补完应重跑全窗口验收（C1 修复后 `20260910` 的 3 个股票日 Y1/Y8 会补齐，影响 ≤3 股日）。
@@ -495,7 +502,9 @@ python -m prism.live_daemon --once
 | 17 | **子代理擅自改写已提交历史** | Task 5 实现者为了"提交信息合规"把 `207797c`+`fe3aafe` **压成新提交 `86c9110`** → 前两个变悬空对象、审查包与台账里的 SHA 全部失效（本次代码逐字节相同，侥幸无损） | 派单时明写"**不得改写已提交历史**（不 amend/rebase/reset）"；提交信息不合就追加一次提交或先问控制者 |
 | 18 | **QMT 连续跑几小时后本地读盘会劣化** | 09-18 00:21 后日线读取从 ~20ms/只 变成 2.0→4.5s/只、多线程无加速（xtdata 串行化）；一次复跑 45 分钟仍卡在 K 线预取 | 长回测**分段跑**；跑前先探一次单只耗时；QMT 离线时每个代码还要付 ~2s 连接超时（5 日池 185 只 = 378 秒，看着像卡死） |
 | 19 | **派生量塞进"按日缓存"会被缓存短路永久钉死** | Y1/Y8 是 `float_mv` 的纯函数，但快照/守护调 `compute_for_stock` **不传 `float_mv`** → 缓存条目缺 Y1/Y8；`if key in self._cache: return` 让之后带 `float_mv` 的查询**永远拿不到**（真实缓存 24 条中招） | ①缓存命中分支**就地补齐**可派生因子（本批已修）②给缓存写者列清单：同一 key 的不同调用方必须传齐参数，否则先落者定生死 |
-| 20 | **`shared.common.atomic_write` 的 tmp 名是固定的**（`path+".tmp"`） | 同一文件有多个写者（守护快照线程 / 手动 CLI / 实盘选股器）时互相踩 tmp → `os.replace` 落地坏 JSON → `_load_cache` **静默当 `{}`**（历史全丢） | 已修为 tmp 名带 pid+线程 id（`298d586`）；其他自己写原子写的脚本也照此 |
+| 20 | **`shared.common.atomic_write` 的 tmp 名是固定的**（`path+".tmp"`） | 同一文件有多个写者（守护快照线程 / 手动 CLI / 实盘选股器）时互相踩 tmp → `os.replace` 落地坏 JSON → `_load_cache` **静默当 `{}`**（历史全丢） | tmp 名带 pid+线程 id（`298d586`/`9349b3c`），并按路径加进程内写锁；其他自己写原子写的脚本也照此 |
+| 21 | **Windows `os.replace` 只要目标被"任何读句柄"打开就 EACCES** | 并发读者存在时 replace 抛 `PermissionError(13, 拒绝访问)`：实测 2 个 reader 线程 → 538/300 轮失败；全量测试间歇红（同跑 31 次红 11 次，隔离单跑全绿） | **给 `os.replace` 加有界退避重试**（只重试 `PermissionError`/`winerror∈{5,32}`，上限 ~1s，耗尽抛原异常）。**三份实现都要**：`shared/common.atomic_write`、`prism/zt_history._atomic_pickle`、`tt_solo/ttcore/_vendor.atomic_write`（tt_solo 自包含，不许 import shared/prism）。只加锁**不够**（锁只管写者之间） |
+| 22 | **交付物里的"覆盖率/进度"数字可能不可靠**（同 16） | 例：报告写"复跑逐字节相同(662,314 B)"，实际那是**日志内紧凑 JSON 长度**，落盘文件是 695,207 B；`--no-market-data` 被当成"旧代码结果" | 报告里区分"日志字符数 / 落盘字节 / sha256"；对照实验要标明"近似旧口径"而非"旧代码"；能落 sha256 就落 |
 
 **Chrome 转 PDF 配方**（可复用）：给 HTML 加 `@page{size:A4}` + `@media print{ .card,table,tr{break-inside:avoid} }` → Chrome `--headless=new --print-to-pdf` → 校验 `/BaseFont` 含 `MicrosoftYaHei`。
 
