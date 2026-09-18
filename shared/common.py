@@ -115,6 +115,30 @@ def limit_ratio_for_code(code):
 # ---------------------------------------------------------------- io / dates
 # NOTE: comments here stay ASCII (same rule as the rest of this file).
 
+# One lock per target path, NOT one global lock: unrelated files must not
+# serialize each other. _WRITE_LOCKS holds one entry per distinct write
+# target, a small and bounded set in this project (cache/state/monthly
+# feature files), so the dict does not need eviction.
+_WRITE_LOCKS = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _write_lock_for(path):
+    """Process-local lock serializing same-path writers (M11b).
+
+    Keyed by normalized absolute path so differently spelled paths for
+    the same file ('D:/x/a.json' vs 'D:\\x\\a.json') still share one
+    lock. Callers here pass absolute paths, so cwd does not shift the
+    key between calls."""
+    key = os.path.normcase(os.path.abspath(str(path)))
+    with _LOCKS_GUARD:
+        lock = _WRITE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _WRITE_LOCKS[key] = lock
+        return lock
+
+
 def atomic_write(path, text):
     """Write text to path atomically: mkdir + same-dir .tmp + fsync + replace.
 
@@ -129,7 +153,22 @@ def atomic_write(path, text):
     + live picker): the later writer truncates/steals the earlier one's
     tmp, so the earlier `os.replace` publishes the WRONG text (or raises
     FileNotFoundError). Either way the cache can land corrupt - and
-    FundamentalFeed._load_cache silently treats a corrupt file as {}."""
+    FundamentalFeed._load_cache silently treats a corrupt file as {}.
+
+    The replace is also serialized PER PATH in-process (M11b,
+    2026-09-18). A unique tmp name only stops writers from stealing each
+    other's tmp; two threads calling os.replace onto the SAME target at
+    the same time still collide on the destination handle and raise
+    PermissionError(13) on Windows (measured on the pre-fix code: 119 of
+    150 rounds with 4 concurrent writers). The caller then reports "write
+    failed" while readers silently fall back to {}. Same treatment as
+    prism/zt_history.py::_atomic_pickle.
+
+    Guarantee, exactly: inside this process, writers of the same path run
+    their replace one after another, so the file always holds the
+    complete text of one write (never a half or a mix). It does NOT
+    coordinate across processes - that case still rests on the unique
+    pid-carrying tmp name plus os.replace being atomic per target."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = Path("%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident()))
@@ -137,7 +176,8 @@ def atomic_write(path, text):
         fp.write(text)
         fp.flush()
         os.fsync(fp.fileno())
-    os.replace(tmp, path)
+    with _write_lock_for(path):
+        os.replace(tmp, path)
 
 
 def next_weekday(d):
