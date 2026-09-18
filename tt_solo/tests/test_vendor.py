@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """_vendor 底座测试: 路径根 + 原子写 + 涨跌停比例 + 分级护栏。"""
 import os
+import threading
 from pathlib import Path
 
 from ttcore import _vendor
@@ -38,7 +39,57 @@ def test_atomic_write_leaves_no_tmp(tmp_path):
     _vendor.atomic_write(p, "v1")
     _vendor.atomic_write(p, "v2")
     assert p.read_text(encoding="utf-8") == "v2"
-    assert not (tmp_path / "x.json.tmp").exists()
+    # tmp 名是 `x.json.tmp.<pid>.<tid>`(唯一名), 旧字面量 `x.json.tmp` 的断言
+    # 恒真 = 没守卫; 改成真守卫: 目录里除目标文件外没有任何残留
+    assert [q.name for q in tmp_path.iterdir() if q.name != "x.json"] == []
+
+
+def test_atomic_write_concurrent_same_path_keeps_own_tmp(tmp_path, monkeypatch):
+    """M13(tt 侧): 同进程两个写者并发写**同一路径** → 零异常 + 落地必是完整内容。
+
+    Event 握手把致命交织钉死(A 写完自己的 tmp 后卡在 replace 前, 让 B 走完整个
+    流程, 再放 A):tmp 名若还是固定的 `path + ".tmp"`, B 的 `open(tmp,"w")` 会把
+    A 刚写的 tmp 截断成 B 的内容 → A 的 replace 要么发布**别人的**内容, 要么
+    FileNotFoundError(实测旧实现 200 轮 94 轮抛错)。tmp 名带 pid+线程 id 后两条
+    各写各的 tmp, 都成功, 且不留残留。
+    """
+    p = tmp_path / "x.json"
+    _vendor.atomic_write(p, "seed")
+
+    a_at_replace = threading.Event()
+    release_a = threading.Event()
+    real_replace = _vendor.os.replace
+
+    def watched_replace(src, dst):
+        if threading.current_thread().name == "A":
+            a_at_replace.set()
+            assert release_a.wait(10), "编排失败: A 没被放行"
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(_vendor.os, "replace", watched_replace)
+
+    errs = []
+
+    def writer(name, text):
+        try:
+            _vendor.atomic_write(p, text)
+        except Exception as exc:          # tmp 被对方截断 -> FileNotFoundError/…
+            errs.append((name, repr(exc)))
+
+    ta = threading.Thread(target=writer, args=("A", "A" * 200), name="A")
+    ta.start()
+    assert a_at_replace.wait(10), "编排失败: A 没走到 replace 前"
+    tb = threading.Thread(target=writer, args=("B", "B" * 200), name="B")
+    tb.start()
+    tb.join(10)
+    release_a.set()
+    ta.join(10)
+
+    assert errs == [], "同路径并发写不许抛错(tmp 互踩): %r" % errs
+    got = p.read_text(encoding="utf-8")
+    assert got in ("A" * 200, "B" * 200), "落地必须是某一次**完整**写入"
+    assert [q.name for q in tmp_path.iterdir() if q.name != "x.json"] == [], \
+        "不留任何残留"
 
 
 def test_limit_ratio_by_board():

@@ -37,7 +37,7 @@ import threading as _threading
 
 from flask import Flask, jsonify, render_template, request
 
-from shared.common import setup_logging
+from shared.common import atomic_write, setup_logging
 
 # 旧数据源模块(单源: datasource, 经上方路径注入解析; prism.data.DataProvider
 # 内部同名导入复用同一份类定义, 见 prism/data.py)
@@ -103,9 +103,10 @@ def _save_snapshot(result: dict) -> dict:
         "candidates": result.get("candidates"),
         "summary": result.get("summary"),
     }
-    tmp = SNAPSHOT_PATH.with_suffix(".json.tmp")
-    tmp.write_text(_json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, SNAPSHOT_PATH)
+    # 原子写统一走 shared.common.atomic_write: 唯一 tmp(pid+线程) + fsync +
+    # 有界退避 replace + 失败清理。守护/网页/编辑器可能同时刷新同一份快照,
+    # 固定 tmp 名会互踩。
+    atomic_write(SNAPSHOT_PATH, _json.dumps(snapshot, ensure_ascii=False))
     return snapshot
 
 
@@ -115,9 +116,8 @@ def _save_limitup_snapshot(limit_ups):
         "generated_at": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "data": limit_ups,
     }
-    tmp = LIMITUP_SNAPSHOT_PATH.with_suffix(".json.tmp")
-    tmp.write_text(_json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, LIMITUP_SNAPSHOT_PATH)
+    atomic_write(LIMITUP_SNAPSHOT_PATH,
+                 _json.dumps(snapshot, ensure_ascii=False))
     return snapshot
 
 
@@ -679,10 +679,7 @@ def api_strategy_create():
         return jsonify({"ok": False,
                         "errors": ["引擎试载失败: %r" % e]}), 400
     p = STRATEGIES_DIR / ("%s.json" % sid)
-    tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text(_json.dumps(strat, ensure_ascii=False, indent=1),
-                   encoding="utf-8")
-    os.replace(tmp, p)
+    atomic_write(p, _json.dumps(strat, ensure_ascii=False, indent=1))
     return jsonify({"ok": True, "id": sid})
 
 

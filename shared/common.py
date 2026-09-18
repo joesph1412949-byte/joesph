@@ -183,7 +183,11 @@ def atomic_write(path, text):
     still rests on the unique pid-carrying tmp name plus os.replace being
     atomic per target. A reader holding the handle for longer than the
     whole budget still sees the original PermissionError; that is
-    reported, not hidden."""
+    reported, not hidden.
+
+    A failed publish does NOT leave the tmp behind: the pid+tid name is
+    unique, so nothing would ever reuse or clean that file (M13,
+    2026-09-18). Same treatment as tt_solo/ttcore/_vendor.py."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = Path("%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident()))
@@ -192,7 +196,19 @@ def atomic_write(path, text):
         fp.flush()
         os.fsync(fp.fileno())
     with _write_lock_for(path):
-        replace_with_retry(tmp, path)
+        try:
+            replace_with_retry(tmp, path)
+        except BaseException:
+            _unlink_quietly(tmp)
+            raise
+
+
+def _unlink_quietly(tmp):
+    """Best-effort removal of a tmp that failed to publish (never raises)."""
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
 
 
 # -------------------------------------------------- os.replace retry (M12)

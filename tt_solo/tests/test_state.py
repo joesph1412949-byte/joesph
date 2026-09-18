@@ -124,7 +124,9 @@ def test_atomic_write_leaves_no_tmp(tmp_path):
     led.load()
     led.save()
     assert p.exists()
-    assert not (tmp_path / "s.json.tmp").exists()
+    # tmp 名带 pid+线程(`s.json.tmp.<pid>.<tid>`): 旧字面量 `s.json.tmp` 的断言
+    # 恒真 = 没守卫; 改成真守卫: 目录里除目标文件外没有任何残留
+    assert [q.name for q in tmp_path.iterdir() if q.name != "s.json"] == []
 
 
 def test_events_capped(ledger):

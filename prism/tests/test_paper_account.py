@@ -52,7 +52,9 @@ def test_save_atomic_and_roundtrip(tmp_path):
     acc2 = _acc(tmp_path)
     assert acc2.load() is True
     assert acc2.state["cash"] == 900000.0
-    assert not (tmp_path / "paper.json.tmp").exists()   # 无残留临时文件
+    # tmp 名带 pid+线程(`paper.json.<pid>.<tid>.tmp`): 旧字面量 `paper.json.tmp`
+    # 的断言恒真 = 没守卫; 改成真守卫: 目录里除目标文件外没有任何残留
+    assert [q.name for q in tmp_path.iterdir() if q.name != "paper.json"] == []
 
 
 def test_summary_and_detail(tmp_path):

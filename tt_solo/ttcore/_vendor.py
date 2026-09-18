@@ -10,6 +10,7 @@ ponytail: vendored from shared/common.py @2026-09-16 —— tt_solo 要能被整
 故此处采用 tt 的更正确版本("92"); shared 版本缺这条, 是主项目侧的潜在缺陷。
 """
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -63,20 +64,30 @@ def atomic_write(path, text):
 
     崩溃/断电都不能留下半截文件(账本读者会把截断文件当损坏)。
     fsync 是断电存活的关键, 不是可选项。
-    vendored from shared/common.py @2026-09-16(重试 @2026-09-18)。
+    vendored from shared/common.py @2026-09-16(重试+唯一 tmp 名 @2026-09-18)。
 
-    ponytail: tmp 名仍是固定的 `path + ".tmp"`(没跟 shared/common 一起改成
-    pid+线程) —— 同进程两个写者(守护 + 面板重算/Flask 多线程)仍可能互踩这个
-    tmp; 那一路频率低, 本轮只补 replace 重试。真观测到互踩再改成唯一名(一行)。
+    tmp 名带 pid+线程 id(与 shared/common.py 同款): 同进程两个写者(守护 +
+    面板重算/Flask 多线程)并写同一路径时不会互踩同一个 tmp; 跨进程靠 pid 段
+    隔离。os.replace 撞读者句柄那一类由 replace_with_retry 兜住 —— 两者互补,
+    都不可省。
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = Path(str(path) + ".tmp")
+    tmp = path.with_name("%s.tmp.%d.%d" % (
+        path.name, os.getpid(), threading.get_ident()))
     with open(tmp, "w", encoding="utf-8") as fp:
         fp.write(text)
         fp.flush()
         os.fsync(fp.fileno())
-    replace_with_retry(tmp, path)
+    try:
+        replace_with_retry(tmp, path)
+    except BaseException:
+        # 落地失败别留垃圾 tmp(下一次写会被唯一名绕过, 但目录会持续变脏)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 # ---------------------------------------------------------------- 规则

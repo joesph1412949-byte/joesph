@@ -134,12 +134,21 @@ def _atomic_pickle(path, obj):
     与写者锁都挡不住**读者**占着目标句柄(Windows 的 open 不带
     FILE_SHARE_DELETE); 刷新线程写的时候 `_load_cache`/`qmt_zt_feed` 正在读是
     常态, 有界退避等读者关句柄再落地, 预算耗尽则原样抛错(不静默当成功)。
+
+    落地失败连 tmp 一起收掉(M13, 2026-09-18): 唯一名没人会复用/清理它。
     """
     tmp = path.with_name("%s.%d.%d.tmp" % (path.name, os.getpid(),
                                            threading.get_ident()))
     with _WRITE_LOCK:
         tmp.write_bytes(pickle.dumps(obj, protocol=4))
-        replace_with_retry(str(tmp), str(path))
+        try:
+            replace_with_retry(str(tmp), str(path))
+        except BaseException:
+            try:
+                os.unlink(str(tmp))
+            except OSError:
+                pass
+            raise
 
 
 def _merge_tail(old, rec, start_fmt):

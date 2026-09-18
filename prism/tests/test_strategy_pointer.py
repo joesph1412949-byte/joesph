@@ -38,7 +38,9 @@ def test_set_active_roundtrip(tmp_path):
     engine.set_active_strategy("first_board_v03", pointer_path=p)
     assert json.loads(p.read_text(encoding="utf-8"))["id"] == "first_board_v03"
     assert engine.active_strategy_id(pointer_path=p) == "first_board_v03"
-    assert not (tmp_path / "active.json.tmp").exists()   # 原子写无残留
+    # tmp 名带 pid+线程(`active.json.<pid>.<tid>.tmp`): 旧字面量 `active.json.tmp`
+    # 的断言恒真 = 没守卫; 改成真守卫: 目录里除目标文件外没有任何残留
+    assert [q.name for q in tmp_path.iterdir() if q.name != "active.json"] == []
 
 
 def test_real_pointer_resolves_to_existing_strategy():

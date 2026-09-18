@@ -11,6 +11,7 @@ from pathlib import Path
 from prism import registry as reg
 from prism.context import FactorContext
 from prism import sector_score
+from shared.common import atomic_write
 _registry = reg  # validate 的 reg=None 形参遮蔽模块级名 → 别名兜底(审查: 删函数内本地 import)
 
 # 综合分组合方式
@@ -293,14 +294,16 @@ def execution_sizing(strategy):
 
 
 def set_active_strategy(sid, pointer_path=None):
-    """写默认策略指针(原子写; sid 存在性由调用方校验)。"""
+    """写默认策略指针(原子写; sid 存在性由调用方校验)。
+
+    走 shared.common.atomic_write: 唯一 tmp(pid+线程) + fsync + 有界退避
+    replace + 失败清理 —— 编辑器/网页/守护都写这份指针, 固定 tmp 名会互踩。
+    """
     p = Path(pointer_path) if pointer_path \
         else STRATEGIES_DIR / ACTIVE_FILENAME
-    tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text(json.dumps(
+    atomic_write(p, json.dumps(
         {"id": sid, "updated": datetime.now().isoformat(timespec="seconds")},
-        ensure_ascii=False, indent=1), encoding="utf-8")
-    os.replace(tmp, p)
+        ensure_ascii=False, indent=1))
 
 
 # ---------------- 策略校验器(策略编辑器 spec §3/§4) ----------------
