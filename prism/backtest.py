@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """回测引擎: 逐日回放真实策略(与实盘同一 engine), 含交易模拟。
 
-与实盘共用同一选股逻辑: load_strategy + compute_model_scores(engine),
-不另写一套规则; 回测只补交易模拟层——手续费(fee_rate, 默认万2.5)
+与实盘共用同一选股逻辑: load_strategy + engine._compute_scores(实盘的
+compute_model_scores 就是它的薄封装), 不另写一套规则; 回测只补交易模拟层
+——手续费(fee_rate, 默认万2.5)
 + 滑点(slippage, 默认0.1%) + 仓位(单只资金上限, position_ratio, 预留)
 + 卖出规则(复用 exit_rules.ExitRule: 止损 > 止盈 > 持有期满)。
 
@@ -46,7 +47,7 @@ from prism import registry as reg
 from prism import sector_score
 from prism import validation
 from prism.context import FactorContext
-from prism.engine import compute_model_scores, load_strategy
+from prism.engine import _compute_scores, load_strategy
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +211,68 @@ def _slice_mkt(mkt, asof):
     return out
 
 
+# 回测里只能走"代理口径"的因子(实盘口径依赖回测不可得的数据): 状态列标"代理",
+# 数据说明用**同一份文案**(一处定义, 表格与说明不会各说各话)。
+#   F3 封单强度: 实盘读盘口队列 bidVol[0]; 回测无分笔/五档(不造假) → 1m 特征
+#   合成的 bt_seal_ratio(板上成交额/流通市值)代理, 见 factor_f3_seal_strength。
+_PROXY_FACTORS = {
+    "F3": ("F3 封单强度: 回测无盘口队列(bidVol 不可得) → 走分钟级代理"
+           "(板上成交额/流通市值 ≤ 0.5%), 非实盘封单口径"),
+}
+
+# 快照类因子(当前值接口): 对回测历史日自带未来性 → 回测全程剔除按 0(宁缺勿假)。
+# 见 _fund_for / backtest.cli._apply_fund 的剔除分支与 data_notes 说明。
+_SNAPSHOT_FIDS = ("Y2", "Y5")
+
+
+def _strategy_fids(strategy):
+    """策略声明的全部因子 id(门控 + 各评分模型, 去重保序)。
+
+    `factor_hits` 的零值骨架与快照类因子检测共用 —— 口径只有一处。
+    """
+    gate = (strategy.get("market_gate") or {}).get("factors") or []
+    scoring = [f for m in (strategy.get("scoring_models") or [])
+               for f in (m.get("factors") or [])]
+    out, seen = [], set()
+    for item in list(gate) + scoring:
+        fid = item if isinstance(item, str) else (item or {}).get("id")
+        if fid and fid not in seen:
+            seen.add(fid)
+            out.append(fid)
+    return out
+
+
+def _new_factor_hits(strategy):
+    """因子存活率的零值骨架: 门控 + 全部评分因子(未评估也要看得见)。
+
+    策略声明即入表 —— 只有"声明了却没被评估"也出现在报告里, 才能区分
+    "因子恒 0"与"根本没算"(残废版策略的指纹)。
+    """
+    gate = set((strategy.get("market_gate") or {}).get("factors") or [])
+    return {fid: {"hits": 0, "evals": 0,
+                  "kind": "gate" if fid in gate else "scoring"}
+            for fid in _strategy_fids(strategy)}
+
+
+def _finalize_factor_hits(raw):
+    """计数 → 报告口径: 补 `rate` / `status`(实算 / 代理 / 恒0 / 未评估)。
+
+    rate = hits/evals; **evals=0 → None**(没评估过就没有命中率, 不拿 0 冒充)。
+    """
+    out = {}
+    for fid, rec in (raw or {}).items():
+        hits, evals = rec.get("hits", 0), rec.get("evals", 0)
+        out[fid] = {
+            "hits": hits, "evals": evals,
+            "rate": round(hits / evals, 4) if evals else None,
+            "kind": rec.get("kind", "scoring"),
+            "status": ("未评估" if not evals else
+                       "恒0" if not hits else
+                       "代理" if fid in _PROXY_FACTORS else "实算"),
+        }
+    return out
+
+
 class _VTrade:
     """统计验证用的交易适配(prism 的 trade 是 dict, 移植函数按属性读)。
 
@@ -260,6 +323,13 @@ class Backtester:
         # 过滤统计(2026-09-04): 零交易时能分辨"门控没过"还是"候选被过滤"
         # ——网页回测曾缺市场数据注入导致三个策略静默零交易, 无从归因。
         self._filter_stats = self._new_filter_stats()
+        # 因子存活率(2026-09-16 §8): 每个被评估的候选/交易日给每个因子记一次
+        # eval, 非 0 分再记一次 hit —— 让"哪些因子在回测里空转"一眼可见。
+        # 在 _compute_scores 调用处计数(不为了统计重算一遍)。
+        self._factor_hits = _new_factor_hits(self.strategy)
+        # data_notes 补充说明的触发标记(只在**确实用到**该数据时才加一条)
+        self._proxy_seen = set()      # 走过代理口径的因子(如 F3)
+        self._float_approx = False    # 用过"当前快照"的流通股本近似
 
     @staticmethod
     def _new_filter_stats():
@@ -422,14 +492,20 @@ class Backtester:
         if sh_df is not None:
             # 与实盘 build_market_context 同款: sh_index_kline 走 _extra
             market_ctx._extra["sh_index_kline"] = sh_df
+        gate_res = {}
         for fid in gate_fids:
             meta = reg.get_factor(fid)
+            hit = False
             try:
                 res = meta["func"](market_ctx)
-                if isinstance(res, dict) and res.get("score"):
-                    gate_score += 1
+                hit = bool(isinstance(res, dict) and res.get("score"))
             except Exception:
-                pass
+                hit = False            # 异常 = 未命中(旧行为), 但仍计一次 eval
+            gate_res[fid] = hit
+            if hit:
+                gate_score += 1
+        # 门控存活率: 每个被评估的交易日给每个门控因子记一次 eval(规格 §8)
+        self._tally_factor_hits(gate_res)
         if gate_score < threshold:
             self._filter_stats["gate_blocked_days"] += 1
             return []
@@ -448,13 +524,22 @@ class Backtester:
                 if dt is not None and dt <= asof:
                     kline.append(row)
             stock = (stock_extra or {}).get(code) or {}
+            # data_notes 触发标记: 真用过"代理/近似"数据才在报告里说明(不无病呻吟)
+            if stock.get("bt_seal_ratio") is not None:
+                self._proxy_seen.add("F3")     # 1m 特征在场 → F3 走分钟级代理
+            if stock.get("float_vol") is not None:
+                self._float_approx = True      # 流通股本是"当前快照"近似值
             fund = stock.get("fund") or self._fund_for(
                 code, asof, stock.get("float_mv") or s.get("float_mv"))
             ctx = self._stock_ctx(code, kline, mkt_sliced, sector_map,
                                   limit_ups=pool_ctx, fund=fund,
                                   stock_extra=stock, index_kline=idx_df,
                                   sh_index_kline=sh_df)
-            scores = compute_model_scores(ctx, self.strategy)
+            # 存活率计数与算分同源: 直接用 _compute_scores 的因子结果
+            # (compute_model_scores 是它的薄封装, 但会丢掉 factors 那一半 ——
+            #  为统计再算一遍才是浪费, 规格 §8 明确要求不重算)
+            scores, factors = _compute_scores(ctx, self.strategy)
+            self._tally_factor_hits(factors)
             best = max([scores[m["id"]]
                         for m in self.strategy["scoring_models"]], default=0)
             self._filter_stats["candidates"] += 1
@@ -480,6 +565,44 @@ class Backtester:
         # 每日选股上限: 与净值模拟的 max_positions 一致(每天最多买 N 只,
         # 否则一天 50+ 只候选会把资金抽干, 净值模拟里几乎全部跳过)
         return out[: self.max_positions]
+
+    def _tally_factor_hits(self, results):
+        """记一次因子评估: `results` = {fid: 是否命中}。
+
+        每个条目计一次 eval(**fail-open 0 也算** —— 缺数据时因子返回 0 但确实
+        被评估过, 不计 eval 的话"恒 0"就看不见了), 命中再计一次 hit。
+        策略没声明的因子(理论上不可达)也补进表里, 宁可多一行也不静默吞掉。
+        """
+        for fid, hit in (results or {}).items():
+            rec = self._factor_hits.get(fid)
+            if rec is None:
+                rec = self._factor_hits[fid] = {"hits": 0, "evals": 0,
+                                                "kind": "scoring"}
+            rec["evals"] += 1
+            if hit:
+                rec["hits"] += 1
+
+    def _extra_data_notes(self):
+        """回测口径的数据说明(规格 §8): 不可得/被代理的数据必须写明, 不静默。
+
+        只在**确实用到**该数据/该因子时加一条(没用到不加), 否则既有报告会被
+        无关噪音塞满, 真说明反而看不见:
+          - F3 走分钟级代理(策略里**有** F3, 且注入了 1m 特征的 bt_seal_ratio);
+          - 策略引用快照类 Y2/Y5 → 回测剔除, 全程按 0;
+          - 用过流通股本(当前快照近似, 历史逐日股本不可得)。
+        """
+        out = []
+        for fid in sorted(self._proxy_seen):
+            # fid in self._factor_hits = 该因子确实在策略里(否则不替它发言)
+            if fid in _PROXY_FACTORS and fid in self._factor_hits:
+                out.append(_PROXY_FACTORS[fid])
+        if any(f in self._factor_hits for f in _SNAPSHOT_FIDS):
+            out.append("Y2/Y5: 快照类(股东户数/概念)是\"当前值\"接口, 回测历史日"
+                       "不可得且自带未来性 → 全程按 0(fail-open), 不造假")
+        if self._float_approx:
+            out.append("流通股本/流通市值: 用**当前快照值**近似(历史逐日股本不可得)"
+                       " → F3 封单强度等按该近似值计算")
+        return out
 
     def _fund_for(self, code, asof, float_mv=None):
         """个股基本面因子快照(fund_feed 注入时)。
@@ -558,6 +681,9 @@ class Backtester:
         trades = []
         dates = []
         self._filter_stats = self._new_filter_stats()   # 每次 run 重置诊断计数
+        self._factor_hits = _new_factor_hits(self.strategy)   # 同上, 重置存活率
+        self._proxy_seen = set()
+        self._float_approx = False
         # gate_notes 归因用: 未注入 em/ticks 时才提示缺数据。按日注入时以
         # "当日实际给到过"为准(静态参数全 None 但 day_feed 天天给 em 时,
         # 不该再报"缺 em 数据"); 空 dict 也算给到(_day_provided 同判据)。
@@ -633,11 +759,15 @@ class Backtester:
         eq_stats = self._equity_stats(curve, self.initial_capital)
         # data_notes: day_feed 自带的覆盖说明(如 1m 特征覆盖/缺失降级, 规格 §5);
         # feed 是普通 callable 时无该属性 → [](报告结构统一)。
-        data_notes = list(getattr(day_feed, "data_notes", None) or [])
+        # 再补回测口径自己的说明(F3 代理/Y2·Y5 快照缺失/流通股本近似, 规格 §8):
+        # 只在实际用到该数据时加, 否则既有报告会被无关噪音塞满。
+        data_notes = (list(getattr(day_feed, "data_notes", None) or [])
+                      + self._extra_data_notes())
         return self._report(trades, dates, gate_notes=gate_notes,
                             equity_stats=eq_stats, skipped_cash=skipped,
                             filter_stats=self._filter_stats,
                             data_notes=data_notes,
+                            factor_hits=self._factor_hits,
                             cost_config={"fee_rate": self.fee_rate,
                                          "min_commission": self.min_commission,
                                          "slippage": self.slippage,
@@ -911,7 +1041,7 @@ class Backtester:
     @staticmethod
     def _report(trades, dates, gate_notes, equity_stats, skipped_cash=0,
                 filter_stats=None, data_notes=None, validation=None,
-                cost_config=None):
+                cost_config=None, factor_hits=None):
         """汇总回测报告。
 
         equity_stats: _equity_stats 的结果(基于资金模拟净值曲线), 含
@@ -923,6 +1053,8 @@ class Backtester:
         validation: 统计验证结果(规格 §6, 蒙特卡洛/bootstrap/滚动前推)。
         cost_config: 成本参数回显(fee_rate/min_commission/...)—— min_commission
         默认 ¥5 时 fee_rate=0 也不是零成本, 对净值前先看这里。
+        factor_hits: 因子存活率(规格 §8), {fid: {hits/evals/rate/kind/status}}。
+        原始计数由 _tally_factor_hits 在算分处累加, 这里补 rate/status。
         **两个分支共用同一份 base**: 有交易分支曾经漏掉 data_notes 键(既有
         bug: 有交易的报告一律丢失数据可得性说明), 统一由 base 承载。"""
         n = len(trades)
@@ -931,6 +1063,7 @@ class Backtester:
                 "filter_stats": filter_stats or {},
                 "cost_config": cost_config or {},
                 "data_notes": list(data_notes or []),
+                "factor_hits": _finalize_factor_hits(factor_hits),
                 "validation": validation or {}}
         if n == 0:
             base.update({"win_rate": None, "avg_return_pct": None,

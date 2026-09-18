@@ -259,6 +259,11 @@ def test_download_features_counts_no_data_as_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(bti, "_sleep", lambda s: None)
     monkeypatch.setattr(bti, "_load_1m", lambda code, iso: [])
     monkeypatch.setattr(bti, "_prev_daily_close", lambda code, iso: 10.0)
+    # 测试卫生(2026-09-16): 必须桩掉批量下载 —— 漏桩会真打 QMT
+    # (download_history_data2), 无 QMT/网络慢时实测偶发 >300s 卡死, 违反
+    # "测试必须离线可跑"约束。本用例只验"无数据 → 不落盘 + 计数如实",
+    # 下载本身由 ③ 幂等/分片两个用例(已桩)覆盖。
+    monkeypatch.setattr(bti, "_download_batch", lambda codes, s, e: None)
     res = bti.download_features({"2026-09-04": ["600000.SH", "000001.SZ"]})
     assert res["stock_days"] == 0 and res["written"] == 0
     assert bti.features_for("600000.SH", "2026-09-04") is None

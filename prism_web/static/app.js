@@ -513,7 +513,8 @@ function renderBacktest(r) {
       : "";
     box.innerHTML = `<div class="hint">回测完成: 无交易。<div style="margin-top:6px;font-size:12px">${warn}${why}${notes}</div>
       <br>提示: 东财历史涨停池约保留最近 20 个交易日, 可尝试更近的日期；<br>
-      若"被模型分不足过滤"占多数, 说明该策略依赖实时盘口因子, 回测内核里算不出来(如 v03 对照组)。</div>`;
+      若"被模型分不足过滤"占多数, 说明该策略依赖实时盘口因子, 回测内核里算不出来(如 v03 对照组)。</div>`
+      + renderFactorHits(r) + renderDataNotes(r);
     return;
   }
   const pct = v => v == null ? "-" : (v * 100).toFixed(1) + "%";
@@ -528,6 +529,10 @@ function renderBacktest(r) {
     ["平均成本/笔", r.avg_cost_pct == null ? "-" : r.avg_cost_pct + "%"],
   ];
   // 交易日志表(按日期降序, 最新在前)
+  // 成本列 = 比例成本(cost_pct) + 资金层按本笔名义额扣的 ¥5 下限差额
+  // (floor_cost_pct, Task 4) —— 旧报告没有 floor_cost_pct 时退化为原值。
+  const costPct = t => (t.cost_pct == null && t.floor_cost_pct == null) ? null
+    : +((t.cost_pct || 0) + (t.floor_cost_pct || 0)).toFixed(3);
   const log = (r.trade_log || []).map(t => `
     <tr class="bt-ret-${t.return_pct >= 0 ? "pos" : "neg"}">
       <td>${t.date}</td>
@@ -536,7 +541,7 @@ function renderBacktest(r) {
       <td>${t.composite == null ? "-" : t.composite}</td>
       <td>${t.entry == null ? "-" : t.entry}</td>
       <td>${t.exit == null ? "-" : t.exit}</td>
-      <td>${t.cost_pct == null ? "-" : t.cost_pct + "%"}</td>
+      <td>${costPct(t) == null ? "-" : costPct(t) + "%"}</td>
       <td class="bt-ret">${t.return_pct >= 0 ? "+" : ""}${t.return_pct}%</td>
     </tr>`).join("");
   box.innerHTML = `
@@ -555,8 +560,59 @@ function renderBacktest(r) {
         <tbody>${log || `<tr><td colspan="8" class="hint">无明细</td></tr>`}</tbody>
       </table>
     </div>
-    <div class="hint" style="margin-top:10px">注: 真实交易成本模型(佣金万2.5双向 + 印花税0.05%卖出 + 过户费万0.1 + 滑点0.1%),
-      夏普比按每笔收益率年化(简化); 数据源优先 QMT 本地K线。</div>`;
+    <div class="hint" style="margin-top:10px">注: 真实交易成本模型(佣金万2.5双向 + 印花税0.05%卖出 + 过户费万0.1 + 滑点0.1%,
+      成本列含 ¥5 最低佣金下限差额); 夏普比按逐日净值年化(252 交易日);
+      数据源优先 QMT 本地K线。</div>`
+    + renderFactorHits(r) + renderDataNotes(r);
+}
+
+// 因子存活率表(Task 5 §8): 哪些因子在真实打分、哪些恒 0、哪些一次没被评估。
+// 存在的意义就是杜绝"跑的是残废版策略"再次发生 —— 有交易/零交易两个分支都要显示
+// (零交易时恰恰最需要看: 是门控永不过, 还是候选全被过滤)。
+function renderFactorHits(r) {
+  const fh = (r && r.factor_hits) || {};
+  const ids = Object.keys(fh);
+  if (!ids.length) return "";
+  const rows = ids.map(fid => {
+    const x = fh[fid] || {};
+    const rate = x.rate == null ? "-" : (x.rate * 100).toFixed(1) + "%";
+    // rate==1.0 = 常数因子(每次都命中 → 对区分候选没有贡献), 必须标注
+    const rt = rate + (x.rate === 1 ? " 常数" : "");
+    // 非"实算"的状态(代理/恒0/未评估)标橙: 报告里最该被看见的就是这些
+    const odd = x.status && x.status !== "实算";
+    return `<tr>
+      <td>${escHtml(fid)}</td>
+      <td>${x.kind === "gate" ? "门控" : "评分"}</td>
+      <td>${x.hits == null ? "-" : x.hits}/${x.evals == null ? "-" : x.evals}</td>
+      <td>${rt}</td>
+      <td${odd ? ' style="color:var(--sp-orange)"' : ""}>${escHtml(x.status || "-")}</td>
+    </tr>`;
+  }).join("");
+  return `
+    <h3 style="margin-top:18px">因子存活率(${ids.length} 个)</h3>
+    <div class="bt-log-wrap">
+      <table id="bt-factor-table">
+        <thead><tr>
+          <th>因子</th><th>类型</th><th>命中/评估</th><th>命中率</th><th>状态</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <div class="hint" style="margin-top:6px">
+      状态: <b>实算</b> = 真实打分命中过 · <b>代理</b> = 回测只能走代理口径(实盘数据不可得)
+      · <b>恒0</b> = 评估过但从未命中 · <b>未评估</b> = 一次都没算(如门控永不过, 评分因子根本没跑);
+      命中率标"常数"= 每次都命中, 对区分候选没有贡献。
+      门控按交易日计一次评估, 评分因子按候选股计一次。
+    </div>`;
+}
+
+// 数据说明区(Task 5 §8): 不可得/被代理的数据必须公示, 不许静默 fail-open 0。
+function renderDataNotes(r) {
+  const notes = (r && r.data_notes) || [];
+  if (!notes.length) return "";
+  return `
+    <h3 style="margin-top:18px">数据说明(${notes.length} 条)</h3>
+    <div class="hint">${notes.map(n => `<div>· ${escHtml(n)}</div>`).join("")}</div>`;
 }
 
 // ---------- 模拟盘面板 ----------

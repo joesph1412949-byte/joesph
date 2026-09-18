@@ -307,6 +307,62 @@ def test_backtest_day_feed_failure_degrades_with_note(client, monkeypatch):
     assert any("按日上下文" in n for n in rep["gate_notes"])
 
 
+def test_backtest_report_carries_factor_hits_and_data_notes(client, monkeypatch):
+    """报告里的因子存活率与数据说明必须原样到网页(Task 5 §8)。
+
+    存活率表/数据说明区的数据源就是这两个字段 —— 端点若把它们过滤掉,
+    前端只会渲染出空表(静默), 所以这里钉住透传契约(只增不减)。
+    """
+    fh = {"F3": {"hits": 1, "evals": 4, "rate": 0.25, "kind": "scoring",
+                 "status": "代理"},
+          "N1": {"hits": 2, "evals": 2, "rate": 1.0, "kind": "gate",
+                 "status": "实算"}}
+    notes = ["1m特征: 个股日覆盖 1/2 (缓存缺失静默降级 → F2/F3 fail-open 0)",
+             "F3 封单强度: 回测无盘口队列(bidVol 不可得) → 走分钟级代理"]
+
+    class FakeBT:
+        def __init__(self, strategy, zt_feed=None, kline_feed=None):
+            pass
+
+        def run(self, s, e, sell_rules=None, progress=None, **kw):
+            return {"trades": 0, "trading_days": 1, "gate_notes": [],
+                    "filter_stats": {}, "factor_hits": fh, "data_notes": notes}
+
+    monkeypatch.setattr("prism.backtest.Backtester", FakeBT)
+    monkeypatch.setattr(app_module, "build_day_feed", None)
+    monkeypatch.setattr(app_module, "load_market_data",
+                        lambda: (None, None, None))
+    r = client.get(
+        "/api/backtest?strategy=first_board_v04&start=20260101&end=20260105")
+    assert r.status_code == 200
+    rep = r.get_json()["report"]
+    assert rep["factor_hits"] == fh, "存活率字段必须透传到网页"
+    assert rep["data_notes"] == notes, "数据说明必须透传到网页"
+
+
+def test_backtest_js_renders_factor_survival_and_data_notes():
+    """前端契约(结构性): 交易结果下方的因子存活率表 + 数据说明区(Task 5 §8)。
+
+    存活率表存在的意义就是"一眼看出哪些因子在空转", 所以钉住:
+      - 表读 `factor_hits`(因子/类型/命中率/状态), 四个状态词都在前端可读;
+      - `data_notes` 逐条公示(不可得的数据不许静默);
+      - 成本列用 Task 4 的 `floor_cost_pct`(¥5 下限差额)且兼容旧报告;
+      - **有交易/零交易两个分支都要渲染**(零交易正是最需要看存活率的时候)。
+    """
+    js = (Path(__file__).parent.parent / "static" / "app.js").read_text(
+        encoding="utf-8")
+    assert "function renderFactorHits" in js
+    assert "factor_hits" in js
+    assert "function renderDataNotes" in js and "data_notes" in js
+    for mark in ("实算", "代理", "恒0", "未评估"):
+        assert mark in js, "存活率状态缺 %s(前端必须能区分空转因子)" % mark
+    assert "常数" in js, "rate==1.0 的常数因子要在命中率列标注"
+    assert "floor_cost_pct" in js and "cost_pct" in js, "新成本字段 + 向后兼容"
+    assert "escHtml(" in js                                  # XSS 契约
+    assert js.count("renderFactorHits(r)") >= 2, \
+        "有交易与零交易两个分支都要展示存活率"
+
+
 # ---------------- 旧路由保留: 冒烟 ----------------
 
 def test_health(client):
