@@ -344,54 +344,71 @@ def test_atomic_pickle_concurrent_writers_do_not_share_tmp(zt_tmp_paths):
             "落盘必须是一个写者的完整结果(不许半截/串写)"
 
 
-def test_atomic_pickle_survives_concurrent_reader(zt_tmp_paths):
-    """M12 回归: **读者**持续读目标 pkl 时, `_atomic_pickle` 循环 N 轮零异常。
+def test_atomic_pickle_survives_concurrent_reader(zt_tmp_paths, monkeypatch):
+    """M12 回归: 目标 pkl 被**读者句柄**持有期间写 → N 轮全零异常。
 
     上一轮的 tmp 名唯一 + `_WRITE_LOCK` 只解决**写-写**; 读者句柄仍在时
     `os.replace` 照样 EACCES(审查者实测: 2 reader 线程 538 轮 PermissionError,
     无 reader 时 0/300)。生产形态: 刷新线程写 pkl, `_load_cache` / `qmt_zt_feed`
     / `default_codes` 并发读 —— 坏文件被静默当 `{}` = 90 天缓存无声清零。
 
-    读者按生产形态循环: 打开 → 读(**持有句柄**) → 关闭 → 两次读之间干别的
-    (`pickle.loads` 在句柄关闭后跑, 那段时间就是写者的机会窗口)。修复前实测
-    (同一测试体关掉重试): **26~85/300 轮** EACCES, 空转读者(间隙 8ms)
-    291/300; 修复靠 `shared.common.replace_with_retry` 的有限退避。
-
-    读者节奏(1ms 持有 / 50ms 间隙)= 生产里的轮询读。边界(如实): 毫不喘息、
-    句柄几乎 100% 打开的读者能饿死任何**有界**预算 —— 那种读者下修复后仍
-    12/300 轮 EACCES(报告"未覆盖边界")。
+    每一轮用 Event 握手钉死时序: 读者先打开并持有句柄 → 写者进 `_atomic_pickle`,
+    第一次 replace **必然**撞上它(先断言真的撞上了) → 读者放手(预算内) → 写者
+    必须靠重试落地, 零异常。修复前第 2 步就抛 `PermissionError(13)`。
+    不用"定时持有/放手的读者跑 300 轮":那种读者被抢占时会握着句柄下 CPU, 能
+    饿死任何**有界**预算(全量跑实测 flake)。频率数字见报告 M12:
+    同款循环读者下修复前 26~291/300 轮 EACCES。
     """
     p = zt_tmp_paths / ".zt_history_cache.pkl"
     zt._atomic_pickle(p, {"seed": True})
-    stop = threading.Event()
-    errs = []
+
+    holding, release = threading.Event(), threading.Event()
+    collided = threading.Event()
+    real_replace = zt.os.replace
 
     def reader():
-        while not stop.is_set():
-            try:
-                with open(p, "rb") as f:
-                    f.read()
-                    time.sleep(0.001)      # 持有句柄时的消耗(读/解析)
-            except OSError:
-                pass                       # 替换瞬间句柄失效属正常
-            time.sleep(0.05)               # 句柄关闭: 读者在两次读之间干别的
+        with open(p, "rb") as f:
+            f.read()
+            holding.set()
+            release.wait(10)           # 读者处理这份数据: 句柄一直开着
 
-    readers = [threading.Thread(target=reader, name="R%d" % i)
-               for i in range(2)]
-    for r in readers:
+    def watched_replace(src, dst):
+        try:
+            return real_replace(src, dst)
+        except PermissionError:
+            collided.set()             # 只观察, 不改行为
+            raise
+
+    monkeypatch.setattr(zt.os, "replace", watched_replace)
+
+    for rnd in range(10):
+        holding.clear()
+        release.clear()
+        collided.clear()
+        r = threading.Thread(target=reader, name="R%d" % rnd)
         r.start()
-    try:
-        for i in range(300):
-            try:
-                zt._atomic_pickle(p, {"i": i})
-            except Exception as e:
-                errs.append((i, repr(e)))
-    finally:
-        stop.set()
-        for r in readers:
-            r.join(10)
+        assert holding.wait(10), "第 %d 轮编排失败: 读者没打开目标文件" % rnd
 
-    assert not errs, ("有读者时写失败 %d/300 轮(前 3): %s"
-                      % (len(errs), errs[:3]))
-    assert pickle.loads(p.read_bytes()) == {"i": 299}, "最后一轮必须完整落地"
+        errs = []
+
+        def writer():
+            try:
+                zt._atomic_pickle(p, {"i": rnd})
+            except Exception as e:     # PermissionError(13) / WinError 5|32
+                errs.append(repr(e))
+
+        w = threading.Thread(target=writer, name="W%d" % rnd)
+        w.start()
+        try:
+            assert collided.wait(10), (
+                "第 %d 轮编排失败: 写者第一次 replace 没撞上读者句柄 —— 本轮"
+                "没有制造出 EACCES, 断言等于没跑" % rnd)
+        finally:
+            release.set()              # 读者放手(在重试预算之内)
+        w.join(10)
+        r.join(10)
+
+        assert errs == [], ("第 %d 轮: 读者在预算内放手后写必须成功: %s"
+                            % (rnd, errs))
+        assert pickle.loads(p.read_bytes()) == {"i": rnd}
     assert [q for q in zt_tmp_paths.iterdir() if q != p] == [], "不留任何残留"

@@ -2,9 +2,9 @@
 """状态机与持久化测试。"""
 import json
 import threading
-import time
 from datetime import datetime
 
+from ttcore import _vendor
 from ttcore.state import Ledger
 
 
@@ -135,56 +135,75 @@ def test_events_capped(ledger):
     assert len(ledger.state["events"]) <= MAX_EVENTS
 
 
-def test_save_survives_concurrent_reader(tmp_path):
-    """M12(tt 侧): 有读者持续读账本时, 高频 `save()` N 轮 → 零异常。
+def test_save_survives_concurrent_reader(tmp_path, monkeypatch):
+    """M12(tt 侧): 账本文件被**读者句柄**持有期间 save → N 轮全零异常。
 
     `ttcore/_vendor.py::atomic_write` 是 tt_solo 自包含的**第三份**原子写拷贝
     (刻意不 import shared/prism), 同样撞 Windows 的"目标被读者句柄占用 →
     `os.replace` EACCES":CPython 的 `open()` 不带 `FILE_SHARE_DELETE`, 只要
     有读者句柄在, `MoveFileEx(REPLACE_EXISTING)` 就拿不到 DELETE 权限。
-    实测来源:本轮全量跑 `test_events_capped` 就因此红过一次(WinError 5);
-    修复前(同一测试体关掉重试)高频 save 有读者时 16~22/300 轮抛
-    `PermissionError(13)`, 无读者时 0/300。
+    实测来源:本轮全量跑 `test_events_capped` 就因此红过一次(WinError 5, 那次
+    没有读者线程 —— 外部句柄同样会挡); 有读者时修复前 16~22/300 轮抛错。
 
-    读者按生产形态循环: 打开 → 读(持有句柄) → 关闭 → 两次读之间干别的
-    (面板/守护读账本, `json.loads` 期间句柄一直开着), 节奏 = 生产里的轮询读。
-    边界(如实): 毫不喘息、句柄几乎 100% 打开的读者能饿死任何**有界**预算 ——
-    那是物理事实, 不在本修法覆盖范围。"""
+    每一轮用 Event 握手钉死时序: 读者先打开并持有句柄(面板/守护读账本的真实
+    形态) → 写者 save, 第一次 replace **必然**撞上它(先断言真的撞上了) →
+    读者放手(预算内) → 写者必须靠重试落地, 零异常。不用"定时持有/放手的读者
+    跑 300 轮":那种读者被抢占时会握着句柄下 CPU, 能饿死任何**有界**预算
+    (全量跑实测 flake 2/300)。"""
     p = tmp_path / "tt_state.json"
     led = Ledger(path=p, now_fn=lambda: datetime(2026, 9, 14, 10, 0))
     led.load()
-    led.record_fill("600900.SH", "SELL", 28.0, 100)
-    stop = threading.Event()
-    errs = []
+    led.save()
+
+    holding, release = threading.Event(), threading.Event()
+    collided = threading.Event()
+    real_replace = _vendor.os.replace
 
     def reader():
-        while not stop.is_set():
-            try:
-                with open(p, "rb") as f:
-                    f.read()
-                    time.sleep(0.001)      # 持有句柄时的消耗(读/解析)
-            except OSError:
-                pass                       # 写者正在替换: 句柄短暂失效属正常
-            time.sleep(0.05)               # 句柄关闭: 读者在两次读之间干别的
+        with open(p, "rb") as f:
+            f.read()
+            holding.set()
+            release.wait(10)           # 读者处理这份数据: 句柄一直开着
 
-    readers = [threading.Thread(target=reader, name="R%d" % i)
-               for i in range(2)]
-    for r in readers:
+    def watched_replace(src, dst):
+        try:
+            return real_replace(src, dst)
+        except PermissionError:
+            collided.set()             # 只观察, 不改行为
+            raise
+
+    monkeypatch.setattr(_vendor.os, "replace", watched_replace)
+
+    for rnd in range(10):
+        holding.clear()
+        release.clear()
+        collided.clear()
+        r = threading.Thread(target=reader, name="R%d" % rnd)
         r.start()
-    try:
-        for _ in range(300):
+        assert holding.wait(10), "第 %d 轮编排失败: 读者没打开账本文件" % rnd
+
+        errs = []
+
+        def writer():
             try:
                 led.save()
-            except Exception as exc:       # PermissionError(WinError 5/32)
+            except Exception as exc:   # PermissionError(WinError 5/32)
                 errs.append(repr(exc))
-    finally:
-        stop.set()
-        for r in readers:
-            r.join(10)
 
-    assert errs == [], "有读者时 save 失败 %d/300 轮(前 3): %s" % (
-        len(errs), errs[:3])
-    assert json.loads(p.read_text(encoding="utf-8"))["date"] == "2026-09-14"
+        w = threading.Thread(target=writer, name="W%d" % rnd)
+        w.start()
+        try:
+            assert collided.wait(10), (
+                "第 %d 轮编排失败: 写者第一次 replace 没撞上读者句柄 —— 本轮"
+                "没有制造出 EACCES, 断言等于没跑" % rnd)
+        finally:
+            release.set()              # 读者放手(在重试预算之内)
+        w.join(10)
+        r.join(10)
+
+        assert errs == [], ("第 %d 轮: 读者在预算内放手后 save 必须成功: %s"
+                            % (rnd, errs))
+        assert json.loads(p.read_text(encoding="utf-8"))["date"] == "2026-09-14"
 
 
 def test_snapshot_shape(ledger):

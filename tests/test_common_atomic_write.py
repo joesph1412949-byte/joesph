@@ -275,52 +275,71 @@ def test_atomic_write_does_not_retry_non_sharing_errors(tmp_path, monkeypatch):
     assert calls["n"] == 1, "非共享冲突错误不该被重试"
 
 
-def test_atomic_write_survives_concurrent_reader(tmp_path):
-    """M12 主症状回归: 有**读者**持续读目标文件时, 循环写 N 轮 → 零异常。
+def test_atomic_write_survives_concurrent_reader(tmp_path, monkeypatch):
+    """M12 主症状回归: 目标文件被**读者句柄**持有期间写同一路径 → N 轮全零异常。
 
-    读者按生产形态循环: 打开 → 读(**持有句柄**) → 关闭 → 两次读之间干别的
-    (fundamental 缓存被守护快照线程/实盘 picker/CLI 反复读, `json.load` 期间
-    句柄一直开着)。修复前实测(同一测试体关掉重试): **15~22/300 轮**抛
-    `PermissionError(13, '拒绝访问。')`, 无读者时 0/300; 更狠的空转读者
-    (间隙 8ms)94~119/300 —— 这与写-写竞态无关, 上一轮的按路径锁对它**无效**
-    (锁只串行写者)。
+    每一轮的时序用 Event 握手钉死, 不靠 sleep/调度碰运气:
+      1. 读者线程打开目标文件并**一直持有句柄**(生产里的读/解析形态);
+      2. 写者线程进 `atomic_write` → 第一次 `os.replace` 必然撞上"目标被打开"
+         (先断言它**真的**撞上了, 否则本轮什么都没测到);
+      3. 读者在这时关句柄(远在 0.95s 预算之内) → 写者必须靠重试落地, 零异常。
 
-    读者节奏(1ms 持有 / 50ms 间隙)= 生产里的轮询读: 句柄占空比个位数~20%。
-    边界(如实): 毫不喘息、句柄几乎 100% 打开的读者能饿死任何**有界**预算 ——
-    实测那种读者下修复后仍 17~262/300 轮 EACCES(报告"未覆盖边界")。
-
-    读者侧的 OSError 是正常的(替换瞬间句柄短暂失效), 收集但不作断言对象。"""
+    修复前:第 2 步之后写者立刻抛 `PermissionError(13, '拒绝访问。')` → 红。
+    为什么不用"定时持有/放手的读者线程跑 N 轮":那种读者的句柄持有时间是
+    wall-clock 的, 线程被抢占时"握着句柄下 CPU"能让任何**有界**预算落空 ——
+    全量跑里实测 flake(2/300)。那是本修法的诚实边界(报告"未覆盖边界"), 不该
+    拿来当断言。频率数字见报告 M12:同款循环读者下修复前 15~262/300 轮 EACCES。
+    """
     target = tmp_path / "cache.json"
     common.atomic_write(target, json.dumps({"i": -1}))
-    stop = threading.Event()
-    write_errs = []
+
+    holding, release = threading.Event(), threading.Event()
+    collided = threading.Event()
+    real_replace = os.replace
 
     def reader():
-        while not stop.is_set():
-            try:
-                with open(target, "rb") as f:
-                    f.read()
-                    time.sleep(0.001)      # 持有句柄时的消耗(读/解析)
-            except OSError:
-                pass                       # 写者正在替换: 句柄短暂失效属正常
-            time.sleep(0.05)               # 句柄关闭: 读者在两次读之间干别的
+        with open(target, "rb") as f:
+            f.read()
+            holding.set()
+            release.wait(10)           # 读者处理这份数据: 句柄一直开着
 
-    readers = [threading.Thread(target=reader, name="R%d" % i)
-               for i in range(2)]
-    for r in readers:
+    def watched_replace(src, dst):
+        try:
+            return real_replace(src, dst)
+        except PermissionError:
+            collided.set()             # 只观察, 不改行为
+            raise
+
+    monkeypatch.setattr(common.os, "replace", watched_replace)
+
+    for rnd in range(10):
+        holding.clear()
+        release.clear()
+        collided.clear()
+        r = threading.Thread(target=reader, name="R%d" % rnd)
         r.start()
-    try:
-        for i in range(300):
-            try:
-                common.atomic_write(target, json.dumps({"i": i}))
-            except Exception as exc:
-                write_errs.append((i, repr(exc)))
-    finally:
-        stop.set()
-        for r in readers:
-            r.join(10)
+        assert holding.wait(10), "第 %d 轮编排失败: 读者没打开目标文件" % rnd
 
-    assert write_errs == [], ("有读者时写失败 %d/300 轮(前 3): %r"
-                              % (len(write_errs), write_errs[:3]))
-    assert json.loads(target.read_text(encoding="utf-8"))["i"] == 299, \
-        "最后一轮的完整内容必须落地"
+        errs = []
+
+        def writer():
+            try:
+                common.atomic_write(target, json.dumps({"i": rnd}))
+            except Exception as exc:   # PermissionError(13) / WinError 5|32
+                errs.append(repr(exc))
+
+        w = threading.Thread(target=writer, name="W%d" % rnd)
+        w.start()
+        try:
+            assert collided.wait(10), (
+                "第 %d 轮编排失败: 写者第一次 replace 没撞上读者句柄 —— 本轮"
+                "没有制造出 EACCES, 断言等于没跑" % rnd)
+        finally:
+            release.set()              # 读者放手(在重试预算之内)
+        w.join(10)
+        r.join(10)
+
+        assert errs == [], ("第 %d 轮: 读者在预算内放手后写必须成功: %r"
+                            % (rnd, errs))
+        assert json.loads(target.read_text(encoding="utf-8"))["i"] == rnd
+    assert [q for q in tmp_path.iterdir() if q != target] == [], "不留任何残留"
