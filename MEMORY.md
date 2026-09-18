@@ -10,16 +10,17 @@
 **项目是什么**：`D:\cc-joesph` 是一套 A 股量化交易系统，代号 **prism**。核心链路：
 `数据采集 → 36 因子打分 → 选股 → 信号 → miniQMT 下单`。共 **6 个子项目 + 3 个底座**。
 
-**当前真实状态（2026-09-14 收盘后）**：
+**当前真实状态（2026-09-18 盘中）**：
 
 | 维度 | 状态 |
 |---|---|
-| 测试基线 | **做T侧 265 绿**：`python -m pytest tt_solo/tests tt_solo/dashboard/tests qmt_sync/tests tests -q --import-mode=importlib` = tt_solo 198 + dashboard 23 + qmt_sync 27 + 根 17。**`tt/` 已于 09-16 删除**（见「tt_solo 批次」节）→ 原六路径命令里的 `tt/tests` 换成 `tt_solo/tests tt_solo/dashboard/tests`（变七路径）。prism 473→486 等数字**不作基线**：09-16 晚有并发会话在改 `prism/backtest.py` 等，实测两次运行 2↔9 failed 波动 |
-| 模拟盘 | 运行中，但 09-08~09-13 有 5 个交易日空窗（守护进程停摆），账本仍 1,000,000 现金、**零持仓** |
+| 测试基线 | **七路径 1058 绿**（09-18 控制者亲测 `298d586`：`python -m pytest prism/tests prism_web/tests datasource/tests tt_solo/tests tt_solo/dashboard/tests qmt_sync/tests tests -q --import-mode=importlib --basetemp=D:/cc-joesph/pt_bt219` = `1058 passed, 25 warnings in 88.70s`；证据 `.superpowers/sdd/final-fix-verify-full-out.txt`）。做T侧单跑 265 绿（tt_solo 198 + dashboard 23 + qmt_sync 27 + 根 17）。**口径校正**：老记录里的「945/995」是 6 路径（漏 `tt_solo/dashboard/tests` 23 例），别再用 |
+| 模拟盘 | 守护**当前未运行**（09-17 23:38 起过一次 paper_daemon + prism_web，09-18 14:30 实测只剩一个回测进程）；账本仍 1,000,000 现金、**零持仓** |
 | 实盘（prism 主策略） | **未上线**。代码已通（`prism/live_daemon.py`），三步验收一步未做 |
 | 实盘（tt 做T策略） | **已接 miniQMT 外部直连**（09-14 晚决策，见「路线回退」节）。代码/测试/闸门就绪，**放行条需每日重写**，`dry_run` 默认仍 True，`--live` 才真报单 |
-| 真实账户 | 账号 **88869979**，总资产 **274,648.96**，4 只持仓（全部 `可卖==持仓` → **9/15 起可直接做T**） |
-| Git | **master 与 origin 同步**（09-14 晚已推 `49db972..46e8537`，7 个提交）；**push 前仍必须先问用户** |
+| 真实账户 | 账号 **88869979**；09-17 07:47 实读总资产 **271,808.12**、4 只持仓（全部 `可卖==持仓`，可做T） |
+| Git | 本地领先 origin：**09-17/18 回测复活批次 7 个提交（`5bd45c5`/`8cccbfd`/`e509dc2`/`3783878`/`173e36c`/`86c9110`/`298d586`）未推送**，等用户拍板；**push 前仍必须先问用户** |
+| QMT | 09-18 14:31 实测**离线**（`xtdata.connect()` 抛「无法连接xtquant服务」）→ 回测会走网络回退、慢/易卡；**跑长任务前先探一次** |
 
 **最容易踩的 5 个坑（血泪教训，务必先看）**：
 1. **Bash 工具在本机会随机挂掉**（`dirname/head/grep: command not found`）→ 立刻切 **PowerShell 工具**，把输出 `Out-File -Encoding utf8` 再 Read，别在 Bash 上重试。
@@ -37,10 +38,26 @@
 - **不要一味迎合**：有分歧直说，诚实评估优于顺从
 - **ponytail 约束延续**：最懒可行方案；每个子代理 dispatch 注入 ponytail 约束（阶梯：needs-to-exist→reuse→stdlib→one-line→minimal；绝不简化掉校验完整性/原子写/指针回落/default保护；`# ponytail:` 标记）
 - **默认工作方式**：superpowers SDD（子代理实现 + 独立子代理两阶段审查 + 台账记录），TDD 红绿循环
+- **子代理派单铁律**：① 不得改写已提交历史（不 amend/rebase/reset）② 只 `git add` 自己那批文件，绝不夹带（并发会话的改动、`Joesph_key.pem`、`.workbuddy/`）③ 不 push ④ 报告里凡不是自己跑出来的数字要标来源
 
-## 项目现状（截至 2026-09-15）
+## 项目现状（截至 2026-09-18）
 
 **prism**：A股量化系统。选股引擎（36 因子 / 3 策略 / JSON 策略文件）+ 回测 + Flask 网页 GUI（5000 端口）+ 模拟盘守护。Windows + Python 3.12 + QMT miniQMT（xtquant：`C:\Users\28037\AppData\Local\Programs\Python\Python312\Lib\site-packages`）+ **通达信 pytdx 1.72（同目录，09-05 装）**。
+
+- **回测全因子复活（09-16 起，spec/plan `docs/superpowers/{specs,plans}/2026-09-16-backtest-full-factor-revival*`）**：起因是用户质疑"回测结果这么差，真是我那 30 多个因子跑出来的吗"——取证结论**不是**（28 个评分因子只有 13 个命中过、15 个恒 0；门控 8 项只有 5 项在算）。五个任务的最终状态：
+  · **Task 1/2**（09-16/17，`0054c88..cb471bc`）：按日上下文注入 `day_feed(d)`（复活 N3/N4/N5/F1/F6/S2/S3）+ 日线 OHLCV 6 元组（复活 F5/Y3）+ `prism/bt_intraday.py` 1 分钟特征层（复活 F2；F3 走**已标注的分钟级代理**）。
+  · **Task 3**（09-17/18，`5bd45c5`+`8cccbfd`+`e509dc2`）：基本面注入（Y1/Y8 纯计算 + F7/Y6/Y7 按 `asof` 窗口；Y5/Y2 快照类**两侧剔除**防未来）+ `prism/fund_snapshot.py` 每日快照采集（守护 15:05 钩子，等涨停池刷新线程结束再采、空池报 WARNING 不装成功）+ 池条目补 `float_mv`。
+    · **用户 09-17 拍板（选项 A）：回测侧基本面默认只读缓存、不联网**，`--fetch-fund` 才联网；网页回测端点一律 offline。**离线模式绝不写缓存**（否则空/半截结果被 `if key in self._cache` 永久钉住，联网运行与每日快照再也补不上）。
+    · 动因是实测：东财单个未缓存 (股票,日) 基本面 = **41.8 秒**（Y6 公告端点 `np-anotice-stock` 独占 35.5s）→ 全窗口 254 日 × ~40 只 ≈ 9000 对 ≈ **100 小时**，一次 4 天窗口真数据回测跑了 27 分钟仍在爬（CPU 仅 16s）被强杀。改后同一命令 **4 秒**跑完。
+  · **Task 4**（09-18，`3783878`+`173e36c`）：借 Vibe-Trading(MIT) 三样 —— **¥5 最低佣金（买/卖双腿各收一次）**、100 股整手、买入侧跳过一字板（缺 `one_word` 记"未知"不造假）+ `prism/validation.py` 三函数原样移植（`monte_carlo_test`/`bootstrap_sharpe_ci`/`walk_forward_analysis`，报告 `validation` 默认跑、失败不影响返回）。顺手修两个既有 bug：`_report` 有交易分支漏 `data_notes`、`_simulate_equity` 卖出分支丢建仓成本调整。
+  · **Task 5**（09-18，`86c9110`）：报告新增 **`factor_hits`**（门控+评分因子命中率/评估数）+ `data_notes`（1m/基本面覆盖、F3 代理、Y2/Y5 缺失、流通股本近似）+ 网页回测页"因子存活率"表与数据说明区 + 全窗口验收对比 `docs/reports/回测全因子复活对比_20260916.md`。
+  · **全窗口验收（2025-09-01~2026-09-16，254 交易日，QMT 在线时跑的）**：`full_factor_v1` **1068 笔 / 收益 267.03% / 胜率 43.54% / sharpe 2.81**；`first_board_v04` **482 笔 / 227.08% / 54.77% / 3.73**。**评分因子 25/28 命中过、门控 8/8**；恒 0 三个：`Y2`/`Y5`（回测刻意剔除的快照类）+ `S2`（量价堆积密度：探针实测 16341 次评估里"60日≥20天放量"与"60日振幅≤10%"**零次同时成立**，属该宇宙里确实不触发，非数据缺失）。无 rate=1.0 常数因子。
+  · **同代码同窗口、只关数据供给（`--no-market-data`）**：`full_factor_v1` 254 天全被门控拦下 **0 笔**、v04 候选 17386 全被模型分过滤 **0 笔** —— 这就是"残废版数据供给"与复活后的对照。
+  · 测试：七路径 **1058 绿**；各任务均经独立子代理两阶段审查（Task 3 一次 Needs fixes→修复→复评 Approved；Task 4 一次 Needs fixes→修复→复评 Approved；Task 5 一次 Needs fixes + **全分支终审 With fixes**）。
+  · **终审抓到并修掉一个真 Critical（C1，`298d586`）**：`fund_snapshot` 与守护每日快照调 `compute_for_stock` **不传 `float_mv`** → 落下的缓存条目不含 Y1/Y8；之后回测带 `float_mv` 问同一天，被 `if key in self._cache` **短路** ⇒ **Y1/Y8 永久为 0**（真实缓存里 24 条同指纹）。而文档还教用户用 `fund_snapshot --date` 补历史 = **越照做 Y1/Y8 死得越多**。修法：命中缓存时就地补齐 Y1/Y8（offline 只返回不落盘，自动治愈已坏条目）。
+  · 同轮修掉：守护在 15:00~15:05 重启时仍可能整日空采（6h 节流挡住当日刷新）→ 空池强制刷新+重试一次；验收报告 1m 缺口归因改正（15 日 = 11 日保留边界 + **4 日 20260615~18 待补采**）；报告 §7.4 不可复现的"复跑逐字节相同"改成如实表述 + sha256 落档；`atomic_write` 的 tmp 名加 pid+线程 id（该缓存有多个写者，固定 tmp 名会互相踩）。
+  · **未闭环（需用户拍板或等 QMT 在线）**：①验收口径"≥26/28"字面为 **25/28**（Y2/Y5 是规格要求的设计剔除，S2 经探针取证本窗口确实不触发）②`S2`（量价堆积密度）是否调参/改定义 ③`20260615~18` 那 4 天 1m 补采 + 重跑验收（C1 修复后 20260910 的 3 个股票日会补齐，影响 ≤3 股日）④本批 7 个提交**未 push**。
+  · 遗留 Minor 清单在 `.superpowers/sdd/progress.md`（Task 3 八条、Task 4 八条、Task 5 六条、终审十三条中已修 12 条）。
 
 - **tt_solo 批次：做T策略抽成自包含项目 + 仪表盘重建**（09-16，spec/plan 见 `docs/superpowers/{specs,plans}/2026-09-16-tt-solo-extract*`）：`tt/`（24 文件/4362 行）+ `tt_web/` → **`tt_solo/`（唯一实现，旧目录已删）**。
   · **结构**：`tt_solo/ttcore/`（11 模块：`_vendor`/grid/risk/state/broker/market/config/engine/executor/daemon/arm_today）+ `tt_solo/dashboard/`（Flask + 前端，**:5011**）+ `tests/`（**221 绿**）+ `tools/compare_legacy.py`。
@@ -96,7 +113,7 @@
 
 - **判断文件编码只看原始字节或 `read` 工具，绝不信 `pwsh` 的 stdout**（09-16 血泪）：PowerShell 输出通道会把**正常的 UTF-8 中文显示成乱码**，据此曾误判「6 个 `.bat` + `tt_config.json` 是 GBK 需重写」，差点重写坏好文件。核验法：`[System.IO.File]::ReadAllBytes()` 看字节（`做T` = `e5 81 9a 54` = 正确 UTF-8），或用 `read` 工具。**`chcp 65001` + UTF-8 文件本就是正确配对**。
 - **本机没有 `rg`**（`where.exe rg` 找不到）→ 搜索用 PowerShell `Select-String`，或直接用 agent 的 grep/glob 工具。grep 的**锚定**写法（`^\s*(from|import)\s+...`）不会被散文误伤，裸词搜索会。
-- 测试：`$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests prism_web/tests datasource/tests tt_solo/tests tt_solo/dashboard/tests qmt_sync/tests tests -q --import-mode=importlib --basetemp=D:/cc-joesph/pt_btNN`（NN 递增，下一个 **300**；`tt/tests` 与 `tt_web/tests` **已于 09-16 删除**，换成 `tt_solo/tests tt_solo/dashboard/tests`。做T侧基线 **265 绿** = tt_solo 198 + dashboard 23 + qmt_sync 27 + 根 17）。**basetemp 用正斜杠**：Git Bash 里传 `D:\cc-joesph\pt_btNN` 会被转义拼歪，在仓库根生成 `cc-joesphpt_btNN` 垃圾目录（踩过一次，已删）。**注意沙箱**：后台运行的命令在沙箱内跑，会因①safe-delete 批量删除守卫（teardown 清理 700+ 临时文件、或命令里 `rm -rf` 多个目录，如 `rm -rf pt_tt01 pt_tt02` 直接报 `SAFE_DELETE_BULK_CONFIRM_REQUIRED`；改用 `python -c "shutil.rmtree(...,ignore_errors=True)"` 可绕）②网络被拦（market_data 相关断言失败）→ 表现为 21~22 failed/15~177 errors，**不是代码问题**；脱沙箱（escalation）即全绿。诊断时优先用非后台调用。
+- 测试：`$env:PYTHONIOENCODING='utf-8'; python -m pytest prism/tests prism_web/tests datasource/tests tt_solo/tests tt_solo/dashboard/tests qmt_sync/tests tests -q --import-mode=importlib --basetemp=D:/cc-joesph/pt_btNN`（NN 递增，**下一个 220**；`tt/tests` 与 `tt_web/tests` **已于 09-16 删除**，换成 `tt_solo/tests tt_solo/dashboard/tests`。**七路径基线 1058 绿**（09-18 实测 `298d586`，含 tt_solo 198 + dashboard 23 + qmt_sync 27 + 根 17；老记录「945/995」是 6 路径漏了 dashboard 23 例，已作废）。**basetemp 用正斜杠**：Git Bash 里传 `D:\cc-joesph\pt_btNN` 会被转义拼歪，在仓库根生成 `cc-joesphpt_btNN` 垃圾目录（踩过一次，已删）。**注意沙箱**：后台运行的命令在沙箱内跑，会因①safe-delete 批量删除守卫（teardown 清理 700+ 临时文件、或命令里 `rm -rf` 多个目录，如 `rm -rf pt_tt01 pt_tt02` 直接报 `SAFE_DELETE_BULK_CONFIRM_REQUIRED`；改用 `python -c "shutil.rmtree(...,ignore_errors=True)"` 可绕）②网络被拦（market_data 相关断言失败）→ 表现为 21~22 failed/15~177 errors，**不是代码问题**；脱沙箱（escalation）即全绿。诊断时优先用非后台调用。
 - **诊断技巧**：pytest 全量跑出现"整片同类失败"时，用 `@pytest.fixture`/hook 打印状态边界（如注册表 `len(reg.FACTORS)`）比逐个二分快得多；autouse fixture 实例化顺序可能导致"取快照晚于污染"这类隐蔽 bug
 - xtquant 直连探测：`from xtquant import xtdata; xtdata.connect()`（系统 python 即可）
 - tdx 自检：`python -m prism.tdx_source`（6 项：连接/个股日K/大盘指数/板块指数/快照/流通股本）
@@ -106,6 +123,10 @@
 - **分级写护栏**（09-15/16，d75b1b3+852c1be，为公网部署准备）：**判据唯一真相 = `shared.common.is_local_request(cf_ip, remote_addr)`**——请求头有 `CF-Connecting-IP`（只有 CF 边缘会注入）→ 远程档；无头且 remote_addr 为 loopback/RFC1918 → 本机档（**坑：cloudflared 在本机回环转发，直接看 remote_addr 会把隧道请求误判成本机**）。远程可：选股/新建策略/刷新涨停池+全部看板；远程禁（403「此操作仅限本机执行(交易闸门类)」）：prism_web 设默认策略/手填因子/模拟盘暂停恢复/绩效回填 + tt_web 做T急停/每日放行。`_LOCAL_ONLY` 按函数名集合（白名单方向：新增写路由默认可用）。将来切 CF Access 邮箱白名单只改 is_local_request 一个函数
 - **DSH × OpenCode Go（09-08）**：opencode.ai/zen/go 网关 09-05 起强制 `x-opencode-session` 头，缺失返 400 MissingSessionID（"Console Go"）；DSH 官方已知问题（discussion 5495 未修）。本机已修：`C:\Users\28037\.dsh\settings.yaml` → `llm-pi-ai.providers` 6 个 opencode 供应商补 `headers: { 'x-opencode-session': 'dsh-opencode-go-joesph' }`（备份 .bak-20260908；llm-pi-ai 适配器逐请求读配置，通常免重启）。**09-08 当天实测生效**（下一条消息即不再 400）。若 aux 路径仍 400 需动 deepseek-harness 仓库 llm-pi-ai 代码（重建 profile）
 - **DSH 接入 OpenCode Go 的 DeepSeek V4.1 Flash（09-15）**：官方 Go 文档确认该型号 **Go 专属**（Zen 端点表里没有），model ID `deepseek-v4.1-flash`，端点 `https://opencode.ai/zen/go/v1/chat/completions`（OpenAI 兼容）；线上实证 `GET https://opencode.ai/zen/go/v1/models` 返回该 id。**坑：只改 settings.yaml 会 fail-closed 报错**——DSH 内置 pi-ai 目录快照（08-24）没有这个型号，`resolveRouteModels` 里 `api = request.api ?? base?.api ?? routeApi` 全为 undefined（该路由目录同时含 anthropic-messages/openai-completions/openai-responses 三种协议 → `sharedCatalogApi` 返回 undefined），而 schema 的 `modelProfile` **不允许逐模型写 `api`**、路由级 `api` 又会把 minimax-m3/grok-4.5 一起改协议（不可行）。**修法两处**：① `…\pi-ai\dist\providers\data\opencode-go.json` 的 `openai-completions` 段补一条（照抄 deepseek-v4-flash 的 compat：`thinkingFormat:deepseek` / `maxTokensField:max_tokens` / `requiresReasoningContentOnAssistantMessages:true`；`.manifest.json` 只被读生成时间戳，**不校验哈希**）② `settings.yaml` 的 opencode-go models 列表加一条（备份 `.bak-20260915`）。**该 JSON 是进程启动静态 import → 必须重启 DSH 一次才生效**（settings 逐请求读，目录不是）。DSH 升级会覆盖 node_modules 补丁 → 需重打（新版目录通常已含该型号）
+- **DSH 调用变慢的实测归因（09-18）**：统计 **3450 次真实请求 / 14 个会话**（数据源 `.dsh/sessions/**/session.jsonl.zstd`；**多帧 zstd 必须用 `zstandard.stream_reader`**——同步或单帧解压只出第一帧，会把 1.9MB 的会话误判成空会话；每请求用量藏在 `assistant/chunk` 且 `chunk.type=="usage"`，`inputTokens`=新增未缓存、`cacheReadTokens`=命中缓存）。**结论：不是新模型、也不是接入的问题**——v4.1-flash(effort=max) TTFT 中位 **3.5s**，与旧 v4-flash(max) 4.0s 持平；v4-flash(high) 2.6s；glm-5.3-flash(max) **2.0s** 最快。真正的"慢"来自三处：
+  1. **网关偶发挂死**：一次请求**零字节挂 4850s（81 分钟）**，DSH `llm/retry`（策略含 EMPTY_RESPONSE/RATE_LIMIT/SERVER/TIMEOUT/TRANSPORT）重试后 6s 成功；当前会话另有 90s/30s/27s 流中断档。**5 分钟空闲看门狗（`streamIdleTimeoutMs` 默认 3e5）没兜住**（疑似只在拿到响应头后才开始计时，未证实）→ 兜底用路由级 **`timeoutMs`**（schema 有该字段；pi-ai 当 HTTP 总超时传给底层客户端，`openai-completions.js` L182）
+  2. **`reasoningEffort: max` 确实生效**（不是装饰）：`detectCompat` 对 deepseek/glm 自动置 `supportsReasoningEffort: true`（排除名单只有 grok/zai/moonshot/together/cloudflare/nvidia/ant-ling）→ DSH 真发 `reasoning_effort`。实测网关：glm-5.3-flash 给 max 思考 **1674 字符/18s**，不给该参数仅 **77 字符/6.5s**。复杂轮次生成 40-70s、推理块 100+ 是主观"慢"的主因
+  3. **上下文巨大**：单会话常见 **10-17 万 tokens**（有 60 万+），缓存命中约 99%（cached 137k vs 新增 570）→ 正常轮很快；**一旦未命中就要 20-150s**（实测同一 33.7k 提示：冷启动 19.6s / 命中后 2.1s）
 
 ## 因子管理惯例（2026-09-03 起）
 
@@ -391,10 +412,14 @@ prism/ 主引擎 → 写 JSON → D:/QMT_SIGNALS/real/pending/*.json
 ## 🟡 中优先（工程完整性）
 
 5. **`runtime/` 路径切换**：运行中的 :5000 服务需**重启一次**才用上新路径；根目录 `log/` 与 `.paper_account.json` 被老进程占用，重启后可删。
-6. **重复 web 进程**：`prism_web/app.py` 曾有两个实例（14248 占 5000 / 16604 冗余），启动器只查端口监听，双开可能漏网 → 建议改成按进程名查。
+6. **重复 web 进程**：`prism_web/app.py` 曾有两个实例（14248 占 5000 / 16604 冗余），启动器只查端口监听，双开可能漏网 → 建议改成按进程名查。（09-18 14:30 又见到一次双开）
 7. **守护断连不自动重启**（60×10s 后需人工）→ 考虑接 `ops/watchdog.py`。
 8. **`ops/watchdog.py` 服务清单**仍配着 legacy `strategy_web`（端口 5000 实际已被 prism_web 占用）。
-9. **`git push`**：✅ **已完成**（09-14 晚，`49db972..46e8537`，7 个提交全部推上 GitHub）。下次 push 前仍必须问用户。
+9. **`git push`**：**回测复活批次 7 个提交（`5bd45c5`/`8cccbfd`/`e509dc2`/`3783878`/`173e36c`/`86c9110`/`298d586`）尚未推送**，等用户拍板；**push 前必须先问**。
+10. **回测复活批次的遗留 Minor**（`.superpowers/sdd/progress.md` 有全文，均非阻塞）：Task 3 八条（网络类覆盖只按"天"计 / `ZT_REFRESH_WAIT` 超时分支无测试 / 守护空池告警在周中节假日误报 / `--date ""` 仍 exit 0 / Y1/Y8 文案缺"缺 float_mv"归因 等）、Task 4 八条（买入腿盖戳与兜底分支不自洽 / 盖戳非幂等 / `--oos` 付双份 validation 载荷 等）。
+11. **`S2`（量价堆积密度）在本窗口零命中**：探针实测 16341 次评估里"60日≥20天放量"与"60日振幅≤10%"**从未同时成立** → 不是数据缺失，是**因子条件对该宇宙近乎不可达**。**等用户拍板**：调参（属策略变更）/ 承认它只适合别的场景。同时验收口径"28 个评分因子 ≥26 命中"字面为 **25/28**（Y2/Y5 为规格要求的设计剔除）→ 也需用户拍板分母口径。
+12. **1m 特征缺口**：`20260615~18` **4 个交易日是采集缺口（可补）** + `2025-09-01~09-15` 11 日早于 QMT 保留边界（不可得，那段 F2/F3 恒 0 已披露）。补采命令（需 QMT 在线）：`python -m backtest.cli --start 20260615 --end 20260618 --build-intraday`；补完应重跑全窗口验收（C1 修复后 `20260910` 的 3 个股票日 Y1/Y8 会补齐，影响 ≤3 股日）。
+13. **网页交易页需重启才见新功能**：`factor_hits` 表与数据说明区（09-18）要**重启 prism_web** 才生效。上线面最小自检三件：①日志出现"基本面快照采集完成"②`fundamental_cache.json` 当日新条目**含 Y1/Y8**③`bt_intraday` 当日条目含 `one_word` 键。
 
 ## 🟢 低优先（历史遗留 / 数据源）
 
@@ -411,21 +436,26 @@ prism/ 主引擎 → 写 JSON → D:/QMT_SIGNALS/real/pending/*.json
 # 七、测试与验证速查
 
 ```bash
-# 全量测试（基线 887 绿，六路径，脱沙箱跑才准）
-python -m pytest prism/tests prism_web/tests strategy_web/tests tests tt/tests qmt_sync/tests -q \
+# 全量测试（基线 1058 绿，七路径；测试离线可跑，脱沙箱更准）
+python -m pytest prism/tests prism_web/tests datasource/tests tt_solo/tests tt_solo/dashboard/tests qmt_sync/tests tests -q \
     --import-mode=importlib --basetemp=D:/cc-joesph/pt_btNNN
-# NN 递增，下一个 203
+# NNN 递增，下一个 220
 
-# 只跑 tt（基线 140 绿）
-python -m pytest tt/tests -q --import-mode=importlib --basetemp=D:/cc-joesph/pt_ttNN
+# 只跑做T侧（基线 265 绿 = tt_solo 198 + dashboard 23 + qmt_sync 27 + 根 17）
+python -m pytest tt_solo/tests tt_solo/dashboard/tests qmt_sync/tests tests -q --import-mode=importlib --basetemp=D:/cc-joesph/pt_ttNN
 
-# 做T直连 · 干跑（零副作用）
-python -m tt.daemon --direct --once
+# 回测（QMT 在线才快；基本面默认只读缓存不联网，联网取数须显式 --fetch-fund）
+python -m backtest.cli --start 20250901 --end 20260916 --strategy full_factor_v1
+python -m backtest.cli --start 20250901 --end 20260916 --strategy full_factor_v1 --no-market-data  # 近似"旧残废数据供给"对照(0 笔)
+python -m backtest.cli --start 20250901 --end 20260916 --build-intraday   # 1m 特征采集(会下载；逐月跑更稳)
+
+# 做T直连 · 干跑（零副作用；**必须在 tt_solo 目录下跑**）
+cd tt_solo; python -m ttcore.daemon --direct --once
 
 # 做T直连 · 放行/查状态/急停
-python tt/arm_today.py            # 今日放行
-python tt/arm_today.py --status   # 查状态(退出码 0/1)
-python tt/arm_today.py --pause    # 急停
+python tt_solo/ttcore/arm_today.py            # 今日放行
+python tt_solo/ttcore/arm_today.py --status   # 查状态(退出码 0/1)
+python tt_solo/ttcore/arm_today.py --pause    # 急停
 
 # 实盘接入前自检（只读，绝不下单）
 python -m qmt.tools.live_check          # 31 通过 / 0 阻断
@@ -458,6 +488,14 @@ python -m prism.live_daemon --once
 | 10 | 中文路径 + Chrome 转 PDF | 生成失败或乱码 | 先复制成 ASCII 名操作，完成后再 `mv` 回中文名 |
 | 11 | **xtquant 版本不匹配** | py3.13 报 `cannot import name 'xtpythonclient'` | 用 QMT 自带 `D:/QMT/bin.x64/pythonw.exe`（3.6.8） |
 | 12 | 因子里 `ctx.get(x) or y` | 遇 DataFrame 真值测试抛 `ValueError` 被 except 吞成恒 0 | 显式判 None，不要用 `or` 兜底 |
+| 13 | **QMT `download_history_data2` 无超时会挂死** | 全窗口 1m 采集跑到 4700/14890 后 25 分钟零进展（CPU 平、socket 连在 QMT 上）；`--build-intraday` **只在最后按月落盘**，一挂全丢 | **逐月/逐旬独立进程 + 硬超时看门狗**（脚本范例 `.superpowers/sdd/intraday-months.ps1`；202604 整月两次 300s 超时，拆旬才过）。补采后 1m 覆盖 = **15832 (股,日)/239 天**（2025-09-16 起，早于此 QMT 无 1m 数据） |
+| 14 | **东财基本面单股 41.8s**（Y6 公告端点 35.5s） | 回测注入真 feed → 4 天窗口 27 分钟仍在爬；全窗口 ≈100 小时 | 回测侧**默认只读缓存不联网**（09-17 用户拍板）；历史用 `python -m prism.fund_snapshot --date YYYYMMDD` 逐日回填 |
+| 15 | **`requests` 的 timeout 不等于"总时长上限"** | 标量 timeout 同时管 connect 与 read，但**不覆盖 DNS 解析**，且 read timeout 是"每次 socket 读"→ 服务端慢速分片可远超 5s（实测 35.5s 全在一个端点） | 别把"设了 timeout"当"不会挂"；对外部取数要么加总时长看门狗，要么默认离线 |
+| 16 | **报告里的"覆盖率"可能是假覆盖** | 修复前 `data_notes` 写「基本面: 个股日覆盖 17296/17296」，而缓存实际只覆盖 26 天（原因：Y1/Y8 纯计算只要当日有 `float_mv` 就有值，被误计成"已覆盖"） | 计数要**按类拆**（网络类 vs 纯计算），披露要**点名真因**（"未采集的日子为 0"）；审查时拿真实产物对账，别信自报 |
+| 17 | **子代理擅自改写已提交历史** | Task 5 实现者为了"提交信息合规"把 `207797c`+`fe3aafe` **压成新提交 `86c9110`** → 前两个变悬空对象、审查包与台账里的 SHA 全部失效（本次代码逐字节相同，侥幸无损） | 派单时明写"**不得改写已提交历史**（不 amend/rebase/reset）"；提交信息不合就追加一次提交或先问控制者 |
+| 18 | **QMT 连续跑几小时后本地读盘会劣化** | 09-18 00:21 后日线读取从 ~20ms/只 变成 2.0→4.5s/只、多线程无加速（xtdata 串行化）；一次复跑 45 分钟仍卡在 K 线预取 | 长回测**分段跑**；跑前先探一次单只耗时；QMT 离线时每个代码还要付 ~2s 连接超时（5 日池 185 只 = 378 秒，看着像卡死） |
+| 19 | **派生量塞进"按日缓存"会被缓存短路永久钉死** | Y1/Y8 是 `float_mv` 的纯函数，但快照/守护调 `compute_for_stock` **不传 `float_mv`** → 缓存条目缺 Y1/Y8；`if key in self._cache: return` 让之后带 `float_mv` 的查询**永远拿不到**（真实缓存 24 条中招） | ①缓存命中分支**就地补齐**可派生因子（本批已修）②给缓存写者列清单：同一 key 的不同调用方必须传齐参数，否则先落者定生死 |
+| 20 | **`shared.common.atomic_write` 的 tmp 名是固定的**（`path+".tmp"`） | 同一文件有多个写者（守护快照线程 / 手动 CLI / 实盘选股器）时互相踩 tmp → `os.replace` 落地坏 JSON → `_load_cache` **静默当 `{}`**（历史全丢） | 已修为 tmp 名带 pid+线程 id（`298d586`）；其他自己写原子写的脚本也照此 |
 
 **Chrome 转 PDF 配方**（可复用）：给 HTML 加 `@page{size:A4}` + `@media print{ .card,table,tr{break-inside:avoid} }` → Chrome `--headless=new --print-to-pdf` → 校验 `/BaseFont` 含 `MicrosoftYaHei`。
 
