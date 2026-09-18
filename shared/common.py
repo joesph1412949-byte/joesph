@@ -14,6 +14,7 @@ UTF-8 and declares so), but comments must stay ASCII to avoid confusion.
 import logging
 import logging.handlers
 import os
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -120,10 +121,18 @@ def atomic_write(path, text):
     A crash mid-write must never leave a half-written ledger/state file
     (readers of paper/live state treat a truncated file as corrupt).
     The fsync is what makes this survive a power loss, not just a process
-    crash - tt/ carried the stronger variant, so it won here (2026-09-15)."""
+    crash - tt/ carried the stronger variant, so it won here (2026-09-15).
+
+    The tmp name carries pid + thread id (M11, 2026-09-18). A fixed
+    `path + ".tmp"` is unsafe once one file has several writers in the
+    same process (fundamental cache: daemon snapshot thread + manual CLI
+    + live picker): the later writer truncates/steals the earlier one's
+    tmp, so the earlier `os.replace` publishes the WRONG text (or raises
+    FileNotFoundError). Either way the cache can land corrupt - and
+    FundamentalFeed._load_cache silently treats a corrupt file as {}."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = Path(str(path) + ".tmp")
+    tmp = Path("%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident()))
     with open(tmp, "w", encoding="utf-8") as fp:
         fp.write(text)
         fp.flush()

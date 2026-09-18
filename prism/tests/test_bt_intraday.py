@@ -15,6 +15,7 @@
   ⑥ build_day_feed(use_intraday=True): 从特征缓存合成 stock[code] 的
      tick/sealed/bt_seal_ratio; 缓存缺失静默降级; **绝不触发下载**(网页安全)
   ⑦ 报告 data_notes: day_feed 携带的覆盖说明进回测报告
+  ⑧ M6: 1m 说明写明"缺 one_word → 不拦(未知), 计入 filter_stats.one_word_unknown"
 
 全离线: 不调 QMT/网络(真 QMT 调用只在 bt_intraday 的下载函数里)。
 """
@@ -488,3 +489,21 @@ def test_report_includes_data_notes_from_feed():
     # 零交易报告(门关)也带 data_notes 键
     rep3 = bt.run(DAY, date(2026, 7, 8), day_feed=lambda d: None)
     assert rep3["data_notes"] == [] and rep3["trades"] == 0
+
+
+# ---------------- ⑧ M6: 1m 说明点明 one_word 未知的处置 ----------------
+
+def test_intra_note_states_one_word_unknown_bucket():
+    """M6: 1m 覆盖说明要写明"缺 one_word → 买入不拦(未知)"及其计数去处。
+
+    否则读者看到 `filter_stats.one_word_unknown>0` 只能靠翻代码才懂:
+    缺字段 ≠ 买得到, 只是不拦(宁可未知也不拦错)。
+    """
+    notes = []
+    cli._refresh_intra_note(notes, {"got": 1, "asked": 2})
+    n = notes[0]
+    assert "覆盖 1/2" in n, "原有覆盖计数必须保留"
+    assert "one_word" in n and "one_word_unknown" in n, \
+        "必须点明计数去处(报告 filter_stats.one_word_unknown)"
+    assert "不拦" in n and "未知" in n, "必须说明处置: 未知 → 不拦"
+

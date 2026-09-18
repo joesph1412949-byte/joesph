@@ -276,3 +276,15 @@ def test_cli_no_validate_flag_passes_validate_false(monkeypatch, tmp_path):
     rc2, cap2 = _cli_main(monkeypatch, tmp_path, base)
     assert rc2 == 0
     assert cap2["validate"] is True          # 默认仍跑(规格: 可选、默认跑)
+
+
+def test_cli_no_validate_help_states_real_payload_size(monkeypatch, capsys):
+    """M9: `--no-validate` 帮助文案不许夸大 —— 实测 validation=134KB(整份 384KB),
+    不是"MB 级"(旧文案把"关闭开关的理由"建立在错误量级上)。"""
+    monkeypatch.setattr(sys, "argv", ["backtest.cli", "--help"])
+    with pytest.raises(SystemExit) as e:
+        cli.main()
+    assert e.value.code == 0
+    out = capsys.readouterr().out
+    assert "数百 KB" in out, "按实测量级表述"
+    assert "MB 级" not in out, "实测 134KB, 不许写成 MB 级"

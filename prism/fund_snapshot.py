@@ -121,6 +121,9 @@ def main(argv=None):
     M1: --date 先解析/校验(非法或未来 → exit 2)再解析代码表 —— 旧实现先取
     default_codes, 而它把 _parse_date 的 ValueError 吞成 [] → 非法日期被误报成
     "索引无该日数据"并 exit 0。
+    M2(2026-09-18): 判空必须用 `is not None` —— `if args.date` 对 `--date ""`
+    为假 → 跳过校验 → default_codes("") 又把 ValueError 吞成 [] → 非法输入
+    exit 0(不带 --codes 时正是这条被吞掉的路径)。
     """
     ap = argparse.ArgumentParser(
         description="每日基本面快照采集(Y2/Y5, 规格 §7): 对当日涨停池逐只调 "
@@ -130,7 +133,7 @@ def main(argv=None):
     ap.add_argument("--codes", nargs="+", default=None,
                     help="代码表(缺省=快照基准日的涨停池, 读本地 zt 索引)")
     args = ap.parse_args(argv)
-    if args.date:
+    if args.date is not None:
         try:
             day = _parse_date(args.date)
             if day > _today():

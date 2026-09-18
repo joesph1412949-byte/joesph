@@ -580,6 +580,9 @@ def _apply_intraday(payload, iso, stats):
 # 基本面因子的两类口径(I1 审查修复): 网络类只在"该日已采集"才有值(按天计覆盖);
 # Y1/Y8 由当日流通市值纯计算, 与缓存覆盖无关 —— 两类必须分开统计, 否则
 # "一天都没采过"的报告会写成满覆盖。
+# M5: S5(融资余额, datasource/fundamental._financing)当前恒返回 None(fail-open,
+# 保持手填), feed 侧算不出值 → 不计入网络类覆盖。若将来 S5 真取到数, 必须把它
+# 加进来(当前无消费方读 S5 的覆盖, 所以现在不加)。
 _FUND_NET_KEYS = frozenset(("F7", "Y6", "Y7"))
 _FUND_CALC_KEYS = frozenset(("Y1", "Y8"))
 
@@ -635,9 +638,9 @@ def _refresh_fund_note(notes, stats):
 
     I1(审查修复): 覆盖**按类拆开** —— F7/Y6/Y7 是网络类, 只有"该日已采集"
     (缓存命中)才有值, 故按**天**计; Y1/Y8 由当日流通市值纯计算, 与缓存覆盖
-    无关, 单独说明。旧口径把"只有 Y1/Y8"的股票日也算成已覆盖 → "一天都没
-    采过"的报告写"个股日覆盖 181/181", 且把 0 归因于"网络失败/缺 float_mv",
-    真因其实是**该日未采集**。
+    无关(命中缓存但条目缺纯计算值时由 feed 就地补齐, C1), 单独说明。旧口径把
+    "只有 Y1/Y8"的股票日也算成已覆盖 → "一天都没采过"的报告写"个股日覆盖
+    181/181", 且把 0 归因于"网络失败/缺 float_mv", 真因其实是**该日未采集**。
     回测默认**只读缓存不联网**(2026-09-17 用户拍板): 东财单股取数实测 40s+
     (Y6 公告端点 35.5s), 全窗口 254 日 ≈100 小时不可行 → 未缓存的日子直接
     fail-open 0, 历史用 fund_snapshot 逐日回填。
@@ -645,11 +648,13 @@ def _refresh_fund_note(notes, stats):
     mode = ("本次已联网取数(慢)" if stats.get("fetch")
             else "回测默认只读基本面缓存不联网(联网取数需显式 --fetch-fund)")
     note = ("基本面: F7/Y6/Y7 覆盖 %d/%d 天(网络类只在\"已采集日\"有值 —— "
-            "未采集的日子为 0; %s; 补历史: "
+            "未采集的日子为 0; 网络类 %d/%d 股日; %s; 补历史: "
             "python -m prism.fund_snapshot --date YYYYMMDD); "
-            "Y1/Y8 由当日流通市值纯计算, 不受缓存覆盖影响(个股日 %d/%d); "
+            "Y1/Y8 由当日 float_mv 纯计算(缺 float_mv 时为 0; 命中缓存时若缺"
+            "纯计算值会就地补齐)(个股日 %d/%d); "
             "快照类 Y5/Y2 回测剔除防未来"
-            % (stats.get("net_days", 0), stats.get("days", 0), mode,
+            % (stats.get("net_days", 0), stats.get("days", 0),
+               stats.get("net_got", 0), stats["asked"], mode,
                stats.get("calc_got", 0), stats["asked"]))
     for i, x in enumerate(notes):
         if x.startswith("基本面: "):
@@ -659,8 +664,14 @@ def _refresh_fund_note(notes, stats):
 
 
 def _refresh_intra_note(notes, stats):
-    """覆盖说明(单条, 随回放滚动更新) → run() 收进报告 data_notes。"""
+    """覆盖说明(单条, 随回放滚动更新) → run() 收进报告 data_notes。
+
+    M6: 补一句 one_word 缺失时的处置 —— 缓存缺 `one_word` 键 = **未知**,
+    不压成 False(= 已知买得到), 买入侧不拦但记数(报告
+    `filter_stats.one_word_unknown`)。否则读者看到那个计数只能翻代码。
+    """
     note = ("1m特征: 个股日覆盖 %d/%d (缓存缺失静默降级 → F2/F3 fail-open 0; "
+            "缺 one_word 时买入不拦(未知), 计入 filter_stats.one_word_unknown; "
             "早于 2025-09-15 无 1m 数据。补采集: "
             "python -m backtest.cli --build-intraday)"
             % (stats["got"], stats["asked"]))
@@ -913,7 +924,7 @@ def main():
                     help="不跑统计验证(蒙特卡洛/bootstrap/滚动前推)。默认跑"
                          "(规格 §6: 可选、默认跑) —— 但 validation 自带 "
                          "sharpe_samples(1000+1000 个数)+ equity_paths(≤30×400), "
-                         "长窗口会把 stdout 撑到 MB 级, 只关心净值时用本开关")
+                         "长窗口会把 stdout 撑到数百 KB, 只关心净值时用本开关")
     args = ap.parse_args()
 
     start = _parse_date(args.start)

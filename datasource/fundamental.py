@@ -117,6 +117,44 @@ class FundamentalFeed:
         """按基准日分日缓存: 同一只股在不同 asof 下是不同的数据快照。"""
         return "%s:%s" % (_ref_key(self._ref(asof)), code)
 
+    def _complete_calc_factors(self, key, entry, float_mv):
+        """缓存命中时补齐纯计算因子 Y1/Y8(C1 修复, 2026-09-18)。
+
+        机制: 快照采集(`prism.fund_snapshot --date` / 守护每日钩子)调
+        `compute_for_stock(code[, asof=…])` **不传 float_mv**(快照的目标是
+        Y2/Y5 这类无历史可回补的接口值 + F7/Y6/Y7 的 asof 当日值), 而 Y1/Y8
+        是 float_mv 的**纯函数** → 落下的 `YYYYMMDD:code` 条目不含 Y1/Y8;
+        之后回测带当日 float_mv 来问同一天, 被开头 `if key in self._cache:
+        return` 短路 → **Y1/Y8 永远补不回来**(该 (股,日) 被钉成 0, 而数据说明
+        却宣称"Y1/Y8 由当日流通市值纯计算, 不受缓存覆盖影响" —— 假话)。
+
+        命中时若 `float_mv` 为真且条目缺 Y1/Y8 → 就地算出并合并进**返回副本**:
+          - `offline=True`: 只返回, **绝不落盘**(离线不写缓存的铁律不变);
+          - `offline=False`: 补齐结果原子写回(下次命中即自足, 不必重算)。
+        已有该因子时**不动它**(缓存是 append-only 的事实记录, 不许被重算覆盖);
+        `float_mv` 为假(缺股本)时什么都不做 —— 无从算起就不猜。
+        """
+        out = dict(entry)
+        if not float_mv:
+            return out
+        added = False
+        for name, fn in (("Y1", self._small_cap), ("Y8", self._mid_cap)):
+            if name in out:
+                continue
+            try:
+                res = fn(float_mv)
+            except Exception as e:   # 非数值 float_mv 等 → 保持缺省, 不崩
+                logger.warning("东财因子 %s(%s) 命中缓存时补齐失败: %r",
+                               name, key, e)
+                continue
+            if res is not None:
+                out[name] = res
+                added = True
+        if added and not self.offline:
+            self._cache[key] = dict(out)
+            self._save_cache()
+        return out
+
     def _datacenter(self, report_name, filter_str):
         """datacenter-web 通用请求 → result.data 列表; 失败抛异常。"""
         resp = self.http_get(
@@ -367,10 +405,12 @@ class FundamentalFeed:
         未来数据, 且会把今天的值错记成那天的历史(污染 Y2/Y5 每日快照积累,
         规格 §7); 窗口类(Y6/Y7/F7)按 asof 正常计算。
         offline=True(回测侧, 2026-09-17 拍板): 只读缓存 + 只算 Y1/Y8,
-        **零网络、零落盘**(见类 docstring)。"""
+        **零网络、零落盘**(见类 docstring)。
+        命中缓存时按当日 float_mv 补齐缺的 Y1/Y8(C1): 快照条目不带 float_mv,
+        不补就会被短路钉成 0(见 `_complete_calc_factors`)。"""
         key = self._cache_key(code, asof)
         if key in self._cache:
-            return dict(self._cache[key])
+            return self._complete_calc_factors(key, self._cache[key], float_mv)
         if self.offline:
             # 只算纯计算因子, 不请求、不写缓存(离线结果不许钉进历史)
             out = {}

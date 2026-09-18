@@ -507,7 +507,9 @@ function renderBacktest(r) {
       .map(n => `<div>· ${n}</div>`).join("");
     const why = `<div>· 门控未过关 ${fs.gate_blocked_days || 0} 天 · 候选 ${fs.candidates || 0} 只`
       + ` · 被"模型分不足"过滤 ${fs.filtered_min_model || 0} 只`
-      + ` · 被板块分过滤 ${fs.filtered_sector || 0} 只</div>`;
+      + ` · 被板块分过滤 ${fs.filtered_sector || 0} 只`
+      + ` · 被一字板过滤 ${fs.filtered_one_word || 0} 只`
+      + ` · 一字板未知(不拦, 缺 1m 特征) ${fs.one_word_unknown || 0} 只</div>`;
     const warn = (r && r.market_data === false)
       ? `<div style="color:#e67e22">· ⚠ 市场数据未注入(板块/全球指数缓存为空): N6-N8/F8/F9/SEC 共 10 个因子失效, 结果不可用于评估它们</div>`
       : "";

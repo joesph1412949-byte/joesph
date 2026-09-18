@@ -16,6 +16,10 @@
   ⑩ 覆盖口径(I1 审查修复): F7/Y6/Y7(网络类)只在"已采集日"有值, 按天计覆盖;
      Y1/Y8(纯计算)不算覆盖 —— 缓存全空时必须是 0/M, 不许写成满覆盖
   ⑪ 守护钩子 I3: 采集前等涨停池刷新线程结束(防空采); 空池 → WARNING + skipped
+  ⑫ C1: 快照(不带 float_mv)落下的条目缺 Y1/Y8 → 命中缓存时按当日 float_mv
+     就地补齐(offline 只进返回副本; 非 offline 原子写回); 已有/无 float_mv 不写
+  ⑬ I3 补强: 空池 → 无视 6h 节流强制刷新索引 + 重试一次(仍空才告警);
+     刷新线程卡死 → 等 ZT_REFRESH_WAIT 秒后照常采集(M3)
 
 全离线: FundamentalFeed 经 http_get 注入罐装 JSON; 守护注入假钩子。
 """
@@ -328,6 +332,23 @@ def test_main_empty_pool_reports_zero_and_warns(tmp_path, monkeypatch, capsys):
         "空池输出必须与真采到 0 只有区分度"
 
 
+def test_main_empty_date_string_exits_2(tmp_path, monkeypatch, capsys):
+    """M2: `--date ""` 必须报错 exit 2。
+
+    旧实现 `if args.date:` —— 空串为假 → 跳过日期校验 → `default_codes("")`
+    把 `_parse_date` 的 ValueError 吞成 [] → 打印"索引无该日数据"并 **exit 0**,
+    非法输入被静默放过(带 --codes 时反而会因为 snapshot_once 里再解析一次而
+    exit 2 —— 所以本测试**不带** --codes, 走的正是被吞掉的那条路径)。
+    """
+    monkeypatch.setattr(fund_snapshot, "FundamentalFeed",
+                        lambda: _feed(tmp_path, _base_routes()))
+    rc = fund_snapshot.main(["--date", ""])
+    assert rc == 2, "空串日期是非法输入, 不许 exit 0"
+    err = capsys.readouterr().err
+    assert "日期格式" in err, "必须报真因(日期格式非法)"
+    assert "索引无该日数据" not in err, "不许误报成索引缺数据"
+
+
 def test_main_bad_date_exits_nonzero(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(fund_snapshot, "FundamentalFeed",
                         lambda: _feed(tmp_path, _base_routes()))
@@ -593,7 +614,9 @@ def test_fund_note_offline_uncached_network_coverage_is_zero(monkeypatch,
     assert "未采集" in n, "必须点名真因: 该日未采集"
     assert "网络失败" not in n, "不许再把 0 归因于网络失败"
     assert "个股日覆盖 4/4" not in n, "旧口径的假覆盖结论必须消失"
-    assert "Y1/Y8" in n and "不受缓存覆盖影响" in n, "Y1/Y8 要单独说明(与缓存无关)"
+    assert "Y1/Y8" in n and "纯计算" in n, "Y1/Y8 要单独说明(与缓存覆盖无关)"
+    assert "就地补齐" in n, \
+        "C1: 命中缓存时会补齐缺的纯计算值 —— 不许再宣称\"不受缓存覆盖影响\""
 
 
 def test_fund_note_offline_cached_day_counts_network_by_day(monkeypatch,
@@ -611,8 +634,28 @@ def test_fund_note_offline_cached_day_counts_network_by_day(monkeypatch,
     assert "F7/Y6/Y7 覆盖 1/3 天" in n, \
         "只有第 2 天采过 → 1/3(同日两只也只算 1 天)"
     st = feed(_CAL[1])["stock"]["600000.SH"]
-    assert set(st["fund"]) == {"Y7"}, "已缓存日: 网络类照常注入(Y5/Y2 剔除)"
+    # C1 后: 命中缓存的条目缺 Y1/Y8 而当日 float_mv 在 → 就地补齐(不进缓存:
+    # 本 feed 是 offline)。Y5/Y2 仍按回测口径剔除。
+    assert set(st["fund"]) == {"Y7", "Y1", "Y8"}, \
+        "已缓存日: 网络类照常注入(Y5/Y2 剔除) + C1 补齐的纯计算类"
 
+
+def test_fund_note_reports_network_stock_days(monkeypatch, tmp_path):
+    """M1: `stats["net_got"]` 不再是"只写不读"的死状态 —— 网络类**股日**计数进说明。
+
+    按天覆盖(1/3 天)看不出"这一天采到了几只", 股日计数补上这一层。
+    """
+    from datasource.fundamental import FundamentalFeed
+    cli = _stub_day_io(monkeypatch, {"600000.SH": 3.0e9, "000001.SZ": 3.0e9})
+    cache = _seed_cache(tmp_path, _CAL[1], ["600000.SH", "000001.SZ"])
+    feed = cli.build_day_feed(
+        _CAL[0], _CAL[2],
+        fund_feed=FundamentalFeed(cache_path=cache, offline=True))
+    for d in _CAL:
+        feed(d)
+    n = [x for x in feed.data_notes if x.startswith("基本面")][0]
+    assert "网络类 2/3 股日" in n, \
+        "第 2 天两只都命中 → 2/3 股日(asked=3: 第 1 天只有 1 根K线不进 stock)"
 
 def test_fund_note_states_offline_and_backfill_cmd(monkeypatch, tmp_path):
     """data_notes 新增说明: 覆盖天数 + "默认只读缓存不联网" + 逐日回填命令。"""
@@ -820,3 +863,177 @@ def test_daemon_default_fund_snapshot_fn_exists(tmp_path):
     acc.init_account(created="2026-09-01")
     d = PaperDaemon(acc)
     assert callable(d.fund_snapshot_fn)
+
+
+# ---------------- ⑫ C1: 缓存命中时补齐纯计算因子(Y1/Y8) ----------------
+
+_SNAP_DAY = "20260915"
+
+
+def test_snapshot_without_float_mv_then_hit_with_float_mv_gains_y1_y8(tmp_path):
+    """C1: 快照回填的历史日条目**不含** Y1/Y8(快照不传 float_mv); 之后回测带
+    当日 float_mv 以 asof=该日取数, **命中缓存也必须补齐** Y1/Y8。
+
+    否则 `if key in self._cache: return` 短路 → 该 (股,日) 的 Y1/Y8 被永久钉成 0
+    (回测报告写 0, 数据说明却宣称"Y1/Y8 不受缓存覆盖影响" —— 假话)。
+    """
+    feed = _feed(tmp_path, _base_routes())
+    res = fund_snapshot.snapshot_once(["000001.SZ"], date=_SNAP_DAY, feed=feed)
+    assert res == {"saved": 1, "failed": 0}
+    entry = _read_cache(tmp_path)["%s:000001.SZ" % _SNAP_DAY]
+    assert "Y1" not in entry and "Y8" not in entry, \
+        "快照不带 float_mv → 条目里没有纯计算值(这就是 C1 的起点)"
+    assert "Y6" in entry and "Y7" in entry, "网络类照常落下"
+
+    hit = _feed(tmp_path, _base_routes(), offline=True).compute_for_stock(
+        "000001.SZ", float_mv=50e8, asof=date(2026, 9, 15))
+    assert {"Y1", "Y8"} <= set(hit), "命中缓存 + 有 float_mv → Y1/Y8 必须补齐"
+    assert hit["Y1"]["score"] == 1 and hit["Y8"]["score"] == 1, \
+        "50亿 流通市值: 小市值命中 + 中市值启动命中"
+    assert hit["Y6"] == entry["Y6"], "缓存里的网络因子原样返回"
+
+
+def test_offline_hit_completion_not_persisted(tmp_path):
+    """C1: offline 命中时补齐只进**返回副本** —— 绝不落盘(离线不写缓存不变)。"""
+    feed = _feed(tmp_path, _base_routes())
+    fund_snapshot.snapshot_once(["000001.SZ"], date=_SNAP_DAY, feed=feed)
+    p = tmp_path / "fund_cache.json"
+    raw = p.read_text(encoding="utf-8")
+
+    out = _feed(tmp_path, _base_routes(), offline=True).compute_for_stock(
+        "000001.SZ", float_mv=50e8, asof=date(2026, 9, 15))
+    assert {"Y1", "Y8"} <= set(out)
+    assert p.read_text(encoding="utf-8") == raw, "offline 只读不写"
+
+
+def test_online_hit_completion_written_back(tmp_path):
+    """C1: 非 offline 命中时补齐结果原子写回 → 条目自此自足(下次不带 float_mv 也有)。"""
+    feed = _feed(tmp_path, _base_routes())
+    fund_snapshot.snapshot_once(["000001.SZ"], date=_SNAP_DAY, feed=feed)
+
+    out = _feed(tmp_path, _base_routes()).compute_for_stock(
+        "000001.SZ", float_mv=50e8, asof=date(2026, 9, 15))
+    assert {"Y1", "Y8"} <= set(out)
+    entry = _read_cache(tmp_path)["%s:000001.SZ" % _SNAP_DAY]
+    assert {"Y1", "Y8"} <= set(entry), "补齐结果必须写回(否则每次都要重算)"
+    assert entry["Y6"] == out["Y6"], "写回不许丢/改既有网络因子"
+    # 已补齐的条目: 之后不带 float_mv 也能拿到 Y1/Y8
+    assert {"Y1", "Y8"} <= set(
+        _feed(tmp_path, _base_routes(), offline=True).compute_for_stock(
+            "000001.SZ", asof=date(2026, 9, 15)))
+
+
+def test_hit_with_complete_entry_not_rewritten(tmp_path):
+    """C1: 命中且条目**已含** Y1/Y8 → 不重复写(缓存文件逐字节不变)。"""
+    p = tmp_path / "fund_cache.json"
+    entry = {"Y1": {"score": 0, "note": "缓存里的 Y1"},
+             "Y8": {"score": 0, "note": "缓存里的 Y8"},
+             "Y6": {"score": 1, "note": "缓存里的 Y6"}}
+    p.write_text(json.dumps({"%s:000001.SZ" % _SNAP_DAY: entry},
+                            ensure_ascii=False, indent=2), encoding="utf-8")
+    raw = p.read_text(encoding="utf-8")
+
+    out = _feed(tmp_path, _base_routes()).compute_for_stock(
+        "000001.SZ", float_mv=50e8, asof=date(2026, 9, 15))
+    assert out == entry, "已有纯计算值 → 原样返回(不覆盖缓存里的既有结论)"
+    assert p.read_text(encoding="utf-8") == raw, "无新增因子 → 不许写盘"
+
+
+def test_hit_without_float_mv_adds_nothing(tmp_path):
+    """C1: 命中但 float_mv 为假(缺股本) → 什么都不补、不写盘(无从算起, 不猜)。"""
+    feed = _feed(tmp_path, _base_routes())
+    fund_snapshot.snapshot_once(["000001.SZ"], date=_SNAP_DAY, feed=feed)
+    p = tmp_path / "fund_cache.json"
+    raw = p.read_text(encoding="utf-8")
+
+    out = _feed(tmp_path, _base_routes()).compute_for_stock(
+        "000001.SZ", asof=date(2026, 9, 15))
+    assert "Y1" not in out and "Y8" not in out
+    assert p.read_text(encoding="utf-8") == raw, "无 float_mv → 不补也不写"
+
+
+# ---------------- ⑬ I3: 空池 → 无视节流强制刷新 + 重试一次 ----------------
+
+def test_daemon_empty_pool_forces_refresh_and_retries(tmp_path, monkeypatch,
+                                                      caplog):
+    """I3: 空池 → **无视 6h 节流**强制刷新涨停池索引, 再重试一次采集。
+
+    场景(真实): 守护在 15:00~15:05 之间重启 —— 启动那次刷新跑完时索引里还没有
+    当日池, 15:05 的刷新被 6h 节流挡掉, `self._zt_thread` 是**已完成**线程 →
+    join 立即返回 → `default_codes()` 返回 [] → 空采, 当天 Y2/Y5 永久缺失。
+    """
+    results = [{"saved": 0, "failed": 0, "skipped": "empty_pool"},
+               {"saved": 3, "failed": 0}]
+    refresh_calls, refresh_done = [], threading.Event()
+
+    def fake_snap():
+        return results.pop(0) if results else {"saved": 3, "failed": 0}
+
+    def fake_refresh():
+        refresh_calls.append(1)
+        refresh_done.set()
+        return {"ok": True}
+    d, acc = _daemon(tmp_path, monkeypatch, fake_snap)
+    d.zt_refresh_fn = fake_refresh
+    d._zt_refresh_at = time.time()          # 6h 节流窗口内 → 常规路径会跳过刷新
+    _patch_pick(acc, monkeypatch)
+    with caplog.at_level(logging.INFO, logger="paper_daemon"):
+        out = d.tick_once(now=datetime(2026, 9, 17, 15, 6))
+        assert out["action"] == "pick"
+        assert _wait_until(lambda: not results, 5.0), "空池后必须重试一次采集"
+        assert _wait_until(lambda: "基本面快照采集完成" in caplog.text, 5.0)
+    assert refresh_calls == [1], "空池 → 必须无视节流强制刷新一次(且只一次)"
+    assert refresh_done.is_set(), "强制刷新必须真跑完(重试前要等它)"
+    assert "未采集" not in caplog.text, "重试成功后不许再报未采集"
+
+
+def test_daemon_empty_pool_after_retry_warns(tmp_path, monkeypatch, caplog):
+    """I3: 强制刷新+重试后仍空 → 只重试一次, 落 WARNING(不无限重试)。"""
+    calls = []
+
+    def fake_snap():
+        calls.append(1)
+        return {"saved": 0, "failed": 0, "skipped": "empty_pool"}
+    d, acc = _daemon(tmp_path, monkeypatch, fake_snap)
+    d.zt_refresh_fn = lambda: {"ok": True}
+    _patch_pick(acc, monkeypatch)
+    with caplog.at_level(logging.INFO, logger="paper_daemon"):
+        out = d.tick_once(now=datetime(2026, 9, 17, 15, 6))
+        assert out["action"] == "pick"
+        assert _wait_until(lambda: len(calls) >= 2, 5.0), "必须重试一次(共 2 次)"
+        assert _wait_until(lambda: "未采集" in caplog.text, 5.0)
+        time.sleep(0.3)                     # 给"万一无限重试"留出暴露窗口
+    assert len(calls) == 2, "只重试一次: 仍空就告警, 不空转"
+    assert "WARNING" in caplog.text and "尚未刷新" in caplog.text
+    assert "基本面快照采集完成" not in caplog.text
+
+
+def test_daemon_snapshot_wait_times_out_and_still_collects(tmp_path, monkeypatch,
+                                                           caplog):
+    """M3: 刷新线程卡死 → 最多等 ZT_REFRESH_WAIT 秒, 超时照常采集 + 落 WARNING。"""
+    import prism.paper_daemon as pd
+    monkeypatch.setattr(pd, "ZT_REFRESH_WAIT", 0.05)
+    started, release = threading.Event(), threading.Event()
+    snap_done = threading.Event()
+
+    def stuck_refresh():
+        started.set()
+        release.wait(5)
+        return {"ok": True}
+
+    def fake_snap():
+        snap_done.set()
+        return {"saved": 1, "failed": 0}
+    d, acc = _daemon(tmp_path, monkeypatch, fake_snap)
+    d.zt_refresh_fn = stuck_refresh
+    _patch_pick(acc, monkeypatch)
+    try:
+        with caplog.at_level(logging.WARNING, logger="paper_daemon"):
+            out = d.tick_once(now=datetime(2026, 9, 17, 15, 6))
+            assert out["action"] == "pick"
+            assert started.wait(5), "选股后必须先孵化刷新线程"
+            assert snap_done.wait(5), "超时后必须照常采集(不许无限等刷新)"
+            assert _wait_until(lambda: "未结束" in caplog.text, 5.0), \
+                "超时必须有 WARNING 说明(取到的可能是旧索引)"
+    finally:
+        release.set()
