@@ -22,7 +22,7 @@ import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from shared.common import CACHE_DIR
+from shared.common import CACHE_DIR, replace_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +112,9 @@ def _df_to_records(df):
 # 同进程写者串行锁(A, 2026-09-18): 唯一 tmp 名只解决"互踩同一个 tmp"; 两个线程
 # 同时 os.replace 到**同一个目标**在 Windows 上仍会 PermissionError(实测: 只改
 # tmp 名 200 轮仍炸 26 轮, 加锁后 0 轮)。跨进程靠唯一 tmp 名, 进程内靠这把锁。
+# 更正(2026-09-18 晚, M12): 上面那组数字只在**无并发读者**时成立 —— 有线程
+# 正在读这个 pkl 时, 单个写者照样 EACCES(实测 2 reader 线程 291/300 轮),
+# 那把锁对此**无效**(它只串行写者)。读者场景见 replace_with_retry。
 # ponytail: 全局一把锁 —— 写盘是低频(采集/刷新)操作, 不构成瓶颈; 真变重再按路径分锁。
 _WRITE_LOCK = threading.Lock()
 
@@ -126,12 +129,17 @@ def _atomic_pickle(path, obj):
     坏文件**静默当 {}** ⇒ 90 天 zt 缓存被无声清零。现实触发: 守护的"强制刷新+
     重试"在首个刷新线程 join 超时后照样起第二个刷新线程(冷缓存 90 天×全 A 股
     可达 >120s)。
+
+    os.replace 走 shared.common.replace_with_retry(M12, 2026-09-18): 唯一 tmp 名
+    与写者锁都挡不住**读者**占着目标句柄(Windows 的 open 不带
+    FILE_SHARE_DELETE); 刷新线程写的时候 `_load_cache`/`qmt_zt_feed` 正在读是
+    常态, 有界退避等读者关句柄再落地, 预算耗尽则原样抛错(不静默当成功)。
     """
     tmp = path.with_name("%s.%d.%d.tmp" % (path.name, os.getpid(),
                                            threading.get_ident()))
     with _WRITE_LOCK:
         tmp.write_bytes(pickle.dumps(obj, protocol=4))
-        os.replace(str(tmp), str(path))
+        replace_with_retry(str(tmp), str(path))
 
 
 def _merge_tail(old, rec, start_fmt):

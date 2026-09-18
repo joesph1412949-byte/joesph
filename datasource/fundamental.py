@@ -102,11 +102,25 @@ class FundamentalFeed:
         return asof or self.asof or date.today()
 
     # ---------- 缓存 ----------
-    def _load_cache(self):
+    def _load_cache(self, strict=False):
+        """读盘缓存。`strict=True` → 读失败原样抛出, 让调用方自己决定。
+
+        为什么要区分: `_save_cache` 的读-改-写合并以读到的盘上内容为起点。
+        "文件不存在/空" → 起点 {} , 覆盖无害(没有键可丢); 但**读失败**(坏
+        JSON / 权限 / IO 错)若也当 {} , 合并就退化成整文件覆盖 ⇒ 磁盘上别的
+        写者的键被整批抹掉, 正是 I2 修过的病复发(且更隐蔽: 盘上明明有内容)。
+        非 strict(构造时载入)保持旧语义: 坏文件当空, 不因读失败炸掉采集。"""
         try:
             with open(self.cache_path, encoding="utf-8") as f:
-                return json.load(f)
+                text = f.read()
+            if not text.strip():
+                return {}                    # 空文件: 没有键可丢, 覆盖无害
+            return json.loads(text)
+        except FileNotFoundError:
+            return {}
         except Exception:
+            if strict:
+                raise
             return {}
 
     def _save_cache(self):
@@ -121,11 +135,20 @@ class FundamentalFeed:
         # 快照线程)新增的键"整批删掉, 两边还都报成功 —— 丢的正是本批次要积累的
         # Y2/Y5 日快照与 --date 回填历史。磁盘独有的键必须保留; 同键以本进程
         # 内存值为准(那是刚算出来的更新)。
+        # I2b(2026-09-18): 读盘失败**不许**退化成整文件覆盖 —— 那等于把 I2 的
+        # 病复发(把读不出的盘当空的)。fail-safe: 跳过本次落盘 + WARNING,
+        # 下次读得通时再合并; 内存里的结果还在, 不会因此丢。
         # ponytail: 读-改-写不是原子的(无跨进程锁): 两个写者若在同一瞬间各读到
         # 旧盘再各自落盘, 仍可能互相盖掉刚落的新键 —— 窗口已从"整个进程生命周期"
         # 缩到"一次写盘", 实盘两个写者(守护快照线程 / fund_snapshot CLI)频率极低,
         # 够用; 真观测到丢键再加文件锁。
-        disk = self._load_cache()
+        try:
+            disk = self._load_cache(strict=True)
+        except Exception as exc:
+            logger.warning("缓存读盘失败(%r) → 跳过本次落盘, 不覆盖 %s "
+                           "(读不出的内容里可能有别的写者的键)",
+                           exc, self.cache_path)
+            return
         disk.update(self._cache)
         atomic_write(self.cache_path,
                      json.dumps(disk, ensure_ascii=False))

@@ -15,6 +15,7 @@ import logging
 import logging.handlers
 import os
 import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -164,11 +165,25 @@ def atomic_write(path, text):
     failed" while readers silently fall back to {}. Same treatment as
     prism/zt_history.py::_atomic_pickle.
 
+    The replace additionally retries with bounded backoff (M12,
+    2026-09-18, see replace_with_retry): writer/writer serialization does
+    NOT help when the failure is a READER. CPython's open() omits
+    FILE_SHARE_DELETE on Windows, so ANY thread holding the target open
+    (e.g. _load_cache / qmt_zt_feed reading) makes os.replace fail with
+    EACCES until that handle closes - one writer plus one reader is
+    enough (measured pre-fix: 15 of 300 rounds with the polling reader of
+    test_atomic_write_survives_concurrent_reader, 262 of 300 with two
+    tight-spinning readers).
+
     Guarantee, exactly: inside this process, writers of the same path run
     their replace one after another, so the file always holds the
-    complete text of one write (never a half or a mix). It does NOT
-    coordinate across processes - that case still rests on the unique
-    pid-carrying tmp name plus os.replace being atomic per target."""
+    complete text of one write (never a half or a mix), and a reader that
+    lets go of its handle within the retry budget does not turn the write
+    into a failure. It does NOT coordinate across processes - that case
+    still rests on the unique pid-carrying tmp name plus os.replace being
+    atomic per target. A reader holding the handle for longer than the
+    whole budget still sees the original PermissionError; that is
+    reported, not hidden."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = Path("%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident()))
@@ -177,7 +192,54 @@ def atomic_write(path, text):
         fp.flush()
         os.fsync(fp.fileno())
     with _write_lock_for(path):
-        os.replace(tmp, path)
+        replace_with_retry(tmp, path)
+
+
+# -------------------------------------------------- os.replace retry (M12)
+# Windows: os.replace() onto a destination that is currently open by ANY
+# reader fails with ERROR_ACCESS_DENIED (winerror 5) or
+# ERROR_SHARING_VIOLATION (winerror 32), surfacing as PermissionError(13)
+# "Access is denied". Python's open() opens files without FILE_SHARE_DELETE,
+# so the rename cannot delete the old destination until every reader closes
+# it. This is NOT a writer/writer race (a per-path write lock cannot fix it)
+# and NOT something the writer can force - the reader just has to finish.
+# So: retry a bounded number of times with backoff, then re-raise the
+# ORIGINAL exception. Honest ceiling: this only widens the window, it does
+# not make replace safe against a reader that holds the handle longer than
+# the whole budget (~0.95s).
+_REPLACE_ATTEMPTS = 10
+_REPLACE_DELAY0 = 0.01
+_REPLACE_DELAY_MAX = 0.16
+
+
+def _is_replace_retryable(exc):
+    """True for the Windows errors that mean "the destination is in use"."""
+    if isinstance(exc, PermissionError):
+        return True
+    return (isinstance(exc, OSError)
+            and getattr(exc, "winerror", None) in (5, 32))
+
+
+def replace_with_retry(src, dst):
+    """os.replace(src, dst) with bounded backoff on Windows sharing errors.
+
+    Only the retryable "destination held open" errors are retried. Once the
+    budget is spent the original exception propagates: a write that truly
+    failed must never look like a success (callers cache it as {} / report
+    "saved" otherwise, and the data is silently gone).
+
+    Total worst-case sleep: 0.01+0.02+0.04+0.08+0.16*5 = 0.95s over 9
+    retries (10 attempts)."""
+    delay = _REPLACE_DELAY0
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            os.replace(src, dst)
+            return
+        except OSError as exc:
+            if attempt == _REPLACE_ATTEMPTS - 1 or not _is_replace_retryable(exc):
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, _REPLACE_DELAY_MAX)
 
 
 def next_weekday(d):

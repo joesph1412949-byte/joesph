@@ -3,6 +3,7 @@
 import logging
 import pickle
 import sys
+import threading
 import time
 import types
 from datetime import date, datetime, timedelta
@@ -213,8 +214,8 @@ def test_refresh_cache_merges_tail_replacing_old(zt_tmp_paths, monkeypatch):
     # start_time = 今天-90天 的 8 位日期串
     assert fake.downloads, "download_history_data2 未被调用"
     assert fake.downloads[0][1] == (today - timedelta(days=90)).strftime("%Y%m%d")
-    # 原子写: 不留 tmp 文件
-    assert not (zt_tmp_paths / ".zt_history_cache.pkl.tmp").exists()
+    # 原子写: 目录里除目标文件外不留任何残留(tmp 名现为 …pkl.<pid>.<tid>)
+    assert [q for q in zt_tmp_paths.iterdir() if q != zt.CACHE_PATH] == []
 
 
 def test_refresh_cache_new_stock_gets_tail_only(zt_tmp_paths, monkeypatch):
@@ -300,7 +301,8 @@ def test_build_index_writes_index_file(zt_tmp_paths):
     idx = zt.build_index(cache=cache)
     assert "2026-09-04" in idx
     assert zt.INDEX_PATH.exists()                       # 已落盘
-    assert not (zt_tmp_paths / ".zt_history_index.pkl.tmp").exists()
+    # 原子写: 目录里除目标文件外不留任何残留(tmp 名现为 …pkl.<pid>.<tid>)
+    assert [q for q in zt_tmp_paths.iterdir() if q != zt.INDEX_PATH] == []
     r = zt.prev_day_pool(today=date(2026, 9, 7))
     assert r == {"date": "2026-09-04", "codes": ["600000.SH"]}
 
@@ -340,3 +342,56 @@ def test_atomic_pickle_concurrent_writers_do_not_share_tmp(zt_tmp_paths):
         assert not errs, "并发写者互踩同一个 tmp: %s" % errs[:3]
         assert pickle.loads(p.read_bytes()) in ({"who": "a"}, {"who": "b"}), \
             "落盘必须是一个写者的完整结果(不许半截/串写)"
+
+
+def test_atomic_pickle_survives_concurrent_reader(zt_tmp_paths):
+    """M12 回归: **读者**持续读目标 pkl 时, `_atomic_pickle` 循环 N 轮零异常。
+
+    上一轮的 tmp 名唯一 + `_WRITE_LOCK` 只解决**写-写**; 读者句柄仍在时
+    `os.replace` 照样 EACCES(审查者实测: 2 reader 线程 538 轮 PermissionError,
+    无 reader 时 0/300)。生产形态: 刷新线程写 pkl, `_load_cache` / `qmt_zt_feed`
+    / `default_codes` 并发读 —— 坏文件被静默当 `{}` = 90 天缓存无声清零。
+
+    读者按生产形态循环: 打开 → 读(**持有句柄**) → 关闭 → 两次读之间干别的
+    (`pickle.loads` 在句柄关闭后跑, 那段时间就是写者的机会窗口)。修复前实测
+    (同一测试体关掉重试): **26~85/300 轮** EACCES, 空转读者(间隙 8ms)
+    291/300; 修复靠 `shared.common.replace_with_retry` 的有限退避。
+
+    读者节奏(1ms 持有 / 50ms 间隙)= 生产里的轮询读。边界(如实): 毫不喘息、
+    句柄几乎 100% 打开的读者能饿死任何**有界**预算 —— 那种读者下修复后仍
+    12/300 轮 EACCES(报告"未覆盖边界")。
+    """
+    p = zt_tmp_paths / ".zt_history_cache.pkl"
+    zt._atomic_pickle(p, {"seed": True})
+    stop = threading.Event()
+    errs = []
+
+    def reader():
+        while not stop.is_set():
+            try:
+                with open(p, "rb") as f:
+                    f.read()
+                    time.sleep(0.001)      # 持有句柄时的消耗(读/解析)
+            except OSError:
+                pass                       # 替换瞬间句柄失效属正常
+            time.sleep(0.05)               # 句柄关闭: 读者在两次读之间干别的
+
+    readers = [threading.Thread(target=reader, name="R%d" % i)
+               for i in range(2)]
+    for r in readers:
+        r.start()
+    try:
+        for i in range(300):
+            try:
+                zt._atomic_pickle(p, {"i": i})
+            except Exception as e:
+                errs.append((i, repr(e)))
+    finally:
+        stop.set()
+        for r in readers:
+            r.join(10)
+
+    assert not errs, ("有读者时写失败 %d/300 轮(前 3): %s"
+                      % (len(errs), errs[:3]))
+    assert pickle.loads(p.read_bytes()) == {"i": 299}, "最后一轮必须完整落地"
+    assert [q for q in zt_tmp_paths.iterdir() if q != p] == [], "不留任何残留"

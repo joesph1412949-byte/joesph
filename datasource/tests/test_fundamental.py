@@ -4,6 +4,7 @@ Y5(slist)/F7(ztpool)/Y7、Y2(datacenter)/Y6(ann) 响应形状各异, FakeHTTP �
 """
 import sys
 import json
+import logging
 from datetime import date, timedelta
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -537,6 +538,29 @@ def test_save_cache_memory_value_wins_for_duplicate_key(tmp_path):
     f._save_cache()
     assert json.loads(p.read_text(encoding="utf-8"))[key] == \
         {"Y6": {"score": 1, "note": "本进程新算的"}}, "内存值必须优先"
+
+
+def test_save_cache_read_failure_skips_write_and_keeps_disk(tmp_path, caplog):
+    """I2b: 回写前**读盘失败** → 跳过本次落盘, 绝不退化成整文件覆盖。
+
+    修复前 `_load_cache` 把任何异常都当 `{}` ⇒ `disk.update(self._cache)` 后整
+    文件覆盖, 磁盘上别的写者写的键被整批抹掉 —— 正是 I2 要修的病复发(而且更
+    隐蔽: 盘上明明有内容, 却被当空的)。fail-safe 口径: 读失败时**不动盘** +
+    WARNING 说明原因, 让下一次(读得通时)再合并。"""
+    p = tmp_path / "c.json"
+    f = FundamentalFeed(http_get=FakeHTTP(_base_routes()), cache_path=p)
+    f._cache["%s:000002.SZ" % TODAY.strftime("%Y%m%d")] = {"Y5": {"n": 3}}
+    # 盘上是坏 JSON(半截写/外部截断) → 真实读失败(不靠 mock)
+    p.write_bytes(b'{"broken": ')
+    broken = p.read_bytes()
+
+    with caplog.at_level(logging.WARNING, logger="fundamental"):
+        f._save_cache()
+
+    assert p.read_bytes() == broken, \
+        "读失败时不许覆盖: 盘上别的写者的键可能就在那份读不出的文件里"
+    assert "读盘失败" in caplog.text and "跳过" in caplog.text, \
+        "必须留下 WARNING 说明为什么没落盘: %r" % caplog.text
 
 
 # ---------- I3: 联网路径的"半截条目"绝不落盘 ----------

@@ -10,6 +10,7 @@ ponytail: vendored from shared/common.py @2026-09-16 —— tt_solo 要能被整
 故此处采用 tt 的更正确版本("92"); shared 版本缺这条, 是主项目侧的潜在缺陷。
 """
 import os
+import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent      # -> tt_solo/
@@ -21,12 +22,52 @@ LOG_DIR = RUNTIME_DIR / "log"
 
 # ---------------------------------------------------------------- io
 
+# ---------------------------------------------------- os.replace 退避重试
+# vendored from shared/common.py @2026-09-18(同款写法与口径, 就地实现: tt_solo
+# 必须自包含, 不许 import shared/prism —— tests/test_selfcontained.py 有护栏)。
+# Windows: 只要目标文件此刻被**任何读者句柄**打开, os.replace 就抛
+# PermissionError(拒绝访问) —— CPython 的 open() 不带 FILE_SHARE_DELETE,
+# MoveFileEx(REPLACE_EXISTING) 拿不到目标上的 DELETE 权限。这不是写者之间的
+# 问题(锁解决不了), 只能等读者关句柄: 有界退避重试, 预算耗尽**原样抛出**
+# (写失败绝不许看起来像成功)。实测来源: 全量跑里 test_events_capped 因
+# WinError 5 红过一次; 有读者时高频 save 修复前 16~70/300 轮抛错(随读者占空比)。
+_REPLACE_ATTEMPTS = 10
+_REPLACE_DELAY0 = 0.01
+_REPLACE_DELAY_MAX = 0.16
+
+
+def _is_replace_retryable(exc):
+    """True = "目标被占用"类错误(只有这类才值得重试)。"""
+    if isinstance(exc, PermissionError):
+        return True
+    return (isinstance(exc, OSError)
+            and getattr(exc, "winerror", None) in (5, 32))
+
+
+def replace_with_retry(src, dst):
+    """os.replace + 有界退避重试(10 次尝试 / 最坏 0.95s, 不忙等)。"""
+    delay = _REPLACE_DELAY0
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            os.replace(src, dst)
+            return
+        except OSError as exc:
+            if attempt == _REPLACE_ATTEMPTS - 1 or not _is_replace_retryable(exc):
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, _REPLACE_DELAY_MAX)
+
+
 def atomic_write(path, text):
-    """原子写: mkdir + 同目录 .tmp + flush + fsync + os.replace。
+    """原子写: mkdir + 同目录 .tmp + flush + fsync + os.replace(带退避重试)。
 
     崩溃/断电都不能留下半截文件(账本读者会把截断文件当损坏)。
     fsync 是断电存活的关键, 不是可选项。
-    vendored from shared/common.py @2026-09-16。
+    vendored from shared/common.py @2026-09-16(重试 @2026-09-18)。
+
+    ponytail: tmp 名仍是固定的 `path + ".tmp"`(没跟 shared/common 一起改成
+    pid+线程) —— 同进程两个写者(守护 + 面板重算/Flask 多线程)仍可能互踩这个
+    tmp; 那一路频率低, 本轮只补 replace 重试。真观测到互踩再改成唯一名(一行)。
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -35,7 +76,7 @@ def atomic_write(path, text):
         fp.write(text)
         fp.flush()
         os.fsync(fp.fileno())
-    os.replace(tmp, path)
+    replace_with_retry(tmp, path)
 
 
 # ---------------------------------------------------------------- 规则

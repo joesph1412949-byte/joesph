@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """状态机与持久化测试。"""
 import json
+import threading
+import time
 from datetime import datetime
 
 from ttcore.state import Ledger
@@ -131,6 +133,58 @@ def test_events_capped(ledger):
     for _ in range(MAX_EVENTS + 40):
         ledger.record_fill("600900.SH", "SELL", 28.0, 100)
     assert len(ledger.state["events"]) <= MAX_EVENTS
+
+
+def test_save_survives_concurrent_reader(tmp_path):
+    """M12(tt 侧): 有读者持续读账本时, 高频 `save()` N 轮 → 零异常。
+
+    `ttcore/_vendor.py::atomic_write` 是 tt_solo 自包含的**第三份**原子写拷贝
+    (刻意不 import shared/prism), 同样撞 Windows 的"目标被读者句柄占用 →
+    `os.replace` EACCES":CPython 的 `open()` 不带 `FILE_SHARE_DELETE`, 只要
+    有读者句柄在, `MoveFileEx(REPLACE_EXISTING)` 就拿不到 DELETE 权限。
+    实测来源:本轮全量跑 `test_events_capped` 就因此红过一次(WinError 5);
+    修复前(同一测试体关掉重试)高频 save 有读者时 16~22/300 轮抛
+    `PermissionError(13)`, 无读者时 0/300。
+
+    读者按生产形态循环: 打开 → 读(持有句柄) → 关闭 → 两次读之间干别的
+    (面板/守护读账本, `json.loads` 期间句柄一直开着), 节奏 = 生产里的轮询读。
+    边界(如实): 毫不喘息、句柄几乎 100% 打开的读者能饿死任何**有界**预算 ——
+    那是物理事实, 不在本修法覆盖范围。"""
+    p = tmp_path / "tt_state.json"
+    led = Ledger(path=p, now_fn=lambda: datetime(2026, 9, 14, 10, 0))
+    led.load()
+    led.record_fill("600900.SH", "SELL", 28.0, 100)
+    stop = threading.Event()
+    errs = []
+
+    def reader():
+        while not stop.is_set():
+            try:
+                with open(p, "rb") as f:
+                    f.read()
+                    time.sleep(0.001)      # 持有句柄时的消耗(读/解析)
+            except OSError:
+                pass                       # 写者正在替换: 句柄短暂失效属正常
+            time.sleep(0.05)               # 句柄关闭: 读者在两次读之间干别的
+
+    readers = [threading.Thread(target=reader, name="R%d" % i)
+               for i in range(2)]
+    for r in readers:
+        r.start()
+    try:
+        for _ in range(300):
+            try:
+                led.save()
+            except Exception as exc:       # PermissionError(WinError 5/32)
+                errs.append(repr(exc))
+    finally:
+        stop.set()
+        for r in readers:
+            r.join(10)
+
+    assert errs == [], "有读者时 save 失败 %d/300 轮(前 3): %s" % (
+        len(errs), errs[:3])
+    assert json.loads(p.read_text(encoding="utf-8"))["date"] == "2026-09-14"
 
 
 def test_snapshot_shape(ledger):
