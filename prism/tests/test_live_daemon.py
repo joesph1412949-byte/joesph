@@ -371,8 +371,8 @@ def test_close_pick_no_candidates_burns_slot(tmp_path):
 # ---------------- 次日开盘发单 + 记账 ----------------
 
 def _plan(code="600000.SH", price=10.55, vol=14200,
-          for_date="2026-09-15"):
-    return {"code": code, "name": "浦发", "price": price, "volume": vol,
+          for_date="2026-09-15", name="浦发"):
+    return {"code": code, "name": name, "price": price, "volume": vol,
             "for_date": for_date, "created": "2026-09-14T15:06:00",
             "strategy_id": "t_live", "composite": 1.0}
 
@@ -384,15 +384,16 @@ def _seed_state(tmp_path, plans, pick_slots=("2026-09-14T15:05",)):
 
 
 def _seed_plan(tmp_path, code="600000.SH", price=10.55, vol=14200,
-               for_date="2026-09-15"):
-    _seed_state(tmp_path, [_plan(code, price, vol, for_date)])
+               for_date="2026-09-15", name="浦发"):
+    _seed_state(tmp_path, [_plan(code, price, vol, for_date, name)])
 
 
 def _open_tick(open_px=None, last=None, last_close=None, down_stop=None):
     """开盘窗口 tick 替身(只带 daemon 判定用得上的价格字段)。
 
     None = 该字段缺失(用来构造"行情半残/前收缺失"的输入缺失态)。
-    down_stop = tick 自带的真实跌停价(数据源口径, 含 ST ±5%)。"""
+    down_stop = tick 自带的**权威跌停价**(交易所口径, 与
+    ds.get_instrument 的 DownStopPrice 同值)。"""
     t = {}
     if open_px is not None:
         t["open"] = open_px
@@ -488,12 +489,12 @@ def test_open_send_uses_board_limit_ratio(tmp_path):
     assert sig["price"] == 8.8
 
 
-def test_open_send_skips_st_limit_down_open_from_real_down_stop(tmp_path):
-    """主板 ST 开盘 −5%(跌停) → 必须跳过。
+def test_open_send_uses_authoritative_down_stop_from_tick(tmp_path):
+    """tick 自带的**权威跌停价**优先于自算分板系数(paper.py:287-292 同口径)。
 
-    判别力: 分板系数(limit_ratio_for_code)对 600xxx 给 −10% ⇒ 跌停价算成 9.00,
-    而 9.50 的 ST 跌停开盘会被判"非跌停"**照发**(挂涨停价的买单立即成交在
-    跌停板)。真实口径只有数据源的 DownStopPrice 有(ST ±5% 无法从代码前缀推出)。
+    这里构造权威值**更紧**(9.5 > 自算 9.00)的情形: 开盘 9.5 → 必须跳过。
+    判别力: 忽略 tick 的 downStopPrice、只用分板系数 ⇒ 9.5 被判"非跌停"照发
+    (挂在涨停价上的限价买单立即成交在跌停板)。
     """
     _seed_plan(tmp_path, price=10.45)
     d = _daemon(tmp_path, dry_run=False,
@@ -504,23 +505,88 @@ def test_open_send_skips_st_limit_down_open_from_real_down_stop(tmp_path):
     assert not (tmp_path / "positions.json").exists()
 
 
-def test_open_send_skips_st_limit_down_open_via_instrument_injection(tmp_path):
-    """tick 不带跌停价时, daemon 自己查 ds.get_instrument 的 DownStopPrice
-    (与 prism/paper_daemon.py::_open_buy_ticks 同一条路径/同一字段) ⇒ ST −5%
-    开盘同样跳过。拿不到真实值才是回落到分板系数的那条路。"""
-    _seed_plan(tmp_path, price=10.45)
+def test_open_send_skips_when_authoritative_down_stop_is_tighter(tmp_path):
+    """权威跌停价更松(8.5 < 自算 9.00)时不得误杀: 开盘 8.8 → 照发。
+
+    真实场景: 新股上市首日无涨跌幅限制、退市整理期首日、交易所临时调整幅度
+    —— 这些情形自算分板系数算不出交易所真实跌停价, 只有 DownStopPrice 是权威。
+    判别力: 只按分板系数判 ⇒ 8.8 ≤ 9.001 被误杀(漏买)。"""
+    _seed_plan(tmp_path, price=8.9)
     d = _daemon(tmp_path, dry_run=False,
-                ticks_fn=_open_tick(9.5, 9.5, 10.0),      # tick 里没有 downStopPrice
-                instruments={"600000.SH": {"DownStopPrice": 9.5}})
+                ticks_fn=_open_tick(8.8, 8.8, 10.0, down_stop=8.5))
     out = d.tick_once(TUE_OPEN)
-    assert "limit_down_open:600000.SH" in out["skipped"]
+    assert out["skipped"] == [] and len(out["buys"]) == 1
+    assert len(_pending(tmp_path)) == 1
+
+
+def test_open_send_uses_authoritative_down_stop_from_instrument(tmp_path):
+    """tick 不带跌停价时, daemon 自己查 ds.get_instrument 的 DownStopPrice
+    (与 prism/paper_daemon.py::_open_buy_ticks 同一条路径/同一字段)。
+
+    用"权威值更松"构造: 注入 8.5 ⇒ 8.8 照发; 若注入链断了(回落自算 9.0),
+    8.8 会被误杀 → 本用例变红。
+    """
+    _seed_plan(tmp_path, price=8.9)
+    d = _daemon(tmp_path, dry_run=False,
+                ticks_fn=_open_tick(8.8, 8.8, 10.0),   # tick 里没有 downStopPrice
+                instruments={"600000.SH": {"DownStopPrice": 8.5}})
+    out = d.tick_once(TUE_OPEN)
+    assert out["skipped"] == [] and len(out["buys"]) == 1
+    assert len(_pending(tmp_path)) == 1
+
+
+def test_board_limit_ratio_has_no_st_tier(tmp_path):
+    """**刻意没有 ST 档**: 风险警示股与同板普通股的 `limit_ratio_for_code` 相同。
+
+    事实依据(2025-06-27 沪深交易所《关于调整主板风险警示股票价格涨跌幅限制
+    比例及有关事项的通知》): 主板 ST/*ST 的涨跌幅限制已由 ±5% 调整为 ±10%,
+    与主板其他股票一致; 科创板/创业板 ST 早在注册制改革中就已与普通股同为
+    ±20%。故"主板 ST −5% 是跌停"是**基于已废止规则**的误判 —— 分板幅度按
+    代码前缀取就够, 不要引入 ST 档(会拿不到股票名、且会把非跌停的 −5% 当成
+    跌停而漏买)。本用例把这个事实钉住。
+
+    判别力: 谁按"ST ⇒ −5%"改 `limit_ratio_for_code`(或截胡分支) ⇒ 第 1/2 条
+    断言变红。
+    """
+    from shared.common import limit_ratio_for_code
+    assert limit_ratio_for_code("600735.SH") == 0.10      # 主板 ST
+    assert limit_ratio_for_code("600000.SH") == 0.10      # 主板非 ST
+    assert limit_ratio_for_code("600735.SH") == limit_ratio_for_code("600000.SH")
+    assert limit_ratio_for_code("688022.SH") == 0.20      # 科创板 ST
+    assert limit_ratio_for_code("688022.SH") == limit_ratio_for_code("688001.SH")
+
+
+def test_open_send_skips_st_at_board_limit_but_not_at_minus5pct(tmp_path):
+    """主板 ST 的现实口径(±10%): 开 −10%(真跌停)跳过; 开 −5%(不是跌停)照发。
+
+    配对断言, 缺一不可:
+      * 只测"−10% 跳过" ⇒ 看不出 ST 档不存在(旧 −10% 用例也是跳过);
+      * 只测"−5% 照发" ⇒ 万一闸门整体失效也会绿。
+    ②刻意**不给**权威跌停价(走自算分板幅度那条回落路): 这样"按名字判 ST ⇒
+    −5%"的实现会被逮住 —— 判别力: 引入 ST −5% 档 ⇒ ②的 9.5 开盘被跳, buys=0 红。
+    """
+    # ① 主板 ST 开盘 −10% = 跌停(权威跌停价 9.0)
+    _seed_plan(tmp_path, code="600735.SH", name="ST藏格", price=9.9)
+    d = _daemon(tmp_path, dry_run=False,
+                ticks_fn=_open_tick(9.0, 9.0, 10.0),
+                instruments={"600735.SH": {"DownStopPrice": 9.0}})
+    out = d.tick_once(TUE_OPEN)
+    assert "limit_down_open:600735.SH" in out["skipped"]
     assert out["buys"] == [] and _pending(tmp_path) == []
+
+    # ② 主板 ST 开盘 −5%: 现已是"非跌停" → 必须照发(误判成跌停就是漏买)
+    _seed_plan(tmp_path, code="600735.SH", name="ST藏格", price=10.45)
+    d2 = _daemon(tmp_path, dry_run=False,
+                 ticks_fn=_open_tick(9.5, 9.5, 10.0))   # 无权威值 → 自算 600735 −10% = 9.0
+    out2 = d2.tick_once(TUE_OPEN)
+    assert out2["skipped"] == [] and len(out2["buys"]) == 1
+    assert len(_pending(tmp_path)) == 1
 
 
 def test_open_send_sends_non_st_at_minus5pct_open(tmp_path):
     """非 ST 主板开 −5%(跌停价 −10% = 9.00) → 照发(防"一刀切按 −5% 判")。
 
-    判别力: 若把闸门写成"跌幅 ≥5% 即跳过"或对 ST 口径一刀切, 这条会红。"""
+    判别力: 若把闸门写成"跌幅 ≥5% 即跳过", 这条会红。"""
     _seed_plan(tmp_path, price=10.45)
     d = _daemon(tmp_path, dry_run=False,
                 ticks_fn=_open_tick(9.5, 9.5, 10.0),
@@ -530,13 +596,14 @@ def test_open_send_sends_non_st_at_minus5pct_open(tmp_path):
     assert len(_pending(tmp_path)) == 1
 
 
-def test_open_send_warns_once_when_real_down_stop_unavailable(tmp_path, caplog):
-    """真实跌停价拿不到(回落分板系数)必须**可辨识**: 一天一次 WARNING。
+def test_open_send_no_warning_when_down_stop_missing(tmp_path, caplog):
+    """拿不到 DownStopPrice 是**正常回落**(paper 同款近似口径), 不得留 WARNING。
 
-    为什么: 回落口径不含 ST ±5%, 本日 ST 跌停会漏判 —— 这正是改造前那个
-    **完全无声**的漏洞。回落本身是 paper 同款口径(拿不到真实值就近似), 但不许
-    连痕迹都没有。改坏哪一处会红: 删掉 `_down_stop_price` 的回落告警 ⇒
-    caplog 里 0 条; 把告警写成每只会喊一次 ⇒ 两条 tick 后 2 条。
+    依据: 主板 ST 的涨跌幅 2025-06-27 起已与普通股同为 ±10%(见
+    test_board_limit_ratio_has_no_st_tier), 回落口径不再"漏判 ST" ——
+    曾经那条"该口径不含 ST ±5%"告警是**事实错误**, 会在每个交易日刷一条假警告。
+
+    判别力: 把那条回落告警加回来(或任何"回落即告警"的写法) ⇒ 这里不再是 0 条。
     """
     _seed_plan(tmp_path)
     d = _daemon(tmp_path, dry_run=True,          # dry_run: 计划不消费, 两次都走发单
@@ -545,8 +612,9 @@ def test_open_send_warns_once_when_real_down_stop_unavailable(tmp_path, caplog):
         out1 = d.tick_once(TUE_OPEN)
         d._last_sync_ts = 0
         d.tick_once(datetime(2026, 9, 15, 9, 28))
-    assert len(out1["buys"]) == 1                # 回落口径仍可用 → 照发
-    assert caplog.text.count("拿不到真实跌停价") == 1
+    assert len(out1["buys"]) == 1                # 回落口径可用 → 照发
+    assert "ST" not in caplog.text
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
 
 def test_open_send_partial_skip_other_still_sent(tmp_path):

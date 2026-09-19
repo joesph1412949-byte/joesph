@@ -16,13 +16,17 @@
                 重启重跑不产生新文件; 桥端 per-day dedup 兜底。
   #8 T+1        当日买入不卖: exit_rules enforce_t1 + 券商 can_use_volume
                 双保险; 跌停日顺延(exit_rules.is_limit_down)。
-  #9 开盘闸门   发单前判跌停: **真实跌停价优先**(ds.get_instrument 的
-                 DownStopPrice, 取法同 prism/paper_daemon.py::_open_buy_ticks
-                 —— 唯一能识别 ST ±5% 的口径; 分板系数只按代码前缀分板, 没有
-                 ST 档, 会把主板 ST 的 −5% 跌停算成 −10% 而漏判), 拿不到才回落
-                 昨收 × (1−分板幅度)(权威 shared.common)。**跌停开盘/窗口内砸到
-                 跌停 → 跳过该只**(否则挂在涨停价上的限价买单会立即成交在跌停板;
-                 判据同 prism/paper.py::execute_open_buys)。
+  #9 开盘闸门   发单前判跌停: **交易所权威跌停价优先**(ds.get_instrument 的
+                 DownStopPrice, 取法同 prism/paper_daemon.py::_open_buy_ticks),
+                 拿不到才回落 昨收 × (1−分板幅度)(权威 shared.common)。
+                 为什么权威值优先: 分板幅度是按代码前缀推的**近似**, 覆盖不了
+                 新股上市首日/退市整理期首日无涨跌幅限制、除权除息、交易所临时
+                 调整幅度; 而幅度表本身**刻意不含 ST 档** —— 2025-06-27 沪深
+                 交易所已把主板 ST/*ST 由 ±5% 调整为 ±10%(与普通股一致), 科创/
+                 创业 ST 早已是 ±20%(见 _down_stop_price docstring, 勿再引入
+                 ST 档: 那会把非跌停的 −5% 误判成跌停而漏买)。
+                 **跌停开盘/窗口内砸到跌停 → 跳过该只**(否则挂在涨停价上的限价
+                 买单会立即成交在跌停板; 判据同 prism/paper.py::execute_open_buys)。
                  **行情缺失(前收/价格缺) → 跳过该只(fail-closed)**: 与
                  paper.execute_open_buys 的"无行情 = skip"同口径 —— 同一策略的
                  两条执行路径必须同口径, 且买入侧错发(可能成交在跌停板)比漏发贵。
@@ -102,9 +106,8 @@ class LiveDaemon:
         self.sleep_fn = sleep_fn
         self._strat_cache = None
         self._last_sync_ts = 0.0
-        self._down_stop_day = ""      # 真实跌停价的当日缓存(见 _down_stop_price)
+        self._down_stop_day = ""      # 权威跌停价的当日缓存(见 _down_stop_price)
         self._down_stop_cache = {}
-        self._down_stop_warned = False
 
     # ---------------- 策略(动态读默认指针, 与模拟盘/回测同一份 JSON) ----------------
     def _resolve_strategy(self):
@@ -343,41 +346,44 @@ class LiveDaemon:
 
     # ---------------- 次日开盘发单 ----------------
     def _down_stop_price(self, code, day):
-        """真实跌停价(数据源 ds.get_instrument 的 DownStopPrice); 拿不到 → 0。
+        """交易所权威跌停价(ds.get_instrument 的 DownStopPrice); 拿不到 → 0。
 
-        与 prism/paper_daemon.py::_open_buy_ticks 同一条路径、同一字段(见
-        prism/data.py:149 的取法)。为什么不用分板系数就够: 分板系数只按代码
-        前缀分板, 没有(也无法有)ST 档 —— 主板 ST 的 −5% 会被算成 −10%,
-        开盘跌停买不到闸门。当日成功值缓存: 开盘窗口 POLL_SECONDS(30s)一轮,
-        每只只查一次(≤ 计划只数次/日); 失败**不**缓存(QMT 抖一下不许把当天
-        钉死在这个口径上, 下一轮还会重试)。
+        为什么不只用自算的分板幅度(limit_ratio_for_code): 那是**近似** —— 按
+        代码前缀推板块比例, 覆盖不了交易所的实际情况: 新股上市首日/退市整理期
+        首日无涨跌幅限制、除权除息、交易所临时调整幅度等。权威跌停价只有数据源
+        详情里有(取法同 prism/paper_daemon.py::_open_buy_ticks; 字段口径同
+        prism/data.py:149 的 UpStopPrice)。拿不到就回落自算值(与
+        prism/paper.py:287-292 同款近似口径), 回落是**正常近似不是异常**, 不打日志。
+
+        **勿再引入 ST 档**(2026-09-19 规则复核): 2025-06-27 沪深交易所《关于
+        调整主板风险警示股票价格涨跌幅限制比例及有关事项的通知》已把主板
+        ST/*ST 的涨跌幅由 ±5% 调整为 ±10%, 与主板其他股票一致; 科创板/创业板
+        ST 早在注册制改革中即与普通股同为 ±20%(控制者 2026-09-19 用 QMT 实测
+        印证: 600735.SH ST 6.57→5.91 = 0.8995, 688022.SH ST 8.75→7.00 = 0.80)。
+        故 ST 不需要单独口径, 而"按股票名判 ST ⇒ −5%"会把**非跌停的 −5% 当成
+        跌停而漏买**(比漏判贵: 一个是不买, 一个是不该买时不买)。
+
+        当日成功值缓存: 开盘窗口 POLL_SECONDS(30s)一轮, 每只只查一次(≤ 计划
+        只数次/日); 失败不缓存(QMT 抖一下下一轮还会重试)。
         """
         code = str(code)
         if self._down_stop_day != day:
             self._down_stop_day, self._down_stop_cache = day, {}
-            self._down_stop_warned = False
         if code in self._down_stop_cache:
             return self._down_stop_cache[code]
         ds = getattr(self.provider, "ds", None)
-        det = {}
-        if ds is not None:
-            try:
-                det = ds.get_instrument(code) or {}
-            except Exception as e:
-                LOG.warning("开盘发单: %s 真实跌停价查询失败(%r) → 回落到分板系数",
-                            code, e)
+        if ds is None:
+            return 0.0
+        try:
+            det = ds.get_instrument(code) or {}
+        except Exception as e:
+            LOG.warning("开盘发单: %s 权威跌停价查询失败(%r) → 回落到自算分板幅度",
+                        code, e)
+            return 0.0
         px = _num(det.get("DownStopPrice"))
         if px > 0:
             self._down_stop_cache[code] = px
-            return px
-        # 回落口径(分板系数)**不含 ST ±5%** ⇒ 本日 ST 跌停会漏判。回落是 paper
-        # 同款近似, 但不许无声: 一天喊一次(开盘窗口 30 秒一轮, 按只喊会刷屏)。
-        if not self._down_stop_warned:
-            self._down_stop_warned = True
-            LOG.warning("开盘发单: %s 拿不到真实跌停价(DownStopPrice=%r) → "
-                        "回落到分板系数; 该口径不含 ST ±5%%(ST 跌停会漏判)",
-                        code, det.get("DownStopPrice"))
-        return 0.0
+        return px
 
     def _do_open_send(self, now, st, out):
         d = now.strftime("%Y-%m-%d")
@@ -402,8 +408,8 @@ class LiveDaemon:
                 LOG.warning("开盘发单: %s 拿不到行情(前收/价格缺) → 跳过"
                             "(fail-closed, 今日不买)", code)
                 continue
-            # 跌停价: tick 自带真实值 → 用它; 否则查数据源注入(同 paper_daemon);
-            # 都拿不到才回落到分板系数(近似口径: 无股票名 ⇒ 不含 ST ±5%)
+            # 跌停价: tick 自带权威值 → 用它; 否则查数据源注入(同 paper_daemon);
+            # 都拿不到才回落到自算分板幅度(近似口径, 见 _down_stop_price docstring)
             low = _num(t.get("downStopPrice")) \
                 or self._down_stop_price(code, d) \
                 or round(prev * (1 - limit_ratio_for_code(code)), 2)
