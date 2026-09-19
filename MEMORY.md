@@ -142,6 +142,7 @@
 | 2026-09-13 | tt 接入 **sim 模拟通道**，但**生成侧比桥端严**（sim 仍要求 armed） | 桥端 demo 不校验账户，生成侧必须更谨慎 |
 | 2026-09-14 | **tt 暂缓接 miniQMT，改同花顺手动挂条件单做T** | 用户决定；自动链路挂起，3 条必改项优先级下调 |
 | 2026-09-14 | 外部 clone（`deepseek-harness/` 16.6MB）**移出项目到 `D:/_externals/`** | 保留 13 个未推送提交，修复 worktree 双向指针 |
+| 2026-09-18 | **`MEMORY.md` 按项目拆分**：根=共享记忆，`prism/MEMORY.md` + `tt_solo/MEMORY.md` 独立（**做哪个项目才读哪个**）；`prism_web`/`datasource`/`backtest`/`qmt` 桥并入 prism；`qmt_sync`/`shared`/`ops`/`legacy` 暂不独立（用户 09-18 拍板：只给 tt_solo 独立） | 原 548 行 / 93KB 每次会话全读，白烧上下文 |
 
 ## 账户读取速查（可复用，已存为 skill）
 
