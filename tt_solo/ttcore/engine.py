@@ -109,17 +109,27 @@ class TTEngine:
             asset = acc.asset()
             if not asset:
                 return None
-            positions = acc.positions() or {}
             total = float(asset.get("total_asset") or 0)
             if total <= 0:
                 return None
+            # 持仓事实**必须**先判 None 再决定: None = 查询失败(拿不到),
+            # {} = 券商确认空仓。旧代码 `acc.positions() or {}` 把前者抹成后者,
+            # 于是"拿不到持仓"被当成"没有持仓", 底仓/可卖量/持仓市值全按 0 走。
+            # 与 prism/live_account.py 同口径(tt_solo 自包含, 靠注释同步)。
+            positions = acc.positions()
+            note = ""
+            if positions is None:
+                note = ("券商持仓查询失败: 底仓/可卖量/持仓市值均未知, "
+                        "本轮所有意图按 fail-closed 拦下")
             return {
                 "ok": True, "source": "qmt", "total_asset": total,
                 "cash": float(asset.get("cash") or 0),
                 "market_value": float(asset.get("market_value") or 0),
                 "positions": positions,
-                "can_use": {c: int((p or {}).get("can_use_volume", 0))
+                "can_use": None if positions is None else
+                           {c: int((p or {}).get("can_use_volume", 0))
                             for c, p in positions.items()},
+                "note": note,
             }
         except Exception:
             return None
@@ -333,8 +343,16 @@ class TTEngine:
         sold_today = int(sym_led.get("sold_today", 0)) + int(sold_run)
         bought_today = int(sym_led.get("bought_today", 0)) + int(bought_run)
         can_use = (acct.get("can_use") or {}).get(code)
-        held = (acct.get("positions") or {}).get(code) or {}
+        positions = acct.get("positions")
+        held = (positions or {}).get(code) or {}
         held_value = float(held.get("market_value") or 0)
+
+        # 券商持仓事实未知(positions is None, 查询失败) → 底仓/可卖量/持仓市值
+        # 全部不可判定: **不按"空仓"处理**, 买卖两侧一律拒(fail-closed)。
+        # 若按空仓推演, held_value=0 会让集中度闸门形同虚设 —— 而这是真下单的链。
+        if acct.get("source") == "qmt" and positions is None:
+            return bad("POSITION_UNKNOWN",
+                       "券商持仓查询失败, 无法确认底仓与持仓市值, 本笔拒绝")
 
         if side == "BUY":
             cash = float(acct.get("cash") or 0)
@@ -345,7 +363,6 @@ class TTEngine:
         else:
             # 账户里根本没有这只票 → 归因到"无底仓", 比笼统的"拿不到可卖量"
             # 更容易定位(真实账户最常见的情形)
-            positions = acct.get("positions")
             if positions is not None and code not in positions:
                 return bad("NO_BASE_POSITION",
                            "账户无该标的持仓, 无法卖出(T+1 无底仓)")

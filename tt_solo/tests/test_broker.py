@@ -38,7 +38,26 @@ class FailAfterConnect(FakeBackend):
 def test_asset_none_when_not_connected():
     acc = broker.LiveAccount(backend=FakeBackend(ok=False))
     assert acc.asset() is None
-    assert acc.positions() == {}
+    # 未连接 = 拿不到持仓事实, 与"券商确认空仓"不是一回事
+    assert acc.positions() is None
+
+
+def test_positions_none_vs_confirmed_empty():
+    """`{}` = 券商确认空仓; `None` = 查询失败/未连接。**两者必须可区分**。
+
+    与 prism/live_account.py 同口径(tt_solo 自包含、不许 import, 所以这条
+    注释就是唯一的同步手段)。查询失败若冒充"空仓":
+      - 对账会把真持仓逐条抹掉并把空账本落盘, 卖出通道全灭;
+      - 引擎侧 `positions is not None` 这道判据失效, 底仓/可卖量/持仓市值
+        全被当成 0 —— 而 tt_solo 是**真正接了直连下单**的那条链。
+    """
+    confirmed_empty = broker.LiveAccount(backend=FakeBackend(positions={}))
+    assert confirmed_empty.positions() == {}
+    assert confirmed_empty.can_use_map() == {}
+
+    failed = broker.LiveAccount(backend=FakeBackend(positions=None))
+    assert failed.positions() is None
+    assert failed.can_use_map() is None
 
 
 def test_asset_and_positions_pass_through():
@@ -101,12 +120,43 @@ def test_asset_failure_after_connect_is_none():
     assert acc.available_cash() is None
 
 
-def test_positions_failure_after_connect_is_empty():
-    """连上了但持仓查询炸 → {}(不抛)。"""
+def test_positions_failure_after_connect_is_none():
+    """连上了但持仓查询炸 → None(不抛, 也**不**装空仓)。
+
+    旧实现是 `return self.backend.positions() or {}` → 失败与空仓同形, 消费点
+    无从分辨。
+    """
     acc = broker.LiveAccount(backend=FailAfterConnect())
     assert acc.connect() is True
-    assert acc.positions() == {}
-    assert acc.can_use_map() == {}
+    assert acc.positions() is None
+    assert acc.can_use_map() is None
+
+
+def test_backend_positions_none_when_query_returns_none():
+    """最底层 `_QmtBackend.positions()` 也不许把 query 的 None 装成空仓。
+
+    QMT 的 `query_stock_positions` 在瞬时故障时返回 None —— 那一层就必须把
+    "拿不到" 与 "确认空仓" 分开, 否则上面两层再怎么判都晚了一步。
+    """
+    b = broker._QmtBackend()
+
+    class Trader:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def query_stock_positions(self, acc):
+            return self.rows
+
+    b._trader, b._acc = Trader(None), object()
+    assert b.positions() is None
+
+    b._trader = Trader([])                     # 确认空仓
+    assert b.positions() == {}
+
+    b._trader = Trader([type("P", (), {"stock_code": "600900.SH",
+                                       "volume": 1000,
+                                       "can_use_volume": 800})()])
+    assert b.positions()["600900.SH"]["can_use_volume"] == 800
 
 
 def test_can_use_map_coerces_weird_values():

@@ -6,14 +6,21 @@ prism 内部, 搬过来即可让 tt_solo 自包含。
 
 安全边界:
   - 只做 query_* 查询, 绝不调用 order_stock / cancel_order_stock 等下单接口;
-  - 全部 fail-open: 未连接/查询异常 → None / {}, 由调用方 fail-closed 决策;
+  - 全部 fail-open(不抛异常), 由调用方 fail-closed 决策: 拿不到资产 → None;
+    **拿不到持仓事实 → positions() 返回 None**(与"券商确认空仓"的 {} 区分开);
+    拿不到可卖量 → can_use_map() 返回 None;
   - 后端可注入(backend 参数), 离线测试无需 QMT 终端。
+
+⚠️ **与 prism/live_account.py 同口径, 两侧必须同步** —— tt_solo 刻意自包含
+(不许 import prism, 见 tests/test_selfcontained.py 的护栏), 所以这条注释就是
+唯一的同步手段。改动 `_QmtBackend.positions` / `LiveAccount.positions` /
+`LiveAccount.can_use_map` 的任何一侧, 都要回来看另一侧。
 
 用法:
     acc = LiveAccount()              # 自动枚举已登录资金账号
     if acc.connect():
         acc.asset()                  # {'total_asset':..., 'cash':...}
-        acc.positions()              # {code: {'volume':..,'can_use_volume':..}}
+        acc.positions()              # {code: {...}} 或 None(查询失败)
         calc_buy_volume(10.55, acc.total_asset(), 0.15)
 """
 import time
@@ -83,7 +90,9 @@ class _QmtBackend:
         }
 
     def positions(self):
-        rows = self._trader.query_stock_positions(self._acc) or []
+        rows = self._trader.query_stock_positions(self._acc)
+        if rows is None:              # 查询失败 → 交调用方 fail-closed, 不装"空仓"
+            return None
         out = {}
         for p in rows:
             code = str(_attr(p, "stock_code", "stockCode", default="") or "")
@@ -128,13 +137,19 @@ class LiveAccount:
             return None
 
     def positions(self):
-        """{code: {...}}; 查询失败/未连接 → {}(调用方须与 asset() 交叉验证)。"""
+        """{code: {...}} = 券商确认的持仓(可为空 {}); None = 查询失败/未连接。
+
+        两者**必须可区分**(与 prism/live_account.py 同口径): 查询失败若冒充
+        "券商空仓", 消费点 `positions is not None` 这道判据就失效 —— 底仓、
+        可卖量、持仓市值会全被当成 0, 而 tt_solo 是真正接了直连下单的那条链。
+        """
         if not self.connect():
-            return {}
+            return None
         try:
-            return self.backend.positions() or {}
+            rows = self.backend.positions()
+            return None if rows is None else dict(rows)
         except Exception:
-            return {}
+            return None
 
     def total_asset(self):
         a = self.asset()
@@ -151,9 +166,15 @@ class LiveAccount:
         return v if v > 0 else None
 
     def can_use_map(self):
-        """{code: 可卖量} — 供 exit_rules.evaluate_all 做 T+1 双保险。"""
+        """{code: 可卖量} — 供 exit_rules.evaluate_all 做 T+1 双保险。
+
+        拿不到持仓事实(positions() is None) → None, 不冒充"没有可卖量"。
+        """
+        pos = self.positions()
+        if pos is None:
+            return None
         return {c: int(_num(p.get("can_use_volume"), 0))
-                for c, p in self.positions().items()}
+                for c, p in pos.items()}
 
 
 def calc_buy_volume(price, total_asset, position_ratio=0.15, lot=LOT):

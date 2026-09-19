@@ -423,6 +423,84 @@ def test_max_units_zero_rejected():
         })
 
 
+# ------------------------------------------------------------ 账户事实缺失(T7)
+
+class _FakeAcct:
+    """最小实盘账户替身: asset() 固定, positions() 由测试指定(None = 查询失败)。"""
+
+    def __init__(self, asset, positions):
+        self._asset, self._positions = asset, positions
+
+    def connect(self):
+        return True
+
+    def asset(self):
+        return self._asset
+
+    def positions(self):
+        return self._positions
+
+
+_ASSET = {"total_asset": 500000.0, "cash": 100000.0, "market_value": 300000.0}
+
+
+def _acct_engine(cfg, ledger, now_fn, feed, positions):
+    return TTEngine(cfg, ledger, feed=feed, now_fn=now_fn,
+                    account=_FakeAcct(dict(_ASSET), positions))
+
+
+def test_positions_unknown_is_not_treated_as_empty(cfg, ledger, now_fn,
+                                                   fake_feed):
+    """券商持仓查询失败(positions is None) ≠ 券商确认空仓({})。
+
+    旧消费点 `acc.positions() or {}` 把 None 抹成 {}", 于是"拿不到持仓"被当成
+    "没有持仓": 底仓/可卖量/持仓市值全按 0 走, 集中度闸门(held_value=0)形同
+    虚设, 而 tt_solo 是真正接了直连下单的链。
+    """
+    ledger.load()
+    eng = _acct_engine(cfg, ledger, now_fn, fake_feed(), None)
+    st = eng.account_state()
+
+    assert st["source"] == "qmt"          # 资产拿得到, 仍是实盘账户
+    assert st["positions"] is None        # ← 不冒充空仓
+    assert st["can_use"] is None
+    assert "持仓查询失败" in st["note"]
+
+
+def test_positions_unknown_blocks_all_intents(cfg, ledger, now_fn, fake_feed,
+                                              snap_factory, sym):
+    """持仓事实未知 → 买卖两侧都拒(fail-closed), 不按"空仓"推演。"""
+    ledger.load()
+    feed = fake_feed()
+    feed.set("600900.SH", snap_factory(last=28.50, last_close=28.63,
+                                       high=28.95, low=28.30,
+                                       ma20=28.63, ma20_prev=28.63))
+    eng = _acct_engine(cfg, ledger, now_fn, feed, None)
+    _, intents = eng.plan_symbol(sym, eng.account_state(), OPEN, "OPEN")
+
+    assert intents, "该行情本应产出买卖意图"
+    assert all(not i.ok and i.reject_code == "POSITION_UNKNOWN"
+               for i in intents), [(i.side, i.reject_code) for i in intents]
+
+
+def test_positions_confirmed_empty_blocks_sell_as_no_base(cfg, ledger, now_fn,
+                                                          fake_feed,
+                                                          snap_factory, sym):
+    """券商**确认**空仓({}) → 拒因是 NO_BASE_POSITION, 与"查不到"区分得开。"""
+    ledger.load()
+    feed = fake_feed()
+    feed.set("600900.SH", snap_factory(last=28.50, last_close=28.63,
+                                       high=28.95, low=28.30,
+                                       ma20=28.63, ma20_prev=28.63))
+    eng = _acct_engine(cfg, ledger, now_fn, feed, {})
+    _, intents = eng.plan_symbol(sym, eng.account_state(), OPEN, "OPEN")
+
+    sells = [i for i in intents if i.side == "SELL"]
+    assert sells and all(not i.ok and i.reject_code == "NO_BASE_POSITION"
+                         for i in sells)
+    assert all(i.reject_code != "POSITION_UNKNOWN" for i in intents)
+
+
 # ------------------------------------------------------------ 涨跌停闸门中枢(Minor 1)
 
 def test_limit_close_uses_corrected_prev_close(eng_factory, ledger, sym,
