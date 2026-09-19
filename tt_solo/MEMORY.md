@@ -10,8 +10,9 @@
 
 | 维度 | 状态 |
 |---|---|
-| 实盘（tt 做T策略） | **已接 miniQMT 外部直连**（09-14 晚决策，见「路线回退」节）。代码/测试/闸门就绪，**放行条需每日重写**，`dry_run` 默认仍 True，`--live` 才真报单。**09-18 已修「盘前 ref 取错日」**（见下） |
+| 实盘（tt 做T策略） | **已接 miniQMT 外部直连**（09-14 晚决策，见「路线回退」节）。代码/测试/闸门就绪，**放行条需每日重写**，`dry_run` 默认仍 True，`--live` 才真报单。**「盘前 ref 取错日」已修两轮**（`303b860` → 真机实测推翻 → `3754841`，见下） |
 | 真实账户 | 账号 **88869979**；09-17 07:47 实读总资产 **271,808.12**、4 只持仓（全部 `可卖==持仓`，可做T）；明细见「真实账户快照」节 |
+| 测试基线 | **tt_solo 224 绿**（09-19，`--basetemp=pt_tt21`；原 198 + ref 相关 24 例） |
 
 - **tt_solo 批次：做T策略抽成自包含项目 + 仪表盘重建**（09-16，spec/plan 见 `docs/superpowers/{specs,plans}/2026-09-16-tt-solo-extract*`）：`tt/`（24 文件/4362 行）+ `tt_web/` → **`tt_solo/`（唯一实现，旧目录已删）**。
   · **结构**：`tt_solo/ttcore/`（11 模块：`_vendor`/grid/risk/state/broker/market/config/engine/executor/daemon/arm_today）+ `tt_solo/dashboard/`（Flask + 前端，**:5011**）+ `tests/`（**221 绿**）+ `tools/compare_legacy.py`。
@@ -210,11 +211,16 @@
 
 ## 🔴 高优先（阻塞实盘 / 有资金风险）
 
-0. **✅【09-17 发现 / 09-18 已修】盘前运行会把 `ref` 钉成前前一天的收盘**（`303b860`）
+0. **✅【09-17 发现 / 09-19 已修完两轮】盘前运行会把 `ref` 钉成前前一天的收盘**
    - 现象：09-17 07:47 盘前跑 `TTEngine.plan()`，长电 `ref=28.500`；而 9/16 收盘 **28.46**、9/15 收盘才是 28.50 → 整整错一个交易日。
-   - 根因：`market.XtdataBackend.ticks()` 的 `tick["lastClose"]` 在盘前仍是**上一交易日盘中那份**快照；引擎 `symbol_context()` 优先用它当 `ref`。而 `ledger.get_ref()` 当天第一轮即缓存 ⇒ **盘前启动守护 = 全天档位基于错误中枢**。
-   - 修法（已落地）：`market.prev_close(tick, daily, fallback)` —— **优先最后一根已完成日K的收盘**，仅当 tick 的交易日**新于**日K末根时才采信 tick，日K取不到则回落 tick；`ref_src` 记 `daily`/`tick_newer`/`tick_fallback`。
-   - ⏳ 仍未做：QMT 在线后**盘前实跑一次**验证（`python -m ttcore.daemon --direct --once`，核对 `ref_src=="daily"` 且 `ref == 上一交易日收盘`）。
+   - 根因：`market.XtdataBackend.ticks()` 的 `tick["lastClose"]` 在盘前仍是**上一交易日盘中那份**快照；引擎优先用它当 `ref`。而 `ledger.get_ref()` 当天第一轮即缓存 ⇒ **盘前启动守护 = 全天档位基于错误中枢**。
+   - **第一版修法（`303b860`，已被推翻）**：`prev_close` 用"tick 交易日**新于**日K末根就采信 tick"的启发式。
+   - **⚠️ 09-19 真机实测推翻它**：QMT 把 `tick.time/timetag` 打成**当前墙钟**（周六 13:32 测到 `timetag=20260919 13:32:52`），而 `tick.lastClose` 仍是 **09-17 的 28.46**（正确的"前收"此刻应是 09-18 的 **28.27**）⇒ 启发式几乎恒真，**又退回去信陈旧 tick，ref 仍错一天**（实测返回 `tick_newer 28.46`）。
+   - **✅ 现行修法（`3754841`）**：**以"今天"为参照系**，彻底不信 tick 的时间戳 ——
+     `bars = 日K(升序, 丢掉 close<=0 占位行)`；`末日K == 今天` → `ref = 上一根.close`(`daily_prev`)；否则 `ref = 末根.close`(`daily`)；无日K才回落 tick(`tick_fallback`)。`ref_mode=="open"` 分支不变。
+   - **真机只读复测（09-19，QMT 在线）**：`600900.SH → 28.27/daily`、`603268.SH → 208.00/daily`、`600938.SH → 32.30`、`601088.SH → 46.23`，四只票全部与旧口径（陈旧 lastClose）**不同**（探针 `.superpowers/sdd/probe-tt-ref-live.py`、`probe-tt-ref-raw.py`）。
+   - ⏳ 仍未做：**真实盘中/盘前时段**再实跑一次（`cd tt_solo; python -m ttcore.daemon --direct --once`，核对 runtime 快照里 `ref_src=="daily"` 且 `ref == 上一交易日收盘`）—— 逻辑已由 24 例离线测试 + 真机只读复测覆盖。
+   - 遗留（非阻塞）：`ctx["last_close"]`（涨跌停带/面板显示）仍用陈旧 `tick.lastClose`，**未改口径**；依赖本机墙钟"今天"，时钟错乱会退化为"取末根"。
 
 1. **tt 3 条必改项 —— 已全部处置**（09-14 晚）：
    - 桥端日去重键 `stock_code` → ✅ **已修为 `order_id`**（`qmt/bridge/signal_bridge_real.py` 新增 `_dedup_key()`；外部直连通道本就不走桥，但走 A2 时必需）
