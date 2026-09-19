@@ -11,11 +11,17 @@
   - 持有期: 买入日起满 max_hold_days 个自然日     → SELL(强制平仓)
   - 优先级: 止损 > 止盈 > 持有期(先触发哪个卖哪个, 同一天多规则命中取止损)
   - T+1(实盘启用, 默认关闭): 当日买入当日不可卖
+  - buy_date 缺失/不可解析 → 视为"未知", **不回落今日**(回落会让 T+1 恒拦、
+    持有期恒 0 → 该持仓永远不卖); 此时 T+1 交给券商 can_use_volume 判定,
+    持有期规则跳过, 止盈止损照常
   - 跌停顺延(见 is_limit_down): 跌停价上卖不出, 调用方跳过当日判定
 
 价格语义: A股按"现价"判断; 委托价默认市价(price=0), 桥端按对手价成交。
 """
+import logging
 from datetime import date, datetime
+
+LOG = logging.getLogger(__name__)
 
 
 def _as_date(v):
@@ -68,7 +74,7 @@ class ExitRule:
         self.code = code
         self.name = name or code
         self.buy_price = float(buy_price or 0)
-        self.buy_date = _as_date(buy_date) or (today or date.today())
+        self.buy_date = _as_date(buy_date)      # None = 未知(绝不回落今日)
         self.take_profit_pct = take_profit_pct
         self.stop_loss_pct = stop_loss_pct
         self.max_hold_days = max_hold_days
@@ -82,8 +88,10 @@ class ExitRule:
         action: "SELL"; reason 含规则名供日志/信号。"""
         if not last_price or last_price <= 0 or self.buy_price <= 0:
             return None, None
-        # T+1: 当日买入的仓位今日不可卖(A股规则)
-        if self.enforce_t1 and self.today <= self.buy_date:
+        # T+1: 当日买入的仓位今日不可卖(A股规则)。
+        # buy_date 未知 → 不在此拦(交给调用方按券商 can_use_volume 判定)
+        if self.enforce_t1 and self.buy_date is not None \
+                and self.today <= self.buy_date:
             return None, None
         # 止损优先
         if last_price <= self.buy_price * (1 - self.stop_loss_pct):
@@ -95,11 +103,12 @@ class ExitRule:
             return "SELL", ("止盈: 现价%.2f >= 买入价%.2f×(1+%.0f%%)"
                             % (last_price, self.buy_price,
                                self.take_profit_pct * 100))
-        # 持有期强制
-        hold_days = (self.today - self.buy_date).days
-        if hold_days >= self.max_hold_days:
-            return "SELL", ("持有期满: %d天 >= %d天" % (hold_days,
-                                                       self.max_hold_days))
+        # 持有期强制(buy_date 未知 → 算不出持有天数, 跳过该规则, 不误判)
+        if self.buy_date is not None:
+            hold_days = (self.today - self.buy_date).days
+            if hold_days >= self.max_hold_days:
+                return "SELL", ("持有期满: %d天 >= %d天" % (hold_days,
+                                                           self.max_hold_days))
         return None, None
 
     def exit_reason_preview(self, last_price):
@@ -169,6 +178,9 @@ class PositionBook:
         enforce_t1: 透传给 ExitRule(当日买入不卖)。
         today: 判定基准日(默认 date.today()); 实盘守护传入自己的时钟日,
                避免注入时钟与墙钟不一致时 T+1/持有期误判。
+        坏数据不得瘫痪整轮: 缺/非法 buy_price → 跳过该只 + WARNING。
+        buy_date 未知 → 不回落今日; enforce_t1 时改由 can_use_volume 判定
+        (拿不到 → 本轮跳过, fail-closed 防 T+1 违规)。
         返回 [(code, position, action, reason), ...]"""
         out = []
         for code, pos in self.positions.items():
@@ -181,8 +193,27 @@ class PositionBook:
             last = (last_prices or {}).get(code)
             if not last:
                 continue
-            buy_date = _as_date(pos.get("buy_date")) or date.today()
-            rule = ExitRule(code, pos.get("name"), pos["buy_price"], buy_date,
+            try:
+                buy_price = float(pos.get("buy_price"))
+            except (TypeError, ValueError):
+                LOG.warning("持仓 %s 买入价缺失/非法(buy_price=%r) → 跳过本轮卖出"
+                            "判定", code, pos.get("buy_price"))
+                continue
+            if buy_price <= 0:
+                LOG.warning("持仓 %s 买入价非正(%r) → 跳过本轮卖出判定",
+                            code, buy_price)
+                continue
+            buy_date = _as_date(pos.get("buy_date"))
+            if buy_date is None and enforce_t1:
+                # 日期只是启发式, 券商可卖量才是权威; 两者都拿不到 → 不卖
+                avail = (can_use or {}).get(code)
+                if avail is None:
+                    avail = pos.get("can_use_volume")
+                if avail is None or int(avail) <= 0:
+                    LOG.warning("持仓 %s 买入日未知且无可卖量佐证 → 跳过本轮"
+                                "卖出判定(防 T+1 违规)", code)
+                    continue
+            rule = ExitRule(code, pos.get("name"), buy_price, buy_date,
                             today=today, enforce_t1=enforce_t1, **rule_kwargs)
             action, reason = rule.evaluate(last)
             if action:

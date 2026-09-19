@@ -6,15 +6,16 @@
 
 安全边界:
   - 只做 query_* 查询, 绝不调用 order_stock / cancel_order_stock 等下单接口;
-  - 全部 fail-open: 未连接/查询异常 → None / {}, 由调用方 fail-closed 决策
-    (拿不到资产 → 不计算股数; 拿不到持仓 → 不做对账/不卖);
+  - 全部 fail-open(不抛异常), 由调用方 fail-closed 决策: 拿不到资产 → None;
+    **拿不到持仓事实 → positions() 返回 None**(与"券商确认空仓"的 {} 区分开,
+    否则对账会把真持仓抹掉); 拿不到可卖量 → can_use_map() 返回 None;
   - 后端可注入(backend 参数), 离线测试无需 QMT 终端。
 
 用法:
     acc = LiveAccount()              # 自动枚举已登录资金账号
     if acc.connect():
         acc.asset()                  # {'total_asset':..., 'cash':...}
-        acc.positions()              # {code: {'volume':..,'can_use_volume':..}}
+        acc.positions()              # {code: {...}} 或 None(查询失败)
         calc_buy_volume(10.55, acc.total_asset(), 0.15)
 """
 import time
@@ -84,7 +85,9 @@ class _QmtBackend:
         }
 
     def positions(self):
-        rows = self._trader.query_stock_positions(self._acc) or []
+        rows = self._trader.query_stock_positions(self._acc)
+        if rows is None:              # 查询失败 → 交调用方 fail-closed, 不装"空仓"
+            return None
         out = {}
         for p in rows:
             code = str(_attr(p, "stock_code", "stockCode", default="") or "")
@@ -129,13 +132,18 @@ class LiveAccount:
             return None
 
     def positions(self):
-        """{code: {...}}; 查询失败/未连接 → {}(调用方须与 asset() 交叉验证)。"""
+        """{code: {...}} = 券商确认的持仓(可为空 {}); None = 查询失败/未连接。
+
+        两者**必须可区分**: 查询失败若冒充"券商空仓", 对账会逐条删掉真持仓
+        并把空账本落盘, 卖出通道全灭且调用方以为对账成功。
+        """
         if not self.connect():
-            return {}
+            return None
         try:
-            return self.backend.positions() or {}
+            rows = self.backend.positions()
+            return None if rows is None else dict(rows)
         except Exception:
-            return {}
+            return None
 
     def total_asset(self):
         a = self.asset()
@@ -152,17 +160,23 @@ class LiveAccount:
         return v if v > 0 else None
 
     def can_use_map(self):
-        """{code: 可卖量} — 供 exit_rules.evaluate_all 做 T+1 双保险。"""
+        """{code: 可卖量} — 供 exit_rules.evaluate_all 做 T+1 双保险。
+
+        拿不到持仓事实(positions() is None) → None, 不冒充"没有可卖量"。"""
+        pos = self.positions()
+        if pos is None:
+            return None
         return {c: int(_num(p.get("can_use_volume"), 0))
-                for c, p in self.positions().items()}
+                for c, p in pos.items()}
 
 
 def calc_buy_volume(price, total_asset, position_ratio=0.15, lot=LOT):
-    """按 总资产 × 单只比例 ÷ 挂单价 计算买入股数, 向下取整到整手。
+    """按 基数 × 单只比例 ÷ 挂单价 计算买入股数, 向下取整到整手。
 
     参数缺失/非法 → 0(调用方据此跳过该候选, 宁缺勿错)。与
-    strategy_close_pick.calc_buy_volume 同思路, 但基数用总资产(净值)而非
-    可用现金 —— 与 paper 侧"每只 15% 净值"口径对齐。
+    strategy_close_pick.calc_buy_volume 同思路, 但**基数由调用方给**:
+    实盘守护传 min(总资产, 可用现金) 的建仓预算(现金 0 时算出 0 → 不下单),
+    paper 侧传净值 —— 与"每只 15% 净值"口径对齐。
     """
     price = _num(price, 0)
     total = _num(total_asset, 0)

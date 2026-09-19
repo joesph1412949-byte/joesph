@@ -9,7 +9,9 @@
                 单只比例/持仓上限复用策略 execution 块(pct/top_n)。
   #3 卖出链路   复用 exit_rules.ExitRule + positions.json, 盘中巡检 → SELL。
   #4 持仓对账   每轮(节流)用券商 query_stock_positions 校正账本: 消失的持仓
-                移除、can_use_volume 回写(仅查询链路可信时才动账本)。
+                移除、can_use_volume 回写、**券商有账本无的持仓保守采纳**(账本被
+                抹/JSON 损坏时自愈, 否则该持仓止盈止损永久失效); 只有拿到券商
+                持仓事实(None ≠ {})才动账本, 账本绝不被写成"查询失败=空仓"。
   #6 幂等       确定性 order_id(BUY_<日期>_<代码> / SELL_<日期>_<代码>),
                 重启重跑不产生新文件; 桥端 per-day dedup 兜底。
   #8 T+1        当日买入不卖: exit_rules enforce_t1 + 券商 can_use_volume
@@ -18,7 +20,10 @@
 安全边界(与 prism/paper_daemon.py §8 同款):
   - **默认 dry_run=True**: 只记录/日志, 零副作用; 显式 --live 才落信号;
   - 本进程只写信号文件, **绝不调用任何下单接口**(下单在 QMT 桥端);
-  - 行情/账户查询全 fail-open, 单轮异常不影响下一轮;
+  - 行情/账户查询全 fail-open(不抛异常), 但**决策 fail-closed**: 拿不到账户
+    事实 → 不建仓/不对账/不卖, 绝不拿"不知道"当"没有";
+  - 每轮开头查 trader.check_paused()(D:/QMT_SIGNALS/paused), 急停时本进程
+    自己也不落 BUY/SELL;
   - 真实盘最终闸门在桥端 armed.txt(当日日期), 本进程无法绕过。
 
 用法:
@@ -29,13 +34,13 @@
 import argparse
 import json
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from shared.common import STATE_DIR, atomic_write, next_weekday
 from shared.exit_rules import PositionBook, is_limit_down
 from prism import schedule, trader
-from prism.live_account import LiveAccount, calc_buy_volume
+from prism.live_account import LiveAccount, _num, calc_buy_volume
 
 LOG = logging.getLogger("live_daemon")
 
@@ -143,10 +148,15 @@ class LiveDaemon:
     def _load_positions(self):
         if self.positions_path.exists():
             try:
-                return PositionBook.from_json(json.loads(
-                    self.positions_path.read_text(encoding="utf-8")))
-            except Exception:
-                pass
+                data = json.loads(self.positions_path.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    raise ValueError("顶层不是对象")
+                return PositionBook.from_json(data)
+            except Exception as e:
+                # 读失败不静默当空书(否则真实持仓被当"无持仓", 卖出永久空转);
+                # 也不在此覆盖文件 —— 留痕交人工核对, 券商对账(R2)会自愈
+                LOG.warning("positions.json 读取/解析失败(%r) → 本轮按空账本处理; "
+                            "文件保持原样, 请人工核对", e)
         return PositionBook()
 
     def _save_positions(self, book):
@@ -178,16 +188,26 @@ class LiveDaemon:
                                     root=self.signal_root)
 
     # ---------------- 券商对账(gap #4) ----------------
-    def _sync_positions(self):
+    def _sync_positions(self, today=None):
         """用券商持仓校正本地账本。返回 (变更数, 链路是否可信)。
 
-        仅当 asset() 查询成功才动账本 —— 拿不到账户事实时宁可不改
-        (防"查询失败 → 误判空仓 → 抹掉账本")。"""
+        只有拿到券商持仓事实才动账本: asset()/positions() 拿不到(或抛异常) →
+        (0, False), 账本一字不动 —— 防"查询失败 → 误判空仓 → 抹掉账本 + 空账本
+        落盘"(positions() 为 None 是"拿不到", {} 才是"券商确认空仓")。
+        反向也要自愈: 券商有、账本无(账本被抹/JSON 损坏) → 保守采纳, 否则该持仓
+        的止盈止损通道永久失效。"""
         if self.account is None:
             return 0, False
-        if self.account.asset() is None:
+        try:
+            if self.account.asset() is None:
+                return 0, False
+            pos = self.account.positions()
+        except Exception as e:
+            LOG.warning("券商持仓查询异常 → 本轮不对账, 账本保持原样: %r", e)
             return 0, False
-        pos = self.account.positions()
+        if pos is None:
+            LOG.warning("券商持仓查询失败(拿不到账户事实) → 本轮不对账, 账本保持原样")
+            return 0, False
         book = self._load_positions()
         changed = 0
         for code in list(book.all()):
@@ -195,10 +215,26 @@ class LiveDaemon:
                 book.remove(code)
                 changed += 1
         for code, p in pos.items():
-            if book.get(code) is not None:
+            cur = book.get(code)
+            if cur is not None:
                 if book.update(code, can_use_volume=int(
                         p.get("can_use_volume") or 0)):
                     changed += 1
+                continue
+            # 券商有、账本无 → 保守采纳(buy_date 取今日保证 T+1 安全, 不会当天就卖)
+            open_price = _num(p.get("open_price"), 0)
+            if open_price <= 0:
+                LOG.warning("对账: 券商持仓 %s 拿不到成本价(open_price=%r) → "
+                            "跳过采纳, 请人工核对", code, p.get("open_price"))
+                continue
+            adopt_day = today or date.today()
+            book.add(code, code, buy_price=open_price, buy_date=adopt_day,
+                     volume=int(_num(p.get("volume"), 0)),
+                     can_use_volume=int(_num(p.get("can_use_volume"), 0)))
+            changed += 1
+            LOG.warning("对账: 账本缺失 %s → 已按券商事实采纳(成本 %.2f, 数量 %s, "
+                        "买入日按 %s 保证 T+1 安全)", code, open_price,
+                        p.get("volume"), adopt_day)
         if changed:
             self._save_positions(book)
         return changed, True
@@ -210,7 +246,7 @@ class LiveDaemon:
             if ts - self._last_sync_ts < SYNC_INTERVAL:
                 return
             self._last_sync_ts = ts
-            out["sync"] = self._sync_positions()[0]
+            out["sync"] = self._sync_positions(today=now.date())[0]
         except Exception as e:
             LOG.warning("对账失败(忽略): %r", e)
 
@@ -230,6 +266,14 @@ class LiveDaemon:
             out["skipped"].append("asset_unavailable")
             LOG.warning("收盘选股: 拿不到账户总资产 → 本日不建仓(fail-closed)")
             return
+        cash = self.account.available_cash() if self.account else None
+        if cash is None:
+            out["skipped"].append("cash_unavailable")
+            LOG.warning("收盘选股: 拿不到可用资金 → 本日不建仓(fail-closed); "
+                        "只按总资产算股数会下出付不起的单")
+            return
+        # 建仓预算: 总资产只是上限, 真能掏出来的钱是可用现金; 逐只扣减
+        budget = min(asset, cash)
         book = self._load_positions()
         slots = self.max_positions - len(book.all())
         if slots <= 0:
@@ -240,10 +284,11 @@ class LiveDaemon:
         plans = []
         for s in sigs:
             price = float(s.get("price") or 0)
-            vol = calc_buy_volume(price, asset, self.position_ratio)
+            vol = calc_buy_volume(price, budget, self.position_ratio)
             if vol <= 0:
                 out["skipped"].append(s.get("stock_code"))
                 continue
+            budget -= vol * price
             plans.append({"code": s["stock_code"], "name": s.get("name") or "",
                           "price": price, "volume": vol,
                           "for_date": for_date,
@@ -255,9 +300,10 @@ class LiveDaemon:
         st["plans"] = [p for p in st["plans"]
                        if p.get("for_date") != for_date] + plans
         out["planned"] = plans
-        LOG.info("收盘选股: 计划 %d 只(总资产 %.0f, 单只 %.0f%%, 上限 %d 只) → %s 发单",
-                 len(plans), asset, self.position_ratio * 100,
-                 self.max_positions, for_date)
+        LOG.info("收盘选股: 计划 %d 只(预算 %.0f = min(总资产 %.0f, 可用现金 %.0f), "
+                 "单只 %.0f%%, 上限 %d 只) → %s 发单",
+                 len(plans), min(asset, cash), asset, cash,
+                 self.position_ratio * 100, self.max_positions, for_date)
 
     # ---------------- 次日开盘发单 ----------------
     def _do_open_send(self, now, st, out):
@@ -303,11 +349,14 @@ class LiveDaemon:
             if lc > 0:
                 last_close[c] = lc
         try:
-            can_use = self.account.can_use_map() if self.account else {}
-        except Exception:
-            can_use = {}
+            can_use = self.account.can_use_map() if self.account else None
+        except Exception as e:
+            LOG.warning("券商可卖量查询失败 → 本轮退回账本记录的可卖量: %r", e)
+            can_use = None
         tp, sl, hold = self._sell_rules()
-        hits = book.evaluate_all(last, can_use=can_use or None,
+        # 传 {} 而非 None: 让 evaluate_all 在券商拿不到该股时退回账本 can_use_volume
+        # (传 None 会完全不按可卖量过滤, 连账本记的 0 也忽略)
+        hits = book.evaluate_all(last, can_use=can_use or {},
                                  enforce_t1=True, today=now.date(),
                                  take_profit_pct=tp, stop_loss_pct=sl,
                                  max_hold_days=hold)
@@ -316,8 +365,16 @@ class LiveDaemon:
             if is_limit_down(code, last.get(code), last_close.get(code)):
                 out["skipped"].append("limit_down:%s" % code)
                 continue
-            avail = can_use.get(code) if can_use else None
-            vol = int(avail if avail else (pos.get("volume") or 0))
+            avail = (can_use or {}).get(code)      # 券商事实优先
+            if avail is None:
+                avail = pos.get("can_use_volume")  # 退回账本记的可卖量
+            if avail is None:
+                # 两条来源都没有 → 本轮不卖(fail-closed; 按 volume 全量硬卖会出废单)
+                out["skipped"].append("no_can_use:%s" % code)
+                LOG.warning("卖出巡检: %s 拿不到可卖量(券商/账本皆无) → 本轮跳过",
+                            code)
+                continue
+            vol = int(avail)
             if vol <= 0:
                 out["skipped"].append("no_volume:%s" % code)
                 continue
@@ -343,10 +400,17 @@ class LiveDaemon:
 
     def tick_once(self, now=None):
         now = now or (self.now_fn() if self.now_fn else datetime.now())
-        d = now.strftime("%Y-%m-%d")
-        hm = now.strftime("%H:%M")
         out = {"action": "idle", "planned": [], "buys": [], "sells": [],
                "skipped": [], "sync": 0, "screen": None}
+        # 急停开关最先判定: 早于任何分支/状态变更/计划消费/信号生成。
+        # 本进程自己 build_signal + 落 pending(BUY 和 SELL 都落), 不查急停就绕过了它
+        if trader.check_paused():
+            out["action"] = "paused"
+            LOG.warning("急停开关存在(%s) → 本轮不生成任何信号, 不消费计划",
+                        trader.PAUSE_FILE)
+            return out
+        d = now.strftime("%Y-%m-%d")
+        hm = now.strftime("%H:%M")
         st = self._load_state()
 
         # 过期计划清理(跨日重启): for_date < 今日 → 作废, 不追买

@@ -5,20 +5,32 @@
 状态与信号目录指向 tmp_path。
 """
 import json
+import logging
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from shared.common import next_weekday
 from shared.exit_rules import ExitRule, PositionBook, is_limit_down
-from prism.live_account import calc_buy_volume
+from prism import trader
+from prism.live_account import LiveAccount, calc_buy_volume
 from prism.live_daemon import LiveDaemon
 
 MON = datetime(2026, 9, 14, 15, 6)      # 周一 收盘后(选股)
 TUE_OPEN = datetime(2026, 9, 15, 9, 27)  # 周二 开盘买入窗口
 TUE_AM = datetime(2026, 9, 15, 10, 0)    # 周二 盘中
+
+
+@pytest.fixture(autouse=True)
+def _pause_file_in_tmp(tmp_path, monkeypatch):
+    """每个用例都把急停开关指向 tmp —— 绝不读真实 D:/QMT_SIGNALS/paused
+    (真实盘那份是用户的状态, 读它会随用户操作让测试随机变红/变绿)。"""
+    monkeypatch.setattr(trader, "PAUSE_FILE", tmp_path / "paused")
+    return tmp_path / "paused"
 
 
 # ---------------- 测试替身 ----------------
@@ -35,14 +47,22 @@ class _FakeProvider:
 
 
 class _FakeAccount:
-    def __init__(self, asset=None, positions=None):
+    """账户替身。pos_exc/pos_none 用来模拟"券商持仓查询失败"这一事实缺失态。"""
+
+    def __init__(self, asset=None, positions=None, pos_exc=None, pos_none=False):
         self._asset = asset
         self._pos = positions or {}
+        self._pos_exc = pos_exc
+        self._pos_none = pos_none
 
     def asset(self):
         return self._asset
 
     def positions(self):
+        if self._pos_exc:
+            raise self._pos_exc
+        if self._pos_none:
+            return None
         return {k: dict(v) for k, v in self._pos.items()}
 
     def total_asset(self):
@@ -52,15 +72,45 @@ class _FakeAccount:
         v = float(a.get("total_asset") or 0)
         return v if v > 0 else None
 
+    def available_cash(self):
+        a = self._asset
+        if not a:
+            return None
+        v = float(a.get("cash") or 0)
+        return v if v > 0 else None
+
     def can_use_map(self):
-        return {c: int(p.get("can_use_volume") or 0)
-                for c, p in self._pos.items()}
+        pos = self.positions()
+        if pos is None:
+            return None
+        return {c: int(p.get("can_use_volume") or 0) for c, p in pos.items()}
 
 
-def _account(total=1000000.0, positions=None):
-    return _FakeAccount({"total_asset": total, "cash": total * 0.5,
+class _FakeBackend:
+    """LiveAccount 后端替身: positions 返回指定值或抛异常(不碰 QMT)。"""
+
+    def __init__(self, positions=None, exc=None):
+        self._pos = positions
+        self._exc = exc
+
+    def connect(self):
+        return True
+
+    def asset(self):
+        return {"total_asset": 1000000.0, "cash": 1000000.0,
+                "market_value": 0.0, "frozen_cash": 0.0}
+
+    def positions(self):
+        if self._exc:
+            raise self._exc
+        return self._pos
+
+
+def _account(total=1000000.0, positions=None, cash=None, **kw):
+    return _FakeAccount({"total_asset": total,
+                         "cash": total * 0.5 if cash is None else cash,
                          "market_value": 0.0, "frozen_cash": 0.0},
-                        positions or {})
+                        positions or {}, **kw)
 
 
 def _strategy(tp=0.15, sl=0.05, hold=5):
@@ -161,8 +211,9 @@ def test_close_pick_plans_with_sized_volume(tmp_path):
     st = _read_json(tmp_path / "live_state.json")
     plans = {p["code"]: p for p in st["plans"]}
     assert set(plans) == {"600000.SH", "000001.SZ"}
-    assert plans["600000.SH"]["volume"] == 14200             # 100万×15%÷10.55
-    assert plans["000001.SZ"]["volume"] == 7500              # 150000÷20
+    # 建仓预算 = min(总资产 100万, 可用现金 50万) = 50万, 逐只扣减(R5)
+    assert plans["600000.SH"]["volume"] == 7100              # 50万×15%÷10.55
+    assert plans["000001.SZ"]["volume"] == 3100              # (50万-74905)×15%÷20
     assert plans["600000.SH"]["for_date"] == "2026-09-15"    # 次一工作日
     assert out["planned"][0]["price"] == 10.55
     # 收盘只落计划, 不写信号(避免桥端非交易时段拒单)
@@ -210,14 +261,22 @@ def test_close_pick_only_once_per_day(tmp_path):
 
 # ---------------- 次日开盘发单 + 记账 ----------------
 
+def _plan(code="600000.SH", price=10.55, vol=14200,
+          for_date="2026-09-15"):
+    return {"code": code, "name": "浦发", "price": price, "volume": vol,
+            "for_date": for_date, "created": "2026-09-14T15:06:00",
+            "strategy_id": "t_live", "composite": 1.0}
+
+
+def _seed_state(tmp_path, plans, pick_slots=("2026-09-14T15:05",)):
+    _write_json(tmp_path / "live_state.json", {
+        "version": 1, "pick_slots": list(pick_slots),
+        "exit_signaled": {}, "plans": plans})
+
+
 def _seed_plan(tmp_path, code="600000.SH", price=10.55, vol=14200,
                for_date="2026-09-15"):
-    _write_json(tmp_path / "live_state.json", {
-        "version": 1, "pick_slots": ["2026-09-14T15:05"],
-        "exit_signaled": {},
-        "plans": [{"code": code, "name": "浦发", "price": price, "volume": vol,
-                   "for_date": for_date, "created": "2026-09-14T15:06:00",
-                   "strategy_id": "t_live", "composite": 1.0}]})
+    _seed_state(tmp_path, [_plan(code, price, vol, for_date)])
 
 
 def test_open_send_writes_signal_and_records_position(tmp_path):
@@ -255,6 +314,178 @@ def test_stale_plan_discarded(tmp_path):
     d.tick_once(datetime(2026, 9, 14, 9, 27))
     assert _read_json(tmp_path / "live_state.json")["plans"] == []
     assert _pending(tmp_path) == []
+
+
+# ---------------- R1 查询失败 vs 券商确认空仓 (必须可区分) ----------------
+
+def test_live_account_positions_none_when_backend_raises():
+    acc = LiveAccount(backend=_FakeBackend(exc=RuntimeError("query 炸了")))
+    assert acc.positions() is None
+    assert acc.can_use_map() is None          # 不冒充"没有可卖量"
+
+
+def test_live_account_positions_none_when_backend_returns_none():
+    acc = LiveAccount(backend=_FakeBackend(positions=None))
+    assert acc.positions() is None
+    assert acc.can_use_map() is None
+
+
+def test_live_account_positions_empty_when_backend_confirms_empty():
+    acc = LiveAccount(backend=_FakeBackend(positions=[]))     # 券商确认空仓
+    assert acc.positions() == {}
+    assert acc.can_use_map() == {}
+
+
+def test_live_account_positions_none_when_not_connected():
+    class _NoConnect(_FakeBackend):
+        def connect(self):
+            return False
+
+    acc = LiveAccount(backend=_NoConnect(positions=[]))
+    assert acc.positions() is None
+
+
+def test_sync_fail_closed_when_positions_query_raises(tmp_path):
+    _seed_position(tmp_path)
+    before = (tmp_path / "positions.json").read_bytes()
+    d = _daemon(tmp_path, account=_account(pos_exc=RuntimeError("query 炸了")))
+    assert d._sync_positions() == (0, False)
+    assert (tmp_path / "positions.json").read_bytes() == before   # 账本一字不动
+
+
+def test_sync_fail_closed_when_positions_query_returns_none(tmp_path):
+    _seed_position(tmp_path)
+    before = (tmp_path / "positions.json").read_bytes()
+    d = _daemon(tmp_path, account=_account(pos_none=True))
+    assert d._sync_positions() == (0, False)
+    assert (tmp_path / "positions.json").read_bytes() == before
+
+
+def test_sync_fail_closed_through_real_live_account(tmp_path):
+    """LiveAccount + 炸掉的后端(控制者复现形状) → 真持仓账本不得被抹。"""
+    _seed_position(tmp_path)
+    acc = LiveAccount(backend=_FakeBackend(exc=RuntimeError("qmt 掉线")))
+    d = _daemon(tmp_path, account=acc)
+    assert d._sync_positions() == (0, False)
+    assert "600000.SH" in _read_json(tmp_path / "positions.json")
+
+
+# ---------------- R2 对账自愈: 券商有、账本无 → 保守采纳 ----------------
+
+def test_sync_adopts_broker_position_missing_from_book(tmp_path, caplog):
+    _write_json(tmp_path / "positions.json", {})              # 账本被抹空
+    d = _daemon(tmp_path, account=_account(positions={
+        "000001.SZ": {"open_price": 20.0, "volume": 500,
+                      "can_use_volume": 0}}))
+    with caplog.at_level(logging.WARNING):
+        changed, verified = d._sync_positions(today=date(2026, 9, 15))
+    assert verified is True and changed == 1                  # 采纳计入 changed
+    pos = _read_json(tmp_path / "positions.json")["000001.SZ"]
+    assert pos["buy_price"] == 20.0                           # 成本取券商 open_price
+    assert pos["buy_date"] == "2026-09-15"                    # 今日 → T+1 安全
+    assert pos["volume"] == 500 and pos["can_use_volume"] == 0
+    assert "000001.SZ" in caplog.text and "账本缺失" in caplog.text
+
+
+def test_sync_skips_adoption_without_open_price(tmp_path, caplog):
+    _write_json(tmp_path / "positions.json", {})
+    d = _daemon(tmp_path, account=_account(positions={
+        "000001.SZ": {"open_price": 0, "volume": 500, "can_use_volume": 0}}))
+    with caplog.at_level(logging.WARNING):
+        changed, verified = d._sync_positions(today=date(2026, 9, 15))
+    assert verified is True and changed == 0                  # 拿不到成本 → 不采纳
+    assert _read_json(tmp_path / "positions.json") == {}
+    assert "000001.SZ" in caplog.text
+
+
+def test_load_positions_corrupt_json_warns_and_is_not_overwritten(tmp_path,
+                                                                 caplog):
+    (tmp_path / "positions.json").write_text("{坏 JSON", encoding="utf-8")
+    before = (tmp_path / "positions.json").read_bytes()
+    d = _daemon(tmp_path, account=_account(positions={}))
+    with caplog.at_level(logging.WARNING):
+        assert d._load_positions().all() == {}                # 不炸, 但留痕
+    assert "positions.json" in caplog.text
+    assert d._sync_positions(today=date(2026, 9, 15)) == (0, True)
+    assert (tmp_path / "positions.json").read_bytes() == before   # 未被覆盖
+
+
+# ---------------- R3 急停开关对守护自身发单生效 ----------------
+
+def test_tick_once_paused_blocks_signals_and_state_change(tmp_path):
+    _seed_state(tmp_path, [_plan(), _plan(code="000001.SZ", for_date="2026-09-11")])
+    _seed_position(tmp_path)                       # 盘中本应止损卖出
+    (tmp_path / "paused").write_text("1", encoding="utf-8")   # 按下急停
+    d = _daemon(tmp_path, dry_run=False,
+                account=_account(positions={"600000.SH": {"can_use_volume": 1000}}),
+                ticks_fn=_ticks(9.4, 10.0))
+    state_before = (tmp_path / "live_state.json").read_bytes()
+    pos_before = (tmp_path / "positions.json").read_bytes()
+    out_open = d.tick_once(TUE_OPEN)               # 开盘窗口本应发 BUY
+    out_am = d.tick_once(TUE_AM)                   # 盘中本应发 SELL
+    assert out_open["action"] == "paused" and out_am["action"] == "paused"
+    assert out_open["buys"] == [] and out_am["sells"] == []
+    assert _pending(tmp_path) == []
+    assert (tmp_path / "live_state.json").read_bytes() == state_before
+    assert (tmp_path / "positions.json").read_bytes() == pos_before
+
+
+def test_tick_once_not_paused_still_trades(tmp_path):
+    """负控: 急停文件不存在(autouse fixture 把开关指向 tmp) → 照常判定卖出。"""
+    assert not (tmp_path / "paused").exists()
+    _seed_position(tmp_path)
+    d = _daemon(tmp_path, dry_run=False,
+                account=_account(positions={"600000.SH": {"can_use_volume": 1000}}),
+                ticks_fn=_ticks(9.4, 10.0))
+    out = d.tick_once(TUE_AM)
+    assert out["action"] == "tick" and len(out["sells"]) == 1
+
+
+# ---------------- R4 拿不到可卖量 → 不得回落全量股数 ----------------
+
+def test_sell_patrol_no_sell_when_book_can_use_is_zero(tmp_path):
+    """账本记 can_use_volume=0 且券商查询失败 → 不得按 volume 全量硬卖。"""
+    _write_json(tmp_path / "positions.json", {
+        "600000.SH": {"code": "600000.SH", "name": "浦发", "buy_price": 10.0,
+                      "buy_date": "2026-09-14", "volume": 1000,
+                      "can_use_volume": 0}})
+    d = _daemon(tmp_path, dry_run=False,
+                account=_account(pos_exc=RuntimeError("持仓查询炸了")),
+                ticks_fn=_ticks(9.4, 10.0))       # -6% → 止损
+    out = d.tick_once(TUE_AM)
+    assert out["sells"] == []
+    assert _pending(tmp_path) == []
+
+
+def test_sell_patrol_skips_when_can_use_unknown_everywhere(tmp_path):
+    _seed_position(tmp_path)                       # 账本也没记 can_use_volume
+    d = _daemon(tmp_path, dry_run=False,
+                account=_account(pos_exc=RuntimeError("持仓查询炸了")),
+                ticks_fn=_ticks(9.4, 10.0))
+    out = d.tick_once(TUE_AM)
+    assert out["sells"] == []                      # fail-closed: 本轮不卖
+    assert "no_can_use:600000.SH" in out["skipped"]
+
+
+# ---------------- R5 建仓受可用现金约束 ----------------
+
+def test_close_pick_no_build_when_cash_unavailable(tmp_path):
+    d = _daemon(tmp_path, account=_account(cash=0),      # 现金 0 → 拿不到现金事实
+                screen_fn=lambda now: _screen_result([("600000.SH", "浦发", 10.55)]))
+    out = d.tick_once(MON)
+    assert "cash_unavailable" in out["skipped"]
+    assert out["planned"] == []
+    assert _read_json(tmp_path / "live_state.json")["plans"] == []
+
+
+def test_close_pick_budget_capped_by_cash_and_decremented(tmp_path):
+    d = _daemon(tmp_path, account=_account(total=1000000.0, cash=100000.0),
+                screen_fn=lambda now: _screen_result(
+                    [("600000.SH", "浦发", 10.0), ("000001.SZ", "平安", 20.0)]))
+    out = d.tick_once(MON)
+    assert [p["volume"] for p in out["planned"]] == [1500, 600]   # 逐只扣减
+    spend = sum(p["volume"] * p["price"] for p in out["planned"])
+    assert spend <= 100000.0
 
 
 # ---------------- 盘中卖出巡检 ----------------
