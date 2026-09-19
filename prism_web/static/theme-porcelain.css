@@ -1,0 +1,762 @@
+/* ==========================================================================
+   方案 C · 影室瓷白 → 「图纸与校样」(Drafting Sheet & Proof)
+   --------------------------------------------------------------------------
+   概念: 一台精密光学仪器, 摆在一张工程坐标纸上, 输出的是印刷校样。
+         桌面 = 暖白坐标纸;  数据面板 = 浮在图纸上的白纸;
+         页面边缘 = 印刷厂的套准标记与色标。
+
+   为什么要这么做 —— 通用 AI 视觉的六个"指纹", 逐条对治:
+     ① 一个无衬线字体从标题用到表格数字 → 拆成 衬线标题 / 等宽数据 / 无衬线界面
+     ② 处处 12–24px 大圆角                 → 收到 2–4px, 接近裁切直角
+     ③ 冷调数字灰 + 彩色渐变标题            → 暖纸白 + 单色墨, 标题不再走渐变
+     ④ 彩虹渐变当"品牌感"                  → 换成印刷色标式的离散色块
+     ⑤ 卡片一律浮起 + 柔光投影              → 墨线描边 + 极轻投影, 靠线不靠光
+     ⑥ 上下等距的均匀留白                  → 印刷节奏: 标题贴近正文, 段前大留白
+
+   硬约束: 只覆盖令牌、排印与装饰, 不新增/删除任何选择器, 不动任何结构。
+   app.js 产出的 DOM 与类名被 100% 沿用。
+   加载顺序: style.css 之后。
+   ========================================================================== */
+
+:root {
+  color-scheme: light;
+
+  /* ------------------------------------------------ 1. 纸 */
+  --paper:      #f3f0e9;   /* 坐标纸 */
+  --paper-2:    #ece8df;
+  --sheet:      #ffffff;   /* 浮在图纸上的纸 */
+
+  --bg-void:    #f3f0e9;
+  --bg-0:       #f8f6f1;
+  --bg-1:       #ffffff;
+  --bg-2:       #e9e5db;
+  --bg-3:       #e0dbd0;
+
+  --surface-1:  #ffffff;
+  --surface-2:  #ffffff;
+  --surface-3:  #faf9f6;
+  --panel:      linear-gradient(180deg, #ffffff, #fcfbf8);
+
+  --glass:        rgba(23, 21, 15, 0.035);
+  --glass-strong: rgba(23, 21, 15, 0.058);
+  --glass-press:  rgba(23, 21, 15, 0.088);
+
+  --stroke:    rgba(23, 21, 15, 0.155);
+  --stroke-2:  rgba(23, 21, 15, 0.30);
+  --hairline:  rgba(23, 21, 15, 0.085);
+
+  /* 印刷墨线: 比普通描边更重, 用来画表头中线、区块分隔等"排印线" */
+  --ink-rule:   rgba(23, 21, 15, 0.17);
+  --ink-rule-2: rgba(23, 21, 15, 0.42);
+
+  /* ------------------------------------------------ 2. 墨 (文字) */
+  --txt-0: #17150f;   /* 墨黑      17.6:1 */
+  --txt-1: #46433a;   /*            9.2:1 */
+  --txt-2: #6b675c;   /*            5.6:1 */
+  --txt-3: #948f82;   /* 装饰用 */
+
+  /* ------------------------------------------------ 3. 印刷套色
+     刻意避开 #0071e3 / #3b82f6 这类"AI 蓝", 改用印刷常用墨:
+     朱红 #c8102e / 墨蓝 #0b4a8f / 深绿 #00693a / 紫罗兰 #6d2a8c */
+  --sp-red:    #c8102e;   /* 涨 */
+  --sp-orange: #9c4a00;
+  --sp-yellow: #7d5a00;
+  --sp-green:  #00693a;   /* 跌 */
+  --sp-teal:   #00646f;
+  --sp-cyan:   #00646f;
+  --sp-blue:   #0b4a8f;   /* 主强调: 墨蓝 */
+  --sp-purple: #6d2a8c;
+
+  /* 光谱 —— 关键改动: 从「连续彩虹渐变」换成「离散色标」。
+     硬停止的等宽色块 = 印刷机上的色彩控制条; 平滑渐变 = 通用 AI 视觉。
+     因为 .stat-card::before / .tab-ink 都引用了这个令牌, 一处改动
+     就把全站的品牌母题从 AI 彩虹换成了印刷色标。 */
+  --grad-spectrum: linear-gradient(90deg,
+      #c8102e 0 14.2857%,  #a0470a 14.2857% 28.5714%,
+      #8a6b00 28.5714% 42.8571%, #00693a 42.8571% 57.1428%,
+      #00646f 57.1428% 71.4285%, #0b4a8f 71.4285% 85.7142%,
+      #6d2a8c 85.7142% 100%);
+
+  /* 长距离用的色标: 以 224px 为一周期重复, 于是整条头部线是连续色标 */
+  --grad-spectrum-run: repeating-linear-gradient(90deg,
+      #c8102e 0 14.2857%,  #a0470a 14.2857% 28.5714%,
+      #8a6b00 28.5714% 42.8571%, #00693a 42.8571% 57.1428%,
+      #00646f 57.1428% 71.4285%, #0b4a8f 71.4285% 85.7142%,
+      #6d2a8c 85.7142% 100%);
+
+  /* 品牌字: 不再是彩色渐变, 而是"墨的浓淡" */
+  --grad-brand: linear-gradient(180deg, #17150f 0%, #3d3a31 70%, #55514a 100%);
+
+  --grade-A: #e08a00;
+  --grade-B: #34a853;
+  --grade-C: #0b4a8f;
+  --grade-D: #6d2a8c;
+
+  /* 等级「文字色」必须在白底上独立加深 (亮色当填充可以, 当文字不可读) */
+  --grade-A-ink: #9c5200;   /* 5.4:1 */
+  --grade-B-ink: #00622f;   /* 5.6:1 */
+  --grade-C-ink: #0b4a8f;   /* 6.1:1 */
+  --grade-D-ink: #6d2a8c;   /* 7.2:1 */
+
+  /* ------------------------------------------------ 4. 投影
+     印刷品的层次靠"线"而不是"光"。投影只保留极轻的一档。 */
+  --lift-1: 0 1px 0 rgba(23, 21, 15, 0.04), 0 2px 8px rgba(23, 21, 15, 0.045);
+  --lift-2: 0 2px 0 rgba(23, 21, 15, 0.05), 0 14px 32px rgba(23, 21, 15, 0.085);
+  --inner-top: inset 0 1px 0 rgba(255, 255, 255, 1);
+
+  /* ------------------------------------------------ 5. 中性叠加 (全盘翻转) */
+  --fill-subtle:   rgba(23, 21, 15, 0.026);
+  --fill-1:        rgba(23, 21, 15, 0.042);
+  --fill-2:        rgba(23, 21, 15, 0.085);
+  --fill-strong:   rgba(23, 21, 15, 0.15);
+  --fill-strong-2: rgba(23, 21, 15, 0.26);
+  --fill-3:        rgba(23, 21, 15, 0.18);
+  --underline-dot: rgba(23, 21, 15, 0.28);
+  --nav-veil:      rgba(243, 240, 233, 0.80);
+
+  --btn-invert-bg:       #17150f;
+  --btn-invert-fg:       #f6f4ef;
+  --btn-invert-bg-hover: #000000;
+
+  /* ------------------------------------------------ 6. 图表令牌 */
+  --chart-line:    rgba(23, 21, 15, 0.075);
+  --chart-axis:    rgba(23, 21, 15, 0.17);
+  --chart-surface: rgba(255, 255, 255, 0.97);
+  --chart-edge:    rgba(23, 21, 15, 0.12);
+  --chart-label-bg: #17150f;
+  --chart-ink:     0, 0, 0;
+  --chart-on-bar:  #ffffff;
+  --chart-accent-faint: rgba(11, 74, 143, 0.09);
+  --chart-accent-soft:  rgba(11, 74, 143, 0.15);
+
+  /* ------------------------------------------------ 7. 形状: 收圆角
+     8–24px 的圆角是"移动 App 卡片"的语言, 直角是"仪器面板/印刷裁切"的语言。 */
+  --r-xs: 2px;
+  --r-sm: 2px;
+  --r-md: 3px;
+  --r-lg: 3px;
+  --r-xl: 4px;
+  --r-pill: 2px;
+
+  /* ------------------------------------------------ 8. 排印三层 */
+  --font-sans: "Noto Sans SC", "Source Han Sans SC", "PingFang SC",
+               "HarmonyOS Sans SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  --font-serif: "Noto Serif SC", "Source Han Serif SC Heavy", "Songti SC",
+                STSong, "SimSun", Georgia, serif;
+  --font-display: Georgia, "Noto Serif SC", "Times New Roman", "Songti SC", serif;
+  --font-mono: Consolas, "Cascadia Mono", ui-monospace, "SF Mono", monospace;
+  --font-data: Consolas, "Cascadia Mono", "Noto Sans SC", "Microsoft YaHei", monospace;
+}
+
+/* ==========================================================================
+   9. 纸面: 暖白 + 双层坐标网格 + 纸张颗粒 + 边缘暗角
+   ========================================================================== */
+body {
+  background-color: var(--paper);
+  /* 层序: 先列的在最上。网格压在最上层, 顶灯压在最底层做"受光"。 */
+  background-image:
+    linear-gradient(rgba(23, 21, 15, 0.052) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(23, 21, 15, 0.052) 1px, transparent 1px),
+    linear-gradient(rgba(23, 21, 15, 0.024) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(23, 21, 15, 0.024) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.80) 0%, rgba(255, 255, 255, 0) 46%);
+  background-size: 110px 110px, 110px 110px, 22px 22px, 22px 22px, 100% 100%;
+  background-attachment: fixed;
+}
+
+.stage-glow.g1 { background: radial-gradient(circle, rgba(11, 74, 143, 0.055), transparent 68%); }
+.stage-glow.g2 { background: radial-gradient(circle, rgba(200, 16, 46, 0.040), transparent 68%); }
+
+/* 顶灯 → 纸边暗角 (印刷品的纸张边缘本来就会有轻微压暗) */
+.stage::before {
+  background: radial-gradient(118% 92% at 50% 38%,
+              transparent 52%, rgba(23, 21, 15, 0.042) 100%);
+}
+/* 颗粒改成正片叠底, 在浅底上才成为"纸的纹理"而非"屏幕噪点" */
+.stage::after { opacity: 0.048; mix-blend-mode: multiply; }
+
+#app { padding-bottom: 116px; }
+
+::selection { background: rgba(11, 74, 143, 0.20); color: #17150f; }
+
+/* ==========================================================================
+   10. 「印刷校样」装饰层  (结构在 index.html 里, 由 .deco-proof 统一开关)
+   ========================================================================== */
+.deco-proof { display: block; }
+
+/* 版框: 内缩 13px 的墨线, 像校样纸的裁切框 */
+.sheet-frame {
+  position: fixed; inset: 13px; z-index: 0;
+  border: 1px solid rgba(23, 21, 15, 0.115);
+  pointer-events: none;
+}
+/* 四角角标 */
+.sheet-frame span {
+  position: absolute; width: 13px; height: 13px;
+  border: 0 solid rgba(23, 21, 15, 0.42);
+}
+.sheet-frame .tl { top: -1px;    left: -1px;  border-top-width: 1px; border-left-width: 1px; }
+.sheet-frame .tr { top: -1px;    right: -1px; border-top-width: 1px; border-right-width: 1px; }
+.sheet-frame .bl { bottom: -1px; left: -1px;  border-bottom-width: 1px; border-left-width: 1px; }
+.sheet-frame .br { bottom: -1px; right: -1px; border-bottom-width: 1px; border-right-width: 1px; }
+
+/* 色标 (color control bar): 印刷厂在印张边缘放的实色块, 用来校色。
+   它同时也是 Prism 的品牌母题 —— 被分解出来的七色光。 */
+.proof-bar {
+  position: fixed; left: 20px; top: 50%; transform: translateY(-50%);
+  z-index: 2; display: flex; flex-direction: column; gap: 2px;
+  pointer-events: none;
+}
+.proof-bar i {
+  display: block; width: 10px; height: 17px;
+  border: 1px solid rgba(23, 21, 15, 0.26);
+}
+.proof-bar i:nth-child(1) { background: #c8102e; }
+.proof-bar i:nth-child(2) { background: #a0470a; }
+.proof-bar i:nth-child(3) { background: #8a6b00; }
+.proof-bar i:nth-child(4) { background: #00693a; }
+.proof-bar i:nth-child(5) { background: #00646f; }
+.proof-bar i:nth-child(6) { background: #0b4a8f; }
+.proof-bar i:nth-child(7) { background: #6d2a8c; }
+.proof-bar i:nth-child(8) { background: #17150f; }
+
+/* 套准标记 (registration mark): 圆心 + 十字 */
+.reg-mark {
+  position: fixed; left: 19px; bottom: 22px; z-index: 2;
+  width: 12px; height: 12px; border-radius: 50%;
+  border: 1px solid rgba(23, 21, 15, 0.40);
+  pointer-events: none;
+}
+.reg-mark::before, .reg-mark::after {
+  content: ""; position: absolute; background: rgba(23, 21, 15, 0.40);
+}
+.reg-mark::before { left: 50%; top: -4px; bottom: -4px; width: 1px; }
+.reg-mark::after  { top: 50%; left: -4px; right: -4px; height: 1px; }
+
+/* 页脚书根 (folio): 内容从下方溶进纸色, 而不是硬边切断 */
+.folio {
+  position: fixed; left: 0; right: 0; bottom: 0; height: 38px; z-index: 4;
+  display: flex; align-items: flex-end; gap: 14px;
+  padding: 0 26px 9px;
+  font-family: var(--font-data);
+  font-size: 9.5px; line-height: 1;
+  letter-spacing: 0.24em; text-transform: uppercase;
+  color: rgba(23, 21, 15, 0.44);
+  background: linear-gradient(180deg,
+              rgba(243, 240, 233, 0) 0%, rgba(243, 240, 233, 0.90) 52%,
+              var(--paper) 100%);
+  pointer-events: none; white-space: nowrap;
+}
+.folio .rule { flex: 1 1 auto; height: 1px; background: rgba(23, 21, 15, 0.14); margin-bottom: 4px; }
+.folio .sep { color: rgba(23, 21, 15, 0.30); }
+
+/* ==========================================================================
+   11. 排印: 标题层 (衬线) —— 摆脱"一个无衬线走天下"
+   ========================================================================== */
+h1, h2, h3, h4 { font-weight: 600; }
+
+h2 {
+  font-family: var(--font-serif);
+  font-size: 27px;
+  font-weight: 600;
+  letter-spacing: 0.012em;
+  line-height: 1.24;
+  /* 取消原先的渐变文字: 单色墨才是印刷感, 渐变色是模板感的来源 */
+  background: none;
+  -webkit-background-clip: border-box; background-clip: border-box;
+  color: var(--txt-0);
+  -webkit-text-fill-color: currentColor;
+  position: relative;
+  padding-left: 18px;
+  margin-bottom: 8px;
+}
+/* 标题左侧的色标短柱 —— 品牌母题的最小单位 */
+h2::before {
+  content: ""; position: absolute; left: 0; top: 0.22em; bottom: 0.22em;
+  width: 3px; background: var(--grad-spectrum);
+}
+
+h3 {
+  font-family: var(--font-serif);
+  font-size: 15.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--txt-0);
+  /* 印刷节奏: 段前留白远大于标题与正文之间的距离 */
+  margin: 34px 0 11px;
+  padding-top: 12px;
+  border-top: 1px solid var(--ink-rule);
+}
+h4 { font-family: var(--font-serif); font-size: 13.5px; color: var(--txt-1); margin: 20px 0 9px; }
+
+/* 章节编号: 由 CSS 计数器生成, 不需要改一行 DOM。
+   隐藏面板不生成盒子, 计数器不累加, 因此每个可见页都从 01 起。 */
+.tab-panel { counter-reset: sub; }
+.tab-panel h3 { counter-increment: sub; }
+.tab-panel h3::before {
+  content: counter(sub, decimal-leading-zero);
+  font-family: var(--font-data);
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0.14em;
+  color: var(--txt-3);
+  margin-right: 11px;
+  vertical-align: 2px;
+}
+
+/* 导语散文改用衬线 —— 中文衬线在屏幕上读起来比无衬线更有"文本感" */
+p.hint {
+  font-family: var(--font-serif);
+  font-size: 13.5px;
+  line-height: 1.95;
+  letter-spacing: 0.004em;
+}
+
+/* ==========================================================================
+   12. 顶栏与品牌
+   ========================================================================== */
+/* 头部那条贯穿线: 从平滑彩虹改为「重复色标」, 端部用蒙版收住 */
+header::after {
+  height: 4px;
+  background: var(--grad-spectrum-run);
+  background-size: 224px 100%;
+  opacity: 1;
+  -webkit-mask-image: linear-gradient(90deg, transparent 0%, #000 5%, #000 95%, transparent 100%);
+          mask-image: linear-gradient(90deg, transparent 0%, #000 5%, #000 95%, transparent 100%);
+}
+
+header h1 {
+  font-family: var(--font-display);
+  font-size: 26px;
+  font-weight: 400;
+  letter-spacing: 0.20em;
+  background: none;
+  -webkit-background-clip: border-box; background-clip: border-box;
+  -webkit-text-fill-color: currentColor;
+  color: var(--txt-0);
+}
+header h1 .sub {
+  font-family: var(--font-serif);
+  font-size: 12px;
+  letter-spacing: 0.13em;
+  -webkit-text-fill-color: var(--txt-2);
+}
+
+/* 棱镜标识: 白底上用墨线勾出, 不再用填充色块 */
+#prism-logo {
+  background: #ffffff;
+  border: 1px solid var(--ink-rule);
+  border-radius: 2px;
+  box-shadow: none;
+}
+#prism-logo::after { background: none; }
+#prism-logo .prism-beam {
+  background: linear-gradient(180deg, #17150f, rgba(23, 21, 15, 0.10));
+  box-shadow: none;
+}
+#prism-logo .prism-tri {
+  background: linear-gradient(180deg, #17150f, rgba(23, 21, 15, 0.55));
+  filter: none;
+}
+#prism-logo .prism-spec { filter: none; }
+
+/* ==========================================================================
+   13. 导航: 目录化的编号 + 色标墨条
+   ========================================================================== */
+#tabs { counter-reset: tabidx; }
+.tab {
+  counter-increment: tabidx;
+  font-size: 13.5px;
+  letter-spacing: 0.015em;
+  border-radius: 0;
+}
+/* 每个标签前挂一个等宽序号 —— 像一份目录 / 规格表 */
+.tab::before {
+  content: counter(tabidx, decimal-leading-zero);
+  font-family: var(--font-data);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  color: var(--txt-3);
+  margin-right: 7px;
+  vertical-align: 3px;
+}
+.tab.active::before { color: var(--sp-blue); }
+.tab:hover { background: rgba(23, 21, 15, 0.032); }
+.tab.active { background: none; }
+
+/* 墨条: 平滑光谱 → 离散色标; 去掉彩色辉光 (白底上辉光只会显得脏) */
+.tab.active::after,
+.tab-ink {
+  border-radius: 0;
+  box-shadow: none;
+  height: 3px;
+  background: var(--grad-spectrum);
+}
+.tab-ink { box-shadow: none; }
+
+/* ==========================================================================
+   14. 面板与卡片: 浮在图纸上的白纸
+   ========================================================================== */
+.card, .tile, .stat-card, .chart, #factor-table,
+#strategy-list, #factor-grid .factor-card, #paper-pending > table {
+  background: #ffffff;
+  border: 1px solid var(--ink-rule);
+  border-radius: var(--r-md);
+  box-shadow: var(--lift-1);
+}
+.card:hover, .tile:hover, #factor-grid .factor-card:hover { box-shadow: var(--lift-2); }
+
+/* 卡片: 标签走等宽小字, 数值走 Georgia 旧式数字 (3/4/5/7/9 带降部)
+   —— 这是最"印刷品"的一处, 也是通用 AI 视觉绝不会做的选择。 */
+.card .label, .tile .label, .stat-card .stat-label {
+  font-family: var(--font-data);
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--txt-2);
+}
+.card .value {
+  font-family: var(--font-display);
+  font-variant-numeric: oldstyle-nums;
+  font-weight: 400;
+  letter-spacing: -0.005em;
+}
+.tile .value, .stat-card .stat-value {
+  font-family: var(--font-display);
+  font-variant-numeric: oldstyle-nums;
+  font-weight: 400;
+  letter-spacing: -0.012em;
+}
+
+/* 等级瓦片的顶条: 去掉彩色辉光, 收成实色小方条 */
+.tile.grade-A::before, .tile.grade-B::before,
+.tile.grade-C::before, .tile.grade-D::before { box-shadow: none; height: 3px; }
+.tile.grade-A { background: linear-gradient(180deg, rgba(224, 138, 0, 0.10), #ffffff 58%); }
+.tile.grade-B { background: linear-gradient(180deg, rgba(52, 168, 83, 0.10), #ffffff 58%); }
+.tile.grade-C { background: linear-gradient(180deg, rgba(11, 74, 143, 0.09), #ffffff 58%); }
+.tile.grade-D { background: linear-gradient(180deg, rgba(109, 42, 140, 0.09), #ffffff 58%); }
+.stat-card::before { height: 3px; opacity: 1; }
+
+#factor-grid .factor-card::before { box-shadow: none; width: 3px; }
+
+/* ==========================================================================
+   15. 表格: 瑞士式排印 (线分隔, 不靠卡片底板)
+   ========================================================================== */
+table {
+  background: #ffffff;
+  border: 1px solid var(--ink-rule);
+  border-top: 2px solid var(--ink-rule-2);   /* 印刷表格的粗顶线 */
+  border-radius: 0;
+  box-shadow: 0 1px 0 rgba(23, 21, 15, 0.035);
+}
+th, td { padding: 10px 14px; }
+th {
+  background: transparent;
+  border-bottom: 1px solid var(--ink-rule-2);  /* 中线 */
+  font-family: var(--font-data);
+  font-size: 10.5px;
+  font-weight: 400;
+  letter-spacing: 0.12em;
+  color: var(--txt-2);
+}
+td {
+  /* 等宽数字 + 中文回落到无衬线: 数字对齐, 中文不别扭 */
+  font-family: var(--font-data);
+  font-size: 12.5px;
+  color: var(--txt-1);
+  border-bottom: 1px solid var(--hairline);
+  font-variant-numeric: tabular-nums;
+}
+tbody tr { transition: background var(--t-fast) var(--ease); }
+tbody tr:hover td { background: rgba(23, 21, 15, 0.030); }
+/* 悬停时行首出现一道墨标 —— 像游标卡尺的指针 */
+tbody tr:hover td:first-child { box-shadow: inset 3px 0 0 var(--sp-blue); }
+tbody tr:last-child td { border-bottom: none; }
+th[title] { text-decoration: underline dotted var(--underline-dot); }
+
+tr.grade-A td { background: rgba(224, 138, 0, 0.045); }
+tr.grade-B td { background: rgba(52, 168, 83, 0.045); }
+tr.grade-C td { background: rgba(11, 74, 143, 0.040); }
+tr.grade-D td { background: rgba(109, 42, 140, 0.040); }
+tbody tr.grade-A:hover td { background: rgba(224, 138, 0, 0.085); }
+tbody tr.grade-B:hover td { background: rgba(52, 168, 83, 0.085); }
+tbody tr.grade-C:hover td { background: rgba(11, 74, 143, 0.075); }
+tbody tr.grade-D:hover td { background: rgba(109, 42, 140, 0.075); }
+
+.composite-value {
+  font-family: var(--font-display);
+  font-variant-numeric: oldstyle-nums;
+  font-weight: 400;
+}
+
+/* ==========================================================================
+   16. 徽标 / 说明条 / 代码
+   ========================================================================== */
+.badge { border-radius: 2px; letter-spacing: 0.04em; }
+.g-badge { font-family: var(--font-data); letter-spacing: 0.06em; }
+
+.metric-legend {
+  background: #ffffff;
+  border: 1px solid var(--ink-rule);
+  border-radius: 0;
+  font-family: var(--font-serif);
+  line-height: 1.9;
+}
+.metric-legend::before {
+  width: 3px;
+  background: var(--grad-spectrum);
+}
+.metric-legend .legend-key {
+  border-radius: 2px;
+  font-family: var(--font-data);
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+  background: rgba(224, 138, 0, 0.11);
+}
+
+.error { background: rgba(200, 16, 46, 0.05); border-color: rgba(200, 16, 46, 0.24); }
+
+pre, code {
+  font-family: var(--font-mono);
+  color: #3a372f;
+  background: #f1eee6;
+  border-radius: 2px;
+}
+.hint code { background: rgba(0, 100, 111, 0.09); border-color: rgba(0, 100, 111, 0.18); }
+
+input[type="date"] { color-scheme: light; }
+input:focus, select:focus, textarea:focus { box-shadow: 0 0 0 3px rgba(11, 74, 143, 0.16); }
+#strategy-editor { border-color: var(--ink-rule) !important; border-radius: 0; }
+
+#btn-screen, #btn-backtest { box-shadow: 0 1px 0 rgba(23, 21, 15, 0.16), 0 4px 14px rgba(23, 21, 15, 0.10); }
+.fbtn.active { box-shadow: 0 2px 10px rgba(23, 21, 15, 0.14); }
+.g-badge.grade-A, .g-badge.grade-B { color: #ffffff; }
+
+/* ==========================================================================
+   17. app.js 内联色值 (只能走属性选择器补救)
+   ========================================================================== */
+[style*="color:#aaa"], [style*="color:#999"] { color: #6b675c !important; }
+[style*="color:#e67e22"] { color: #9c4a00 !important; }
+[style*="border:1px solid #ccc"] { border-color: var(--ink-rule) !important; }
+[style*="border-top:1px solid #eee"] { border-top-color: var(--ink-rule) !important; }
+[style*="background:#27ae60"] { background: #00693a !important; }
+
+/* ==========================================================================
+   18. 响应式: 装饰层在窄屏退场, 绝不侵占内容
+   ========================================================================== */
+@media (max-width: 1399px) {
+  .proof-bar { display: none; }
+}
+@media (max-width: 1024px) {
+  .sheet-frame, .reg-mark { display: none; }
+  .folio { font-size: 9px; letter-spacing: 0.18em; }
+  .folio .m-hide { display: none; }
+  h2 { font-size: 23px; }
+  body { background-size: 88px 88px, 88px 88px, 22px 22px, 22px 22px, 100% 100%; }
+}
+@media (max-width: 640px) {
+  .folio { padding: 0 16px 8px; gap: 10px; }
+  h2 { padding-left: 14px; }
+  .tab::before { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .stage::after { opacity: 0.03; }
+}
+
+/* ==========================================================================
+   19. 刻度尺 + 反白页眉标签 (running head)
+   --------------------------------------------------------------------------
+   报了 9 个标签页, 但页面上并没有"这是哪一页"的印刷性标识。加一条刻度尺
+   和一枚反白标签: 标签是全页唯一的实心墨块, 因此它承担了视觉锚点的作用。
+   ========================================================================== */
+header::before {
+  content: ""; position: absolute; left: 0; right: 0; bottom: 5px; height: 6px;
+  background: repeating-linear-gradient(90deg,
+      rgba(23, 21, 15, 0.42) 0 1px, transparent 1px 8px);
+  -webkit-mask-image: linear-gradient(90deg, #000 0%, rgba(0, 0, 0, 0.20) 58%, transparent 100%);
+          mask-image: linear-gradient(90deg, #000 0%, rgba(0, 0, 0, 0.20) 58%, transparent 100%);
+  pointer-events: none;
+}
+
+.tab-panel::before {
+  display: inline-block;
+  font-family: var(--font-data);
+  font-size: 9.5px;
+  line-height: 1;
+  letter-spacing: 0.20em;
+  text-transform: uppercase;
+  color: #f7f5f0;
+  background: #17150f;
+  padding: 6px 11px 5px;
+  margin-bottom: 22px;
+  border-radius: 2px;
+}
+/* 无 h2 的页面把中文也带上; 有 h2 的页面只出编号与英文, 避免重复 */
+#tab-market::before     { content: "01 · 市场环境 MARKET REGIME"; }
+#tab-sector::before     { content: "02 · SECTOR WATCH"; }
+#tab-candidates::before { content: "03 · 候选列表 CANDIDATES"; }
+#tab-compare::before    { content: "04 · 模型对比 MODEL COMPARISON"; }
+#tab-detail::before     { content: "05 · SECURITY DETAIL"; }
+#tab-factors::before    { content: "06 · FACTOR LIBRARY"; }
+#tab-strategies::before { content: "07 · STRATEGIES"; }
+#tab-backtest::before   { content: "08 · BACKTEST"; }
+#tab-paper::before      { content: "09 · PAPER TRADING"; }
+
+/* ==========================================================================
+   20. 图版注记 (figure captions) —— 印刷品的图必须有图号
+   ========================================================================== */
+.chart { position: relative; }
+.chart::after {
+  position: absolute; left: 9px; bottom: 3px;
+  font-family: var(--font-data);
+  font-size: 9px; letter-spacing: 0.18em;
+  color: var(--txt-3);
+  pointer-events: none; white-space: nowrap;
+}
+#radar-chart::after { content: "图 01 · 模型能力雷达 RADAR"; }
+#bar-chart::after   { content: "图 02 · 分项得分对照 BARS"; }
+#kline-chart::after { content: "图 03 · 日线行情 DAILY"; }
+
+/* ==========================================================================
+   21. 分组标签 —— 这些容器原本没有任何标题, 是纯粹的信息设计缺口
+   ========================================================================== */
+#node-cards:not(:empty)::before,
+#class-tiles:not(:empty)::before,
+#paper-summary:not(:empty)::before,
+#market-stats:not(:empty)::before {
+  flex: 0 0 100%;
+  font-family: var(--font-data);
+  font-size: 9.5px; letter-spacing: 0.20em; text-transform: uppercase;
+  color: var(--txt-3);
+  border-bottom: 1px solid var(--ink-rule);
+  padding-bottom: 7px;
+  margin-bottom: 2px;
+}
+#node-cards:not(:empty)::before    { content: "节点模型 · NODE MODELS"; }
+#class-tiles:not(:empty)::before   { content: "模型分层 · MODEL TIERS"; }
+#paper-summary:not(:empty)::before { content: "账户概览 · ACCOUNT SUMMARY"; }
+#market-stats:not(:empty)::before  { content: "市场统计 · MARKET STATS"; }
+
+#factor-grid:not(:empty)::before {
+  content: "因子清单 · FACTOR INDEX";
+  grid-column: 1 / -1;
+  font-family: var(--font-data);
+  font-size: 9.5px; letter-spacing: 0.20em;
+  color: var(--txt-3);
+  border-bottom: 1px solid var(--ink-rule);
+  padding-bottom: 7px;
+}
+
+/* ==========================================================================
+   22. 图案: 斜线网纹 (hatch)
+   --------------------------------------------------------------------------
+   印刷厂用斜线网纹标注"注意 / 注解 / 非正文"区块。用在状态条与说明条上,
+   让这两处一眼就被识别为"附录信息"而不是正文数据。
+   ========================================================================== */
+#market-banner,
+#market-banner.env-ok,
+#market-banner.env-bad {
+  background-image: repeating-linear-gradient(45deg,
+      rgba(23, 21, 15, 0.048) 0 1px, transparent 1px 7px);
+  background-color: #ffffff;
+}
+#market-banner.env-ok {
+  background-image: repeating-linear-gradient(45deg,
+      rgba(0, 105, 58, 0.095) 0 1px, transparent 1px 7px);
+  background-color: #f6fbf7;
+  border-color: rgba(0, 105, 58, 0.30);
+}
+#market-banner.env-bad {
+  background-image: repeating-linear-gradient(45deg,
+      rgba(200, 16, 46, 0.095) 0 1px, transparent 1px 7px);
+  background-color: #fdf6f7;
+  border-color: rgba(200, 16, 46, 0.28);
+}
+.metric-legend {
+  background-image: repeating-linear-gradient(45deg,
+      rgba(23, 21, 15, 0.036) 0 1px, transparent 1px 7px);
+  background-color: #ffffff;
+}
+
+/* ==========================================================================
+   23. 幽灵页号 (ghost folio numeral)
+   --------------------------------------------------------------------------
+   短页面右侧会留下大片空白。用一枚 4.5% 墨色的巨型旧式数字做水印 —— 它同时
+   起到"页码"和"填充留白"两个作用, 比堆装饰诚实得多。
+   注意: .tab-panel 只加 position:relative 而不加 z-index, 因此不产生新的
+   层叠上下文, ECharts 的 tooltip 层叠不受影响。
+   ========================================================================== */
+.tab-panel { position: relative; }
+.tab-panel::after {
+  position: absolute; z-index: -1;
+  right: -6px; bottom: -30px;
+  font-family: var(--font-display);
+  font-variant-numeric: oldstyle-nums;
+  font-size: 176px;
+  font-weight: 400;
+  line-height: 0.78;
+  letter-spacing: -0.03em;
+  color: rgba(23, 21, 15, 0.042);
+  pointer-events: none;
+  user-select: none;
+}
+#tab-market::after     { content: "01"; }
+#tab-sector::after     { content: "02"; }
+#tab-candidates::after { content: "03"; }
+#tab-compare::after    { content: "04"; }
+#tab-detail::after     { content: "05"; }
+#tab-factors::after    { content: "06"; }
+#tab-strategies::after { content: "07"; }
+#tab-backtest::after   { content: "08"; }
+#tab-paper::after      { content: "09"; }
+
+/* 页尾收束标 —— 印刷品用一个小符号宣告"本页到此" */
+main::after {
+  content: ""; display: block;
+  width: 42px; height: 3px; margin: 58px auto 0;
+  background: var(--grad-spectrum);
+  opacity: 0.5;
+}
+
+/* ==========================================================================
+   24. 中文排印细则
+   ========================================================================== */
+/* 首行缩进两字 —— 中文印刷正文的默认规矩, 界面上几乎没人做 */
+p.hint { text-indent: 2em; }
+p.hint code { text-indent: 0; }
+
+/* 数字与中文之间不再是"挤在一起": 给等宽数字一点呼吸 */
+td, .composite-value { letter-spacing: 0.01em; }
+
+/* 刻度尺淡出延长, 让它真的读起来像一把尺 */
+header::before {
+  background: repeating-linear-gradient(90deg,
+      rgba(23, 21, 15, 0.50) 0 1px, transparent 1px 8px);
+  -webkit-mask-image: linear-gradient(90deg,
+      #000 0%, #000 30%, rgba(0, 0, 0, 0.30) 68%, transparent 94%);
+          mask-image: linear-gradient(90deg,
+      #000 0%, #000 30%, rgba(0, 0, 0, 0.30) 68%, transparent 94%);
+}
+
+/* ==========================================================================
+   25. 深色残留清理 (浅色主题最容易漏掉的一类问题)
+   --------------------------------------------------------------------------
+   style.css 里有两处写死的深色底板没有走令牌, 在浅色主题下会露出黑块。
+   逐一核对后修掉, 而不是靠肉眼扫截图。
+   ========================================================================== */
+
+/* 回测日志的粘性表头原本是 #14141a 的黑板 —— 与其余表格的浅色表头明显割裂。
+   改为和粘性导航同一套配方 (纸色蒙版 + 毛玻璃), 表头才与全站一致。 */
+#bt-log-table th {
+  background: rgba(243, 240, 233, 0.90);
+  -webkit-backdrop-filter: saturate(180%) blur(18px);
+          backdrop-filter: saturate(180%) blur(18px);
+  border-bottom: 1px solid var(--ink-rule-2);
+}
+
+/* 单元格字号回补一档: 等宽字体在小字号下读中文会偏挤 */
+td { font-size: 13px; }
+
+/* 因子名与条目名归入衬线层, 与 h2/h3 同一家族, 全站排印才成体系 */
+.factor-name, #strategy-name { font-family: var(--font-serif); }

@@ -54,6 +54,7 @@ from prism import market_data as _md
 from prism import sector_stage as _ss
 from prism import sector_etf_map as _etfmap
 from prism import zt_history as _zt
+from prism import first_board_review as _fbr
 
 # 因子库注册(装饰器触发): /api/factors、策略校验、选股都要用。幂等。
 reg.scan_factors()
@@ -617,6 +618,103 @@ def api_sector_stage():
         logger.warning("sector_stage 快照失败: %r", e)
         return jsonify({"ok": False, "date": "", "sectors": [],
                         "inertia": [], "flow_days": 0, "error": str(e)})
+
+
+# ================= 首板盘后深度拆解(2026-09-19, 观察层) =================
+# 用户分工: 盘中(09:15-10:00)用户自己执行; 盘后本面板对每个首板做五维拆解。
+# **网页路径绝不下载 1m 特征**(bt_intraday 约定, 采集只在显式 CLI):
+# 这里只读已落盘结果; 无落盘时做一次只读采集(不触发 1m 补采, 缺特征的日子
+# 封板质量维如实标"未知")。缺数据不造假 —— 同 prism.first_board_review 口径。
+_FBR_STATE_DIR = Path(_ROOT) / "runtime" / "state"
+
+
+def _fbr_state_path(day8):
+    return _FBR_STATE_DIR / ("first_board_review_%s.json" % day8)
+
+
+def _load_fbr_state(day8):
+    """读落盘分析结果; 缺失/损坏 → None(不抛)。"""
+    p = _fbr_state_path(day8)
+    if not p.exists():
+        return None
+    try:
+        return _json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001 - 读失败按无落盘处理
+        logger.warning("首板拆解落盘读取失败 %s: %r", p, e)
+        return None
+
+
+def _fbr_collect(day8, timeout=90):
+    """只读采集 + 落盘, 带超时护栏(web 长驻进程不能被 QMT 卡死)。
+
+    返回 (records|None, error|None)。超时按失败处理 —— 线程 daemon, 不阻塞。
+    """
+    box = {}
+
+    def _work():
+        try:
+            # persist_when_empty=False: 查空日不落盘, 免污染日期列表
+            recs, _paths = _fbr.run(day8, want_report=True,
+                                    persist_when_empty=False)
+            box["recs"] = recs
+        except Exception as e:  # noqa: BLE001 - 面板 fail-open
+            box["error"] = "%s: %s" % (type(e).__name__, e)
+
+    t = _threading.Thread(target=_work, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        return None, "采集超时(>%ds), 请稍后重试或用 CLI 生成" % timeout
+    if "error" in box:
+        return None, box["error"]
+    return box.get("recs"), None
+
+
+@app.route("/api/first_board")
+def api_first_board():
+    """首板盘后拆解: 读落盘; 无则只读采集一次。fail-open 不 500。"""
+    day8 = str(request.args.get("date") or "").replace("-", "").strip()
+    if not day8:
+        day8 = _dt.date.today().strftime("%Y%m%d")
+    if len(day8) != 8 or not day8.isdigit():
+        return jsonify({"ok": False, "date": day8, "count": 0, "items": [],
+                        "error": "date 需为 YYYYMMDD"})
+    try:
+        state = None
+        force = request.args.get("refresh") in ("1", "true", "yes")
+        if not force:
+            state = _load_fbr_state(day8)
+        if state is None:
+            recs, err = _fbr_collect(day8)
+            if err:
+                return jsonify({"ok": False, "date": day8, "count": 0,
+                                "items": [], "error": err})
+            # 直接用内存结果(不重读盘: 避免读到上一次的旧落盘)
+            state = {"date": day8, "count": len(recs or []),
+                     "items": [{"record": r, "analysis": _fbr.analyze(r)}
+                               for r in (recs or [])]}
+        return jsonify({"ok": True, "date": state.get("date") or day8,
+                        "count": state.get("count", 0),
+                        "items": state.get("items") or []})
+    except Exception as e:  # noqa: BLE001 - 观察面板 fail-open
+        logger.warning("首板拆解失败: %r", e)
+        return jsonify({"ok": False, "date": day8, "count": 0, "items": [],
+                        "error": str(e)})
+
+
+@app.route("/api/first_board/dates")
+def api_first_board_dates():
+    """已生成拆解的日期列表(新→旧), 供前端下拉。"""
+    try:
+        out = []
+        for p in _FBR_STATE_DIR.glob("first_board_review_*.json"):
+            d = p.stem.replace("first_board_review_", "")
+            if len(d) == 8 and d.isdigit():
+                out.append(d)
+        return jsonify({"ok": True, "dates": sorted(set(out), reverse=True)})
+    except Exception as e:  # noqa: BLE001
+        logger.warning("首板拆解日期列表失败: %r", e)
+        return jsonify({"ok": False, "dates": [], "error": str(e)})
 
 
 @app.route("/api/factors")

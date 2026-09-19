@@ -33,7 +33,7 @@
 | 目录 | 是什么 | 入口 / 端口 | 状态 |
 |---|---|---|---|
 | `prism/` | **主策略引擎**：36 因子、回测、模拟盘、实盘信号守护 | `python -m prism.paper_daemon` / `python -m prism.live_daemon` | 生产可用 |
-| `prism_web/` | prism 网页控制台（策略编辑、选股、回测、绩效） | `:5000` | 运行中（09-13 重启过） |
+| `prism_web/` | prism 网页控制台（策略编辑、选股、回测、绩效、**首板拆解**） | `:5000` | 运行中（09-19 重启，新增首板拆解 tab） |
 | `tt_solo/` | **做T策略（自包含项目）**：策略核心 `ttcore/` + 一屏决策仪表盘 `dashboard/` | `cd tt_solo; python -m ttcore.daemon --direct [--live]`；面板 `:5011` | **09-16 从 `tt/` 抽出，已删除旧 `tt/`+`tt_web/`**（默认 DRY-RUN） |
 | `qmt_sync/` | miniQMT 成交/持仓 → 本地 SQLite + 告警 | `python -m qmt_sync --once` | 可用，供 Vibe-Trading 查询 |
 | `strategy_web/` | v04 时代选股网页 | — | **legacy**，保留兼容 |
@@ -55,6 +55,19 @@
 - 项目主用 **Python 3.12**（`C:\Users\28037\AppData\Local\Programs\Python\Python312`）。
 - 通达信 `pytdx` 已接入（`prism/tdx_source.py`），定位**补充源**，QMT 优先。
 - 模拟盘守护由**用户双击桌面 `PRISM.bat`** 启动（不寄生 agent 会话）。
+
+## 首板盘后拆解（观察层，09-19）
+
+用户分工界面：**盘中（09:15 竞价–10:00 前）用户自己执行交易**（只选能涨停的最强首板，盘中不动手）；**盘后 agent 对每一个首板彻底拆解**。用户坚持手写因子、一笔笔印证 —— 本模块只提供结构化实证，不替他做决策。
+
+- **模块** `prism/first_board_review.py`：五维拆解（封板质量 .35 / 板块共振 .25 / 量能 .20 / 资金 .15 / 产业 .05，常量集中可校准）+ 加权总评 + 置信度（高/中/低/跟风脉冲）。
+- **web**：`prism_web` 新增「首板拆解」tab；`GET /api/first_board?date=&refresh=`、`GET /api/first_board/dates`。
+- **CLI**：`python -m prism.first_board_review --date YYYYMMDD --report [--backfill] [--manual PATH]`。
+- **产出**：`runtime/state/first_board_review_YYYYMMDD.json` + `docs/reports/首板拆解_YYYYMMDD.md`。
+- **数据来源**：`zt_history.qmt_zt_feed`（涨停池→筛 `boards==1`）+ `bt_intraday.features_for`（1m 还原封板盘面：首封/开板次数/一字/板上量额）+ QMT 批量日K（量额/前5日均量）+ QMT InstrumentDetail（流通市值）+ `market_data` sector_map（板块及板块内涨停家数）。实测 09-18 的 68 只首板：除封单金额外**全部自动拿到**。
+- **两条铁律**（承接既有约定）：① **缺失维权重从分母剔除、其余归一**，绝不用 0 分冒充"已评估"（防假覆盖率）② **不造假** —— 拿不到的字段标 `unknown`。**封单金额（buy1 队列）盘后不可复现，永久标未知**，不推测。
+- **网页路径绝不下载 1m 特征**（沿 `bt_intraday` 约定）：面板只读落盘或做一次只读采集（90s 超时护栏）；补采只在 CLI `--backfill`。空日不落盘（`run(persist_when_empty=False)`）。
+- **定位**：观察层，**不进因子打分/买卖链路**（同 `sector_etf_map` 口径）。等用户手写因子印证出结论，再决定哪个信号升级进 `full_factor_v1`。
 
 ## 仓库治理史（整理 / 目录重组 / 清理）
 

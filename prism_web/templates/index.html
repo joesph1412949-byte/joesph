@@ -2,11 +2,46 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>量化选股策略看板</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#f3f0e9">
+<meta name="description" content="Prism — 把市场分解成因子光谱。本机运行的 A 股量化选股看板。">
+<title>PRISM · 把市场分解成因子光谱</title>
 <link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/theme-porcelain.css">
 <script src="/static/echarts.min.js"></script>
+<script src="/static/prism-theme.js"></script>
 </head>
 <body>
+<!-- 演播室氛围层: 纯装饰, 不参与任何交互与布局计算 -->
+<div class="stage" aria-hidden="true">
+  <div class="stage-glow g1"></div>
+  <div class="stage-glow g2"></div>
+</div>
+<!-- 印刷校样装饰层: 版框/角标 · 色标 · 套准标记 · 页脚书根。
+     全部 position:fixed, 不参与文档流, 完全不触碰 #app 内的任何结构。
+     默认由 .deco-proof 关闭, 仅启用它的主题会打开它。 -->
+<div class="deco-proof" aria-hidden="true">
+  <div class="sheet-frame">
+    <span class="tl"></span><span class="tr"></span>
+    <span class="bl"></span><span class="br"></span>
+  </div>
+  <div class="proof-bar">
+    <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+  </div>
+  <div class="reg-mark"></div>
+  <div class="folio">
+    <span>Prism</span>
+    <span class="sep">/</span>
+    <span>因子光谱研究系统</span>
+    <span class="rule"></span>
+    <span class="m-hide">Factor Spectrum Terminal</span>
+    <span class="sep m-hide">·</span>
+    <span class="m-hide">A-Share Research</span>
+    <span class="sep">·</span>
+    <span>No.01</span>
+  </div>
+</div>
 <div id="app">
   <header>
     <div id="prism-logo" title="Prism — 把市场分解成因子光谱">
@@ -27,6 +62,7 @@
     <button class="tab active" data-tab="market" onclick="switchTab('market')">市场环境</button>
     <button class="tab" data-tab="sector" onclick="switchTab('sector')">板块观察</button>
     <button class="tab" data-tab="candidates" onclick="switchTab('candidates')">候选列表</button>
+    <button class="tab" data-tab="firstboard" onclick="switchTab('firstboard')">首板拆解</button>
     <button class="tab" data-tab="compare" onclick="switchTab('compare')">模型对比</button>
     <button class="tab" data-tab="detail" onclick="switchTab('detail')">单股详情</button>
     <button class="tab" data-tab="factors" onclick="switchTab('factors')">因子库</button>
@@ -78,6 +114,39 @@
         <span class="legend-key">强度</span>(含仓位提示)决定<b>敢上多大仓位</b>。
         三者同源，等级≈强度，记作：排到前 → 验资质 → 定仓位。
       </div>
+    </section>
+
+    <section id="tab-firstboard" class="tab-panel">
+      <h2>首板拆解 <span id="fb-date-label" class="hint"></span></h2>
+      <p class="hint">盘后对当日<b>每一个首板</b>做五维拆解：封板质量 / 板块共振 /
+        量能结构 / 资金行为 / 产业逻辑。五维加权出总评（缺失维从分母剔除、其余
+        归一，不用 0 分冒充"已评估"）。<b>封板质量</b>由 1 分钟 K 线还原（首封
+        时间/开板次数/一字板/板上量额），可复现；<b>封单金额</b>（buy1 队列）
+        盘后无法复现，如实标"未知"，不推测。</p>
+      <div id="fb-form" class="filter-row">
+        <label>日期 <input id="fb-date" type="date"></label>
+        <label>排序
+          <select id="fb-sort" onchange="renderFirstBoard()">
+            <option value="total">总评</option>
+            <option value="seal">封板质量</option>
+            <option value="sector">板块共振</option>
+            <option value="volume">量能结构</option>
+          </select>
+        </label>
+        <button id="btn-fb-load" onclick="loadFirstBoard(true)">生成 / 刷新</button>
+        <span id="fb-dates" class="hint"></span>
+      </div>
+      <div id="fb-summary" class="cards"></div>
+      <table id="fb-table">
+        <thead><tr>
+          <th>代码</th><th>名称</th><th title="五维加权总评(缺失维从分母剔除后归一)">总评</th>
+          <th title="高≥75 / 中55-75 / 低35-55 / 跟风脉冲(板块内独苗)">置信度</th>
+          <th>封板质量</th><th>板块共振</th><th>量能结构</th><th>资金行为</th>
+          <th>产业逻辑</th><th>首封</th><th title="所属板块当日涨停家数">板块涨停</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div id="fb-detail"></div>
     </section>
 
     <section id="tab-compare" class="tab-panel">

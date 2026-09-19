@@ -1,0 +1,127 @@
+/* ==========================================================================
+   方案 B · 深墨天文台 (Midnight Ink)
+   --------------------------------------------------------------------------
+   概念: 夜观星象 —— 画布从「无光」变成「有色的夜幕」
+   做法: 深墨蓝底 + 蓝倾向的发丝线/灰阶, 让暖色的涨停红与光谱从中跳出来。
+   注意: 底色一旦有色相, 所有中性元素都要跟着偏蓝, 否则会糊成一片;
+        强调色也必须让出蓝色, 改走冰蓝 --sp-blue。
+
+   约束: 只覆盖设计令牌与少量硬编码点, 不新增/删除任何选择器。
+   加载顺序: style.css 之后。
+   ========================================================================== */
+
+:root {
+  color-scheme: dark;
+
+  /* —— 表面层次: 深墨蓝 —— */
+  --bg-void:      #0e1729;
+  --bg-0:         #101a2e;
+  --bg-1:         #131e34;
+  --bg-2:         #18243c;
+  --bg-3:         #1f2d49;
+
+  --surface-1:    #16203a;
+  --surface-2:    #1d2946;
+  --surface-3:    #243352;
+
+  --glass:        rgba(140, 175, 255, 0.055);
+  --glass-strong: rgba(140, 175, 255, 0.09);
+  --glass-press:  rgba(140, 175, 255, 0.13);
+
+  --stroke:    rgba(140, 175, 255, 0.14);
+  --stroke-2:  rgba(140, 175, 255, 0.22);
+  --hairline:  rgba(140, 175, 255, 0.11);
+
+  /* —— 文字: 冷白, 不是灰白 —— */
+  --txt-0: #eaf0ff;
+  --txt-1: #a3b1d0;
+  --txt-2: #8494b5;
+  --txt-3: #69769a;   /* 仅装饰 */
+
+  /* —— 光谱: 在蓝底上整体提亮一档, 并避开正蓝 —— */
+  --sp-red:    #ff6482;
+  --sp-orange: #ffb340;
+  --sp-yellow: #ffd86b;
+  --sp-green:  #4ee58f;
+  --sp-teal:   #5fe0e8;
+  --sp-cyan:   #5fe0e8;
+  --sp-blue:   #64d2ff;
+  --sp-purple: #b98cff;
+
+  --grad-spectrum: linear-gradient(90deg,
+      #ff6482 0%, #ffb340 16%, #ffd86b 32%, #4ee58f 48%,
+      #5fe0e8 64%, #64d2ff 81%, #b98cff 100%);
+
+  --grad-brand: linear-gradient(180deg, #ffffff 0%, #cfd9f5 62%, #93a3c4 100%);
+
+  --grade-A: #ffb340;
+  --grade-B: #4ee58f;
+  --grade-C: #3d8bff;
+  --grade-D: #b98cff;
+
+  --lift-1: 0 1px 2px rgba(0, 0, 0, 0.40), 0 10px 30px rgba(0, 0, 0, 0.34);
+  --lift-2: 0 2px 6px rgba(0, 0, 0, 0.46), 0 26px 64px rgba(0, 0, 0, 0.52);
+  --inner-top: inset 0 1px 0 rgba(180, 205, 255, 0.075);
+
+  /* —— 图表令牌 —— */
+  --chart-line:    rgba(140, 175, 255, 0.10);
+  --chart-axis:    rgba(140, 175, 255, 0.20);
+  --chart-surface: rgba(22, 32, 58, 0.92);
+  --chart-edge:    rgba(140, 175, 255, 0.20);
+  --chart-label-bg: #243352;
+  --chart-accent-faint: rgba(100, 210, 255, 0.12);
+  --chart-accent-soft:  rgba(100, 210, 255, 0.18);
+
+  /* —— 中性叠加: 蓝底上叠加冷白, 避免发灰 —— */
+  --fill-subtle:   rgba(140, 175, 255, 0.026);
+  --fill-1:        rgba(140, 175, 255, 0.042);
+  --fill-2:        rgba(140, 175, 255, 0.10);
+  --fill-strong:   rgba(140, 175, 255, 0.17);
+  --fill-strong-2: rgba(140, 175, 255, 0.29);
+  --fill-3:        rgba(140, 175, 255, 0.21);
+  --underline-dot: rgba(140, 175, 255, 0.26);
+  --nav-veil:      rgba(10, 17, 32, 0.74);
+}
+
+/* —— 演播室: 夜幕自顶部微亮, 两团光晕改为冷青与紫罗兰 —— */
+body {
+  background-image: linear-gradient(180deg,
+                    #121d33 0%, #0c1424 52%, #0e1729 100%);
+  background-attachment: fixed;
+}
+
+.stage-glow.g1 {
+  background: radial-gradient(circle, rgba(70, 170, 255, 0.16), transparent 68%);
+}
+.stage-glow.g2 {
+  background: radial-gradient(circle, rgba(150, 110, 255, 0.13), transparent 68%);
+}
+.stage::before {
+  background: radial-gradient(120% 52% at 50% -15%,
+              rgba(180, 205, 255, 0.075), transparent 62%);
+}
+.stage::after { opacity: 0.030; }
+
+::selection { background: rgba(100, 210, 255, 0.30); color: #ffffff; }
+
+header::after { opacity: 0.42; }
+
+/* —— 棱镜标识: 冷色面板, 出射光的落影偏青 —— */
+#prism-logo {
+  background:
+    radial-gradient(120% 120% at 30% 0%, rgba(180, 205, 255, 0.11), transparent 58%),
+    linear-gradient(160deg, rgba(140, 175, 255, 0.07), rgba(140, 175, 255, 0.015));
+  box-shadow: var(--inner-top), 0 8px 26px rgba(0, 0, 0, 0.58);
+}
+#prism-logo .prism-spec { filter: drop-shadow(0 0 7px rgba(100, 210, 255, 0.5)); }
+
+/* —— 等级徽标: 亮底配深色字, 对比度从 ~3.6:1 提升到 ~5.6:1 (AA) —— */
+.g-badge.grade-A, .g-badge.grade-B,
+.g-badge.grade-C, .g-badge.grade-D { color: #08080a; }
+
+/* —— 粘性表头 / 代码块 —— */
+#bt-log-table th { background: #1a2540; }
+pre, code {
+  color: #cfd9f5;
+  background: var(--bg-1);
+}

@@ -21,6 +21,7 @@ function switchTab(name) {
     p.classList.toggle("active", p.id === "tab-" + name));
   if (name === "compare") renderComparison(state.screenResult);
   if (name === "sector") loadSectorStage();
+  if (name === "firstboard") loadFirstBoard();
 }
 
 // ---------- API ----------
@@ -852,4 +853,157 @@ async function loadSectorStage() {
       `<td>${r.pos_cap ?? "-"}</td></tr>`;
     }).join("");
   } catch (e) { /* fail-open: 面板留空 */ }
+}
+
+// ---------- 首板拆解(观察层 · 盘后五维拆解) ----------
+// 数据只来自后端已采集结果; 前端不做任何实时取数(用户分工: 盘中自己执行)。
+const FB_CONF_CLASS = { "高": "ok", "跟风脉冲": "fail" };
+const FB_DIMS = [
+  ["seal", "封板质量"], ["sector", "板块共振"], ["volume", "量能结构"],
+  ["fund", "资金行为"], ["industry", "产业逻辑"],
+];
+let fbItems = [];
+
+function fbTodayIso() {
+  const d = new Date();
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") +
+    "-" + String(d.getDate()).padStart(2, "0");
+}
+
+function fbScore(a, k) {
+  const d = a && a.dims && a.dims[k];
+  if (!d || !d.available || d.score == null) return null;
+  return d.score;
+}
+
+// 维度安全取用: dims 缺键/字段缺省时给"不可用"兜底, 避免渲染期抛错
+function fbDim(a, k) {
+  const d = a && a.dims && a.dims[k];
+  return (d && typeof d === "object")
+    ? { available: !!d.available, score: d.score ?? null, evidence: d.evidence || [] }
+    : { available: false, score: null, evidence: [] };
+}
+
+async function loadFirstBoard(force) {
+  const dEl = document.getElementById("fb-date");
+  const btn = document.getElementById("btn-fb-load");
+  const tb = document.querySelector("#fb-table tbody");
+  if (!dEl.value) {
+    // 默认取最近一次已生成的日期, 没有则今天
+    try {
+      const ds = await api("/api/first_board/dates");
+      dEl.value = (ds.dates && ds.dates[0])
+        ? `${ds.dates[0].slice(0, 4)}-${ds.dates[0].slice(4, 6)}-${ds.dates[0].slice(6, 8)}`
+        : fbTodayIso();
+      if (ds.dates && ds.dates.length) {
+        document.getElementById("fb-dates").textContent =
+          "已生成: " + ds.dates.slice(0, 6).join(" / ");
+      }
+    } catch (e) { dEl.value = fbTodayIso(); }
+  }
+  const day8 = dEl.value.replace(/-/g, "");
+  if (force) {
+    btn.disabled = true;
+    btn.textContent = "分析中…";
+    tb.innerHTML = `<tr><td colspan="11" class="hint">` +
+      `正在采集并拆解当日首板…(只读本地缓存, 不触发 1m 补采)</td></tr>`;
+  }
+  try {
+    const data = await api(`/api/first_board?date=${day8}` +
+      (force ? "&refresh=1" : ""));
+    if (!data.ok) {
+      tb.innerHTML = `<tr><td colspan="11" class="hint">` +
+        `${escHtml(data.error || "无数据")}｜可在终端跑 ` +
+        `python -m prism.first_board_review --date ${day8} --report --backfill</td></tr>`;
+      document.getElementById("fb-summary").innerHTML = "";
+      return;
+    }
+    fbItems = data.items || [];
+    document.getElementById("fb-date-label").textContent =
+      `${day8.slice(0, 4)}-${day8.slice(4, 6)}-${day8.slice(6, 8)} · ` +
+      `${fbItems.length} 只首板`;
+    renderFirstBoard();
+  } catch (e) {
+    tb.innerHTML = `<tr><td colspan="11" class="hint">请求失败: ${escHtml(String(e))}</td></tr>`;
+  } finally {
+    if (force) { btn.disabled = false; btn.textContent = "生成 / 刷新"; }
+  }
+}
+
+function renderFirstBoard() {
+  const sortKey = document.getElementById("fb-sort").value;
+  const items = fbItems.slice().sort((a, b) => {
+    if (sortKey === "total") {
+      return (b.analysis.total ?? -1) - (a.analysis.total ?? -1);
+    }
+    return (fbScore(b.analysis, sortKey) ?? -1) - (fbScore(a.analysis, sortKey) ?? -1);
+  });
+
+  // 汇总卡
+  const conf = {};
+  items.forEach(it => {
+    const c = it.analysis.confidence || "-";
+    conf[c] = (conf[c] || 0) + 1;
+  });
+  const missing = items.filter(it =>
+    FB_DIMS.some(([k]) => !fbDim(it.analysis, k).available)).length;
+  document.getElementById("fb-summary").innerHTML =
+    `<div class="card"><div class="label">首板数</div><div class="value">${items.length}</div></div>` +
+    `<div class="card"><div class="label">高置信度</div><div class="value">${conf["高"] || 0}</div></div>` +
+    `<div class="card"><div class="label">跟风脉冲</div><div class="value">${conf["跟风脉冲"] || 0}</div></div>` +
+    `<div class="card"><div class="label">有维度缺失</div><div class="value">${missing}</div></div>`;
+
+  const tb = document.querySelector("#fb-table tbody");
+  if (!items.length) {
+    tb.innerHTML = `<tr><td colspan="11" class="hint">当日无首板(或涨停池索引未覆盖)。</td></tr>`;
+    return;
+  }
+  tb.innerHTML = items.map((it, i) => {
+    const r = it.record, a = it.analysis;
+    const cell = k => {
+      const s = fbScore(a, k);
+      return s == null ? `<td class="hint" title="数据缺失, 未推测">未知</td>`
+                       : `<td>${s}</td>`;
+    };
+    const total = a.total == null ? "—" : a.total;
+    const cls = FB_CONF_CLASS[a.confidence] || "";
+    return `<tr style="cursor:pointer" onclick="showFirstBoardDetail(${i})">` +
+      `<td>${escHtml(r.code)}</td><td>${escHtml(r.name || "")}</td>` +
+      `<td><b>${total}</b></td>` +
+      `<td><span class="badge ${cls}">${escHtml(a.confidence)}</span></td>` +
+      FB_DIMS.map(([k]) => cell(k)).join("") +
+      `<td>${escHtml(r.seal_time || "—")}</td>` +
+      `<td>${r.sector_zt_count == null ? "—" : r.sector_zt_count}</td></tr>`;
+  }).join("");
+}
+
+function showFirstBoardDetail(idx) {
+  const sortKey = document.getElementById("fb-sort").value;
+  const items = fbItems.slice().sort((a, b) => {
+    if (sortKey === "total") {
+      return (b.analysis.total ?? -1) - (a.analysis.total ?? -1);
+    }
+    return (fbScore(b.analysis, sortKey) ?? -1) - (fbScore(a.analysis, sortKey) ?? -1);
+  });
+  const it = items[idx];
+  if (!it) return;
+  const r = it.record, a = it.analysis;
+  const rows = FB_DIMS.map(([k, label]) => {
+    const d = fbDim(a, k);
+    const sc = (!d.available || d.score == null) ? "未知" : d.score;
+    return `<tr><td>${label}</td><td>${sc}</td>` +
+      `<td class="hint">${escHtml((d.evidence || []).join("；"))}</td></tr>`;
+  }).join("");
+  const unknown = Object.entries(r.sources || {})
+    .filter(([, v]) => v === "unknown").map(([k]) => k);
+  document.getElementById("fb-detail").innerHTML =
+    `<h3>${escHtml(r.code)} ${escHtml(r.name || "")} ｜ 总评 ` +
+    `${a.total == null ? "—" : a.total}（${escHtml(a.confidence)}）</h3>` +
+    `<table><thead><tr><th>维度</th><th>评分</th><th>依据</th></tr></thead>` +
+    `<tbody>${rows}</tbody></table>` +
+    (unknown.length
+      ? `<p class="hint">数据缺失：${escHtml(unknown.join("、"))}` +
+        `（盘后不可得或缓存未覆盖，未推测）</p>`
+      : "");
+  document.getElementById("fb-detail").scrollIntoView({ behavior: "smooth" });
 }

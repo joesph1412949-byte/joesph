@@ -1,0 +1,98 @@
+/* ==========================================================================
+   方案 A · 玄武岩石墨 (Graphite)
+   --------------------------------------------------------------------------
+   概念: 精密仪器 / 阳极氧化铝
+   做法: 纯黑 #000 提亮到石墨 #141416, 靠「实心层次的明度差」而不是光晕制造纵深。
+   空间感来源: 顶部向下的极轻明度梯度 —— 模拟演播室顶灯, 比任何阴影都有效。
+
+   约束: 本文件只覆盖设计令牌与少量硬编码点, 不新增/删除任何选择器,
+        因此所有既有 DOM 钩子与 app.js 注入结构完全不受影响。
+   加载顺序: style.css 之后。
+   ========================================================================== */
+
+:root {
+  color-scheme: dark;
+
+  /* —— 表面层次: 从「虚空」变成「有物质的深灰」 —— */
+  --bg-void:      #141416;
+  --bg-0:         #17171a;
+  --bg-1:         #1b1b1f;
+  --bg-2:         #212126;
+  --bg-3:         #2a2a30;
+
+  --surface-1:    #1e1e22;
+  --surface-2:    #27272c;
+  --surface-3:    #2f2f35;
+
+  --glass:        rgba(255, 255, 255, 0.045);
+  --glass-strong: rgba(255, 255, 255, 0.075);
+  --glass-press:  rgba(255, 255, 255, 0.105);
+
+  /* 底色亮了, 发丝线要稍微加强才能保持「看得见但几乎看不见」 */
+  --stroke:    rgba(255, 255, 255, 0.105);
+  --stroke-2:  rgba(255, 255, 255, 0.165);
+  --hairline:  rgba(255, 255, 255, 0.085);
+
+  /* 文字灰阶不需要改 —— #f5f5f7 在 #141416 上对比度约 16:1, 依旧远超 AA */
+  --txt-3: #7c7c82;   /* 装饰用, 石墨底上略提一档避免发闷 */
+
+  /* 底色变浅后, 投影不再是主要塑形手段, 收一点 */
+  --lift-1: 0 1px 2px rgba(0, 0, 0, 0.30), 0 10px 30px rgba(0, 0, 0, 0.26);
+  --lift-2: 0 2px 6px rgba(0, 0, 0, 0.36), 0 26px 64px rgba(0, 0, 0, 0.42);
+  --inner-top: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+
+  /* —— 图表令牌 —— */
+  --chart-line:    rgba(255, 255, 255, 0.07);
+  --chart-axis:    rgba(255, 255, 255, 0.14);
+  --chart-surface: rgba(31, 31, 36, 0.90);
+  --chart-edge:    rgba(255, 255, 255, 0.14);
+  --chart-label-bg: #2a2a30;
+
+  /* —— 中性叠加: 石墨底上仍走「白上加白」, 数值略提一档 —— */
+  --fill-subtle:   rgba(255, 255, 255, 0.026);
+  --fill-1:        rgba(255, 255, 255, 0.038);
+  --fill-2:        rgba(255, 255, 255, 0.09);
+  --fill-strong:   rgba(255, 255, 255, 0.15);
+  --fill-strong-2: rgba(255, 255, 255, 0.26);
+  --fill-3:        rgba(255, 255, 255, 0.18);
+  --underline-dot: rgba(255, 255, 255, 0.24);
+  --nav-veil:      rgba(20, 20, 22, 0.72);
+}
+
+/* —— 演播室: 顶灯更明确, 两团光晕收敛 (底色亮了, 再强就会发浑) —— */
+body {
+  background-image: linear-gradient(180deg,
+                    #1a1b1f 0%, #131315 46%, #141417 100%);
+  background-attachment: fixed;
+}
+
+.stage-glow.g1 {
+  background: radial-gradient(circle, rgba(10, 132, 255, 0.13), transparent 68%);
+}
+.stage-glow.g2 {
+  background: radial-gradient(circle, rgba(191, 90, 242, 0.10), transparent 68%);
+}
+.stage::before {
+  background: radial-gradient(124% 54% at 50% -16%,
+              rgba(255, 255, 255, 0.085), transparent 62%);
+}
+.stage::after { opacity: 0.028; }
+
+/* —— 顶栏下方那道发丝光谱线: 石墨底上退回「暗线」更贵 —— */
+header::after { opacity: 0.34; }
+
+/* —— 棱镜标识: 面板提亮, 光晕收敛 —— */
+#prism-logo {
+  background:
+    radial-gradient(120% 120% at 30% 0%, rgba(255, 255, 255, 0.10), transparent 58%),
+    linear-gradient(160deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.015));
+  box-shadow: var(--inner-top), 0 8px 26px rgba(0, 0, 0, 0.42);
+}
+
+/* 主按钮: 石墨之上白药丸依旧是对的 —— 反而更像 Apple */
+#btn-screen, #btn-backtest {
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.40), 0 6px 20px rgba(255, 255, 255, 0.08);
+}
+
+/* —— 粘性表头 / 代码块: 跟随新底色 —— */
+#bt-log-table th { background: #202026; }

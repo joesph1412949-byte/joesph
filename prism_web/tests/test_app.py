@@ -3,6 +3,7 @@ r"""prism_web app 测试 — 新 API(因子库/策略/回测/自动化) + 旧路
 
 运行: cd D:\cc-joesph && python -m pytest prism_web/tests/ -v
 """
+import json
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))  # 项目根(import prism_web)
@@ -1215,3 +1216,118 @@ def test_guard_integration_remote_sensitive_403(client):
     r = client.post("/api/automation", json={"paused": True},
                     environ_base=_REMOTE_ENV)
     assert r.status_code == 403
+
+
+# ================= 首板盘后拆解(观察层, 2026-09-19) =================
+# 约束: 网页路径绝不下载 1m 特征 —— 这里断言读落盘/只读采集两条路径,
+# 且采集异常必须 fail-open(200 + ok:false), 不 500。
+
+def _fb_item(code="600001.SH", total=80, conf="高"):
+    dims = {k: {"score": 80, "available": True, "evidence": ["依据"]}
+            for k in ("seal", "sector", "volume", "fund", "industry")}
+    return {"record": {"code": code, "name": "某股", "seal_time": "09:35",
+                       "sector_zt_count": 5,
+                       "sources": {"seal_amount": "unknown"}},
+            "analysis": {"total": total, "confidence": conf, "dims": dims}}
+
+
+def test_first_board_reads_snapshot(client, tmp_path, monkeypatch):
+    """有落盘 → 直接读落盘, 不触发采集。"""
+    monkeypatch.setattr(app_module, "_FBR_STATE_DIR", tmp_path)
+    (tmp_path / "first_board_review_20260918.json").write_text(
+        json.dumps({"date": "20260918", "count": 1, "items": [_fb_item()]}),
+        encoding="utf-8")
+    called = {"n": 0}
+
+    def _boom(d, timeout=90):
+        called["n"] += 1
+        raise AssertionError("有落盘时不应触发采集")
+
+    monkeypatch.setattr(app_module, "_fbr_collect", _boom)
+    d = client.get("/api/first_board?date=20260918").get_json()
+    assert d["ok"] is True and d["count"] == 1
+    assert d["items"][0]["record"]["code"] == "600001.SH"
+    assert called["n"] == 0        # 有落盘就不该采集
+
+
+def test_first_board_collect_when_no_snapshot(client, tmp_path, monkeypatch):
+    """无落盘 → 只读采集一次; date 归一成 8 位。"""
+    monkeypatch.setattr(app_module, "_FBR_STATE_DIR", tmp_path)
+    seen = {}
+
+    def fake_collect(day8, timeout=90):
+        seen["day"] = day8
+        return [{"code": "600002.SH", "name": "另一只"}], None
+
+    monkeypatch.setattr(app_module, "_fbr_collect", fake_collect)
+    d = client.get("/api/first_board?date=2026-09-18").get_json()
+    assert d["ok"] is True
+    assert seen["day"] == "20260918"
+    assert d["items"][0]["record"]["code"] == "600002.SH"
+    # 内存兜底路径也要带 analysis(前端依赖五维渲染)
+    assert "analysis" in d["items"][0]
+
+
+def test_first_board_collect_error_fail_open(client, tmp_path, monkeypatch):
+    """采集失败 → 200 + ok:false(不 500)。"""
+    monkeypatch.setattr(app_module, "_FBR_STATE_DIR", tmp_path)
+    monkeypatch.setattr(app_module, "_fbr_collect",
+                        lambda d, timeout=90: (None, "QMT 离线"))
+    r = client.get("/api/first_board?date=20260918")
+    assert r.status_code == 200
+    d = r.get_json()
+    assert d["ok"] is False and "QMT" in d["error"]
+    assert d["items"] == []
+
+
+def test_first_board_bad_date(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(app_module, "_FBR_STATE_DIR", tmp_path)
+    r = client.get("/api/first_board?date=abc")
+    assert r.status_code == 200
+    assert r.get_json()["ok"] is False
+
+
+def test_first_board_refresh_forces_recollect(client, tmp_path, monkeypatch):
+    """refresh=1 → 忽略落盘强制重算。"""
+    monkeypatch.setattr(app_module, "_FBR_STATE_DIR", tmp_path)
+    (tmp_path / "first_board_review_20260918.json").write_text(
+        json.dumps({"date": "20260918", "count": 1,
+                    "items": [_fb_item("600009.SH")]}), encoding="utf-8")
+    seen = {"n": 0}
+
+    def fake_collect(day8, timeout=90):
+        seen["n"] += 1
+        return [{"code": "600010.SH", "name": "重算"}], None
+
+    monkeypatch.setattr(app_module, "_fbr_collect", fake_collect)
+    d1 = client.get("/api/first_board?date=20260918").get_json()
+    assert seen["n"] == 0
+    assert d1["items"][0]["record"]["code"] == "600009.SH"
+    d2 = client.get("/api/first_board?date=20260918&refresh=1").get_json()
+    assert seen["n"] == 1
+    assert d2["items"][0]["record"]["code"] == "600010.SH"
+
+
+def test_first_board_dates_lists_snapshots(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(app_module, "_FBR_STATE_DIR", tmp_path)
+    for d in ("20260917", "20260918"):
+        (tmp_path / f"first_board_review_{d}.json").write_text(
+            json.dumps({"date": d, "count": 0, "items": []}), encoding="utf-8")
+    (tmp_path / "other.json").write_text("{}", encoding="utf-8")
+    d = client.get("/api/first_board/dates").get_json()
+    assert d["ok"] is True
+    assert d["dates"] == ["20260918", "20260917"]   # 新→旧
+
+
+def test_first_board_empty_dir_returns_empty(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(app_module, "_FBR_STATE_DIR", tmp_path / "nope")
+    d = client.get("/api/first_board/dates").get_json()
+    assert d["ok"] is True and d["dates"] == []
+
+
+def test_index_has_firstboard_tab(client):
+    """首页含首板拆解 tab 与面板(前端接线冒烟)。"""
+    html = client.get("/").get_data(as_text=True)
+    assert 'data-tab="firstboard"' in html
+    assert 'id="tab-firstboard"' in html
+    assert 'id="fb-table"' in html
