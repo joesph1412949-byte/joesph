@@ -59,8 +59,9 @@ $verdict = switch ($code) {
 
 # 降级检测: data_refresh 降级成功时聚合码仍为 0(源降级是有意的容错, 不是故障), 故必须单独留痕,
 # 否则"天天降级"会静默成常态。软旗与告警旗分开: 软旗不惊动人, 但巡检可见。
-# 注意: 这里匹配的是 data_refresh 的输出用词, 与它的文案耦合 —— 改文案要同步改这里。
-$degraded = [bool](($stream -join $nl) -match '降级')
+# 注意: 只匹配**真实降级事件**(OK(降级 / 降级:), 不能只匹配 '降级' —— 实测 -DryRun 的计划文案里
+# 就有'数据源/降级链:', 只匹配'降级'会让每次 dry-run 都误落软旗。与 data_refresh 文案耦合, 改文案要同步改这里。
+$degraded = [bool](($stream -join $nl) -match 'OK\(降级|降级:')
 
 @('',
   ('[task] 退出码={0}  {1}  结束于 {2}' -f $code, $verdict, (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')),
