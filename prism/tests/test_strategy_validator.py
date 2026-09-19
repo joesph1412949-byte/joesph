@@ -37,6 +37,16 @@ def test_valid_payload():
     assert s["id"] is None                     # id 由端点生成
 
 
+def test_no_duplicate_environment_threshold_key():
+    """判别力: 校验器返回值里**不再有** filters.environment_threshold —— 它只是
+    market_gate.threshold 的重复别名(同一个 gt 写两份), 全仓零读取点。改前
+    engine.py:442 会写出该键 ⇒ 这条必红, 且任何第二个落盘者都会让它复生。"""
+    ok, errs, s = validate_strategy_payload(_good(gate_threshold=2))
+    assert ok is True and errs == []
+    assert s["filters"] == {"candidate_min_model": 3}
+    assert s["market_gate"]["threshold"] == 2      # 门槛本体不受影响
+
+
 def test_name_empty():
     ok, errs, _ = validate_strategy_payload(_good(name="  "))
     assert ok is False and any("名称" in e for e in errs)

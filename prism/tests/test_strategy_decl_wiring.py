@@ -6,7 +6,8 @@
      是**硬编码**常量: 改 JSON 不生效, 也不报错(配置看着被尊重, 实际被忽略)。
      现在 schedule 在 import 时走 engine.resolve_strategy 解析(与守护/引擎同一 loader)。
   B. market_gate.model —— 改前**全仓零读取点**: 手改成未知取值不生效也不报错,
-     守护照样按 node 语义跑。现在未知取值 → fail-closed 拒绝选股。
+     守护照样按 node 语义跑。现在未知取值 → fail-closed 拒绝加载(守卫在
+     engine.load_strategy, 所有读取方共用, 含绕开 run_daily 的模拟盘/网页/回测)。
   C. filters.environment_threshold —— 与 market_gate.threshold 是同一个数
      (engine.validate_strategy_payload 由同一个 gt 写出两份), 全仓零读取点 ⇒
      停止声明; 历史文件仍带该键时必须能读(忽略而非报错)。
@@ -24,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import pytest
 
-from prism import engine, registry as reg, schedule, trader
+from prism import backtest, engine, registry as reg, schedule, trader
 
 REAL = engine.STRATEGIES_DIR
 
@@ -170,11 +171,47 @@ def test_unreadable_strategy_falls_back_instead_of_raising(tmp_path,
 
 
 # ---------------- B. market_gate.model: 未知取值 fail-closed ----------------
+# 守卫落点 = engine.load_strategy(所有读取方共用), 不再是 trader.run_daily 独占。
 
-def test_unknown_gate_model_refuses_to_screen(monkeypatch):
-    """判别力: model 改成未知取值 → 拒绝选股(抛错), 不静默按 node 语义跑。
-    改前该键零读取点 ⇒ 这条必红(照跑不误, 直到 provider 为 None 才以别的方式炸)。
+def test_unknown_gate_model_refuses_to_load():
+    """判别力: model 改成未知取值 → engine.load_strategy 抛错(fail-closed)。
+    改前该键在 load_strategy 里是**零读取点**(唯一守卫在 trader._check_gate_model,
+    只覆盖 run_daily)⇒ 这条必红。"""
+    strat = _doc(REAL / "full_factor_v1.json")
+    strat["market_gate"]["model"] = "node_v2"
+    with pytest.raises(ValueError, match="node_v2"):
+        engine.load_strategy(strat)
+
+
+def test_guard_covers_the_entries_that_bypass_run_daily(tmp_path, monkeypatch):
+    """判别力(本批全部价值): 守卫搬进 load_strategy 后, **绕开 run_daily 的入口**
+    也守住了 —— 改前它们全照 node 语义跑, 一声不响:
+      · 网页选股 prism_web.app._load_strategy_for_screen
+      · 回测     prism.backtest(直接 load_strategy)
+      · 模拟盘   paper.PaperAccount.strategy(→ engine.resolve_strategy)
     """
+    doc = _doc(REAL / "full_factor_v1.json")
+    doc["market_gate"]["model"] = "node_v2"
+    (tmp_path / "full_factor_v1.json").write_text(
+        json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / ".active.json").write_text('{"id": "full_factor_v1"}',
+                                           encoding="utf-8")
+    monkeypatch.setattr(engine, "STRATEGIES_DIR", tmp_path)
+    import prism_web.app as webapp
+    monkeypatch.setattr(webapp, "STRATEGIES_DIR", tmp_path)
+    from prism import paper
+    with pytest.raises(ValueError, match="node_v2"):        # 网页选股
+        webapp._load_strategy_for_screen("full_factor_v1")
+    with pytest.raises(ValueError, match="node_v2"):        # 回测
+        backtest.load_strategy(tmp_path / "full_factor_v1.json")
+    acct = paper.PaperAccount(state_path=tmp_path / "state.json")
+    with pytest.raises(ValueError, match="node_v2"):        # 模拟盘(首载无退路)
+        acct.strategy
+
+
+def test_run_daily_still_refuses_unknown_gate_model(monkeypatch):
+    """判别力(回归防线): 删掉 trader._check_gate_model 后 run_daily 入口**仍**拒绝
+    (经 resolve_strategy → load_strategy) —— 证明是搬走了守卫, 不是删没了。"""
     monkeypatch.setattr(trader, "check_paused", lambda: False)
     strat = _doc(REAL / "full_factor_v1.json")
     strat["market_gate"]["model"] = "node_v2"
@@ -183,12 +220,14 @@ def test_unknown_gate_model_refuses_to_screen(monkeypatch):
 
 
 def test_known_and_absent_gate_model_are_allowed():
-    """判别力(反面): 唯一实现了的取值 node / 未声明(缺键)都放行 ——
-    不许把正常策略挡死。"""
+    """判别力(反面): 唯一实现了的取值 node / 缺 model 键 / 整个 market_gate 缺失
+    都放行 —— 不许把正常策略挡死(缺键 = 写盘侧的唯一取值)。"""
     strat = _doc(REAL / "full_factor_v1.json")
-    assert trader._check_gate_model(strat) is None
+    assert engine.load_strategy(strat)["market_gate"]["model"] == "node"
     del strat["market_gate"]["model"]
-    assert trader._check_gate_model(strat) is None
+    assert engine.load_strategy(strat)["id"] == strat["id"]
+    strat.pop("market_gate")
+    assert engine.load_strategy(strat)["id"] == strat["id"]
 
 
 # ---------------- C. filters.environment_threshold: 停止声明 ----------------

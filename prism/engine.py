@@ -71,6 +71,12 @@ def load_strategy(path_or_dict):
         raise ValueError("策略缺少 scoring_models")
     # 校验因子存在性(市场门槛 + 各模型)
     gate = data.get("market_gate") or {}
+    # 大盘闸门只实现了"按 node 类因子计数"(run_screen), 故 model 是唯一取值。
+    # 未知取值 fail-closed: 配置看着被尊重、实际被忽略比报错更危险。放在这里
+    # 而不是某个入口, 是为了让**所有**读取方(守护/模拟盘/网页/回测)共用同一道闸。
+    model = gate.get("model", "node")
+    if model != "node":
+        raise ValueError("未知大盘闸门模型: %r (只实现了 node)" % (model,))
     for fid in gate.get("factors", []):
         reg.get_factor(fid)
     for m in data["scoring_models"]:
@@ -439,7 +445,7 @@ def validate_strategy_payload(payload, reg=None):
         "scoring_models": model_rows,
         "composite": {"mode": "top3_weighted", "weights": model_weights,
                       "cap": cap},
-        "filters": {"candidate_min_model": cmm, "environment_threshold": gt},
+        "filters": {"candidate_min_model": cmm},
         "sell_rules": {"take_profit_pct": tp, "stop_loss_pct": sl,
                        "max_hold_days": int(hold)}}
     return True, [], strategy
