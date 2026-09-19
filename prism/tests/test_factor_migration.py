@@ -658,7 +658,7 @@ def test_full_factor_v1_loads():
     assert "S2" not in fids, "S2 已于 2026-09-19 摘除(0 命中 + A/B 无差异)"
     assert all(f in reg.FACTORS for f in set(fids) | set(gate))
     comp = s["composite"]
-    assert comp["mode"] == "average" and abs(comp["cap"] - 9.0) < 1e-9
+    assert comp["mode"] == "weighted_sum" and abs(comp["cap"] - 9.0) < 1e-9
     assert "weights" not in comp
     ex = s["execution"]
     assert ex["top_n"] == 5 and ex["pct"] == 0.15
