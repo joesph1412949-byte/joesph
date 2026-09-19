@@ -37,15 +37,18 @@ def _as_date(v):
 
 
 def limit_ratio(code):
-    """涨跌停幅度: 北交所 30% / 创业板·科创板 20% / 其余 10%。
+    """涨跌停幅度: 北交所·新三板 30% / 创业科创(含科创CDR 689) 20%
+    / 老三板 400·420 5% / 其余 10%。
 
     与 common.limit_ratio_for_code 同口径; 此处内联以保持 exit_rules
     零依赖(它被 backtest 与根目录 tests 直接 import, 不能假定 common 在
-    sys.path 上)。"""
+    sys.path 上)。400/420 必须在 "4" 前缀之前判, 否则老三板会被当北交所。"""
     c = str(code).strip()
-    if c.startswith(("92", "8", "4")):
+    if c.startswith(("400", "420")):        # 老三板(退市板块) ±5%
+        return 0.05
+    if c.startswith(("92", "8", "4")):      # 北交所/新三板 ±30%
         return 0.30
-    if c.startswith(("300", "301", "688")):
+    if c.startswith(("300", "301", "688", "689")):
         return 0.20
     return 0.10
 
