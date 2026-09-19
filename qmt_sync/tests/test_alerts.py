@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from qmt_sync.alerts import evaluate_asset_alerts, evaluate_position_alerts
+from qmt_sync.alerts import evaluate_asset_alerts, evaluate_gap_alert, evaluate_position_alerts
 
 def A(**kw): return SimpleNamespace(account_id="A", total_asset=kw.get("total", 100000.0))
 def P(**kw): return SimpleNamespace(stock_code=kw["code"], volume=kw.get("vol", 1000),
@@ -36,3 +36,21 @@ def test_position_change():
                                          {"position_change": {"enabled": True}}))
     msgs = [h[2] for h in hits]
     assert any("清仓" in m for m in msgs)
+
+
+def test_gap_alert_threshold():
+    """I2: 默认阈值 60s(≈12 个默认轮询周期)。未超不报, 超过报一条 data_gap。"""
+    rules = {}
+    assert list(evaluate_gap_alert("2026-08-12 10:00:00", "2026-08-12 10:01:00", rules)) == []
+    hits = list(evaluate_gap_alert("2026-08-12 10:00:00", "2026-08-12 10:01:01", rules))
+    assert len(hits) == 1 and hits[0][0] == "data_gap"
+
+
+def test_gap_alert_configurable_and_fail_safe():
+    # 阈值可配(复用现成 alert_rules.json 结构)
+    hits = list(evaluate_gap_alert("2026-08-12 10:00:00", "2026-08-12 10:00:10",
+                                   {"data_gap": {"max_silence_s": 5}}))
+    assert len(hits) == 1
+    # 无心跳起点 / 时间不可解析 -> 不误报, 不抛错
+    assert list(evaluate_gap_alert(None, "2026-08-12 10:10:00", {})) == []
+    assert list(evaluate_gap_alert("bad", "worse", {})) == []

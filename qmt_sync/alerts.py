@@ -1,11 +1,16 @@
 """告警规则评估(纯函数, 无 IO)。规则未配置时用内置默认值。"""
 from __future__ import annotations
+from datetime import datetime
 from typing import Iterator
 
 _DEFAULTS = {
     "position_ratio": {"max": 0.30},
     "daily_loss": {"max_loss_pct": 0.03},
     "stop_loss": {"drop_pct": 0.08},
+    # I2: 无有效数据的容忍时长。默认 60s = 12 个默认轮询周期(poll_interval_s=5),
+    # 足以排除单轮查询抖动, 又不至于让断线/停摆被忽视。盘后 QMT 未登录若嫌吵,
+    # 在现成的 alert_rules.json 里写 {"data_gap": {"enabled": false}} 关掉, 不新增配置机制。
+    "data_gap": {"max_silence_s": 60},
 }
 
 
@@ -65,3 +70,23 @@ def evaluate_position_alerts(asset, positions, prev_codes, rules: dict) -> Itera
             yield ("position_change", c, "新开仓 {}".format(c))
         for c in sorted(prev_codes - cur_codes):
             yield ("position_change", c, "清仓 {}".format(c))
+
+
+def evaluate_gap_alert(last_ok_ts, now_ts, rules: dict) -> Iterator[tuple[str, str, str]]:
+    """I2 数据缺口: 距上次"资产行真的落库"超过 max_silence_s 即告警。
+
+    阈值依据见 _DEFAULTS["data_gap"]。节流交给 insert_alert 的 60 分钟去重窗, 不新建表。
+    last_ok_ts 缺失或时间戳不可解析时静默返回(不误报, 也不抛错打断轮询)。
+    """
+    r = _rule(rules, "data_gap")
+    if not _enabled(r) or not last_ok_ts:
+        return
+    try:
+        gap = (datetime.strptime(str(now_ts), "%Y-%m-%d %H:%M:%S")
+               - datetime.strptime(str(last_ok_ts), "%Y-%m-%d %H:%M:%S")).total_seconds()
+    except (TypeError, ValueError):
+        return
+    mx = float(r["max_silence_s"])
+    if gap > mx:
+        yield ("data_gap", "",
+               "已 {:.0f}s 无有效数据(阈值 {:.0f}s): qmt_sync 可能停摆或 QMT 断线".format(gap, mx))

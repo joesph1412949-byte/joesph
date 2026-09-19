@@ -1,9 +1,18 @@
 """SQLite 存储层: schema + 写入/查询。同步进程写, Vibe-Trading 工具只读。"""
 from __future__ import annotations
+import logging
 import os
 import sqlite3
 import threading
 from datetime import datetime, timedelta
+
+logger = logging.getLogger("qmt_sync")
+
+# I3: 第二写者(重复启动的 qmt_sync / Vibe 侧工具)持锁时的等待上限(毫秒)。
+# 依据: 默认轮询周期 poll_interval_s=5, 等满一个周期足以让 WAL 下的短事务(毫秒级)排空;
+# 再长只会拖慢轮询本身。取 5000(与 sqlite3.connect(timeout=) 的隐式默认一致), 但显式写出来,
+# 不依赖隐式默认 —— 换 Python/sqlite3 版本也不会悄悄变成"不等待"。
+BUSY_TIMEOUT_MS = 5000
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS account_assets (
@@ -60,6 +69,7 @@ class QmtDb:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA busy_timeout=%d" % BUSY_TIMEOUT_MS)
         self.init_schema()
 
     def init_schema(self) -> None:
@@ -67,18 +77,33 @@ class QmtDb:
             self._conn.executescript(SCHEMA)
             self._conn.commit()
 
-    # ---------- writes ----------
-    def insert_asset(self, account_id, total_asset, cash, market_value, frozen_cash, update_time):
-        with self._lock:
-            self._conn.execute(
-                "INSERT INTO account_assets(account_id,total_asset,cash,market_value,frozen_cash,update_time) "
-                "VALUES(?,?,?,?,?,?)",
-                (account_id, total_asset, cash, market_value, frozen_cash, update_time),
-            )
-            self._conn.commit()
+    def _write(self, tag: str, do_write) -> bool:
+        """锁内执行写入并提交。
 
-    def upsert_positions(self, poll_seq, rows):
+        I3: 失败只 WARNING 不抛异常 —— 一次锁冲突不该打断整轮轮询(asset/positions/trades
+        会一起丢), 也不该静默: 返回 False 让调用方(心跳/data_gap 规则)知道本轮没落库。
+        """
         with self._lock:
+            try:
+                do_write()
+                self._conn.commit()
+                return True
+            except sqlite3.Error as exc:
+                self._conn.rollback()  # 不把连接留在坏事务里, 锁释放后能立刻恢复写入
+                logger.warning("db write failed (%s): %s", tag, exc)
+                return False
+
+    # ---------- writes ----------
+    def insert_asset(self, account_id, total_asset, cash, market_value, frozen_cash,
+                     update_time) -> bool:
+        return self._write("account_assets", lambda: self._conn.execute(
+            "INSERT INTO account_assets(account_id,total_asset,cash,market_value,frozen_cash,update_time) "
+            "VALUES(?,?,?,?,?,?)",
+            (account_id, total_asset, cash, market_value, frozen_cash, update_time),
+        ))
+
+    def upsert_positions(self, poll_seq, rows) -> bool:
+        def _do():
             for r in rows:
                 self._conn.execute(
                     "INSERT INTO positions(poll_seq,account_id,stock_code,volume,can_use_volume,open_price,"
@@ -88,37 +113,36 @@ class QmtDb:
                      r.get("open_price"), r.get("market_value"), r.get("frozen_volume"),
                      r.get("on_road_volume"), r.get("yesterday_volume"), r.get("update_time", "")),
                 )
-            self._conn.commit()
+        return self._write("positions", _do)
 
-    def insert_trade(self, r):
-        with self._lock:
-            self._conn.execute(
-                "INSERT OR IGNORE INTO trades(account_id,stock_code,order_type,traded_id,traded_time,"
-                "traded_price,traded_volume,traded_amount,order_id,received_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (r.get("account_id"), r.get("stock_code"), r.get("order_type"), r.get("traded_id"),
-                 r.get("traded_time"), r.get("traded_price"), r.get("traded_volume"),
-                 r.get("traded_amount"), r.get("order_id"), r.get("received_at", "")),
-            )
-            self._conn.commit()
+    def insert_trade(self, r) -> bool:
+        return self._write("trades", lambda: self._conn.execute(
+            "INSERT OR IGNORE INTO trades(account_id,stock_code,order_type,traded_id,traded_time,"
+            "traded_price,traded_volume,traded_amount,order_id,received_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (r.get("account_id"), r.get("stock_code"), r.get("order_type"), r.get("traded_id"),
+             r.get("traded_time"), r.get("traded_price"), r.get("traded_volume"),
+             r.get("traded_amount"), r.get("order_id"), r.get("received_at", "")),
+        ))
 
-    def insert_order(self, r):
-        with self._lock:
-            self._conn.execute(
-                "INSERT INTO orders(account_id,stock_code,order_id,order_sysid,order_time,order_type,"
-                "order_volume,price_type,price,traded_volume,traded_price,order_status,status_msg,received_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (r.get("account_id"), r.get("stock_code"), r.get("order_id"), r.get("order_sysid"),
-                 r.get("order_time"), r.get("order_type"), r.get("order_volume"), r.get("price_type"),
-                 r.get("price"), r.get("traded_volume"), r.get("traded_price"), r.get("order_status"),
-                 r.get("status_msg"), r.get("received_at", "")),
-            )
-            self._conn.commit()
+    def insert_order(self, r) -> bool:
+        return self._write("orders", lambda: self._conn.execute(
+            "INSERT INTO orders(account_id,stock_code,order_id,order_sysid,order_time,order_type,"
+            "order_volume,price_type,price,traded_volume,traded_price,order_status,status_msg,received_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (r.get("account_id"), r.get("stock_code"), r.get("order_id"), r.get("order_sysid"),
+             r.get("order_time"), r.get("order_type"), r.get("order_volume"), r.get("price_type"),
+             r.get("price"), r.get("traded_volume"), r.get("traded_price"), r.get("order_status"),
+             r.get("status_msg"), r.get("received_at", "")),
+        ))
 
     def insert_alert(self, rule, stock_code, message, triggered_at, window_minutes=60) -> bool:
-        """同规则同代码 60 分钟内不重复写。返回 True=已插入, False=被去重跳过。"""
+        """同规则同代码 60 分钟内不重复写。返回 True=已插入, False=被去重跳过或写库失败(见 WARNING)。"""
         code = stock_code or ""
-        with self._lock:
+        deduped = False
+
+        def _do():
+            nonlocal deduped
             dt = None
             try:
                 dt = datetime.strptime(triggered_at, "%Y-%m-%d %H:%M:%S")
@@ -131,14 +155,15 @@ class QmtDb:
                     (rule, code, cutoff),
                 ).fetchone()
                 if row is not None:
-                    return False  # 窗口内有同规则同代码告警 -> 去重
+                    deduped = True
+                    return  # 窗口内有同规则同代码告警 -> 去重
             # 时间无法解析时 fail-open: 直接插入, 不中断告警
             self._conn.execute(
                 "INSERT INTO alerts(rule,stock_code,message,triggered_at) VALUES(?,?,?,?)",
                 (rule, code, message, triggered_at),
             )
-            self._conn.commit()
-            return True
+
+        return self._write("alerts", _do) and not deduped
 
     # ---------- queries ----------
     def _rows(self, sql, args=()):

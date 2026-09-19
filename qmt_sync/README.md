@@ -29,9 +29,13 @@ account_id=<资金账号>
 {"position_ratio": {"enabled": true, "max": 0.30},
  "daily_loss": {"enabled": true, "max_loss_pct": 0.03},
  "stop_loss": {"enabled": true, "drop_pct": 0.08},
- "position_change": {"enabled": true}}
+ "position_change": {"enabled": true},
+ "data_gap": {"enabled": true, "max_silence_s": 60}}
 ```
 告警写入 alerts 表, 在 Vibe-Trading 对话里问 qmt_account 即可查看。
+`data_gap` = 超过 max_silence_s 没有有效数据(默认 60s ≈ 12 个轮询周期)即告警, 覆盖 QMT 断线 /
+qmt_sync 停摆 / 写库持续失败。盘后 QMT 未登录若嫌吵, 置 `"enabled": false`。
+`order_error` / `cancel_error` / `disconnected` 无需配置, 废单、撤单失败与断线总会上报。
 
 ## 查询(在 Vibe-Trading 对话中)
 "我现在账户什么情况" / "查我的持仓明细" / "最近有什么告警"

@@ -34,7 +34,10 @@ class Config:
         cfg = Config()
         p = Path(conf_path or DEFAULT_CONF_PATH)
         if p.is_file():
-            for line in p.read_text(encoding="utf-8").splitlines():
+            # I5: utf-8-sig —— PS 5.1 的 Set-Content -Encoding utf8 / 记事本存出的文件带 BOM,
+            # 按 utf-8 读首行会变成 '\ufeffpoll_interval_s=...' 而被判坏行静默忽略。
+            # 对无 BOM 文件与 utf-8 完全等价。
+            for line in p.read_text(encoding="utf-8-sig").splitlines():
                 line = line.strip()
                 if not line or line.startswith("#") or "=" not in line:
                     continue
@@ -47,7 +50,7 @@ class Config:
         rp = Path(alert_path or DEFAULT_ALERT_RULES_PATH)
         if rp.is_file():
             try:
-                rules = json.loads(rp.read_text(encoding="utf-8"))
+                rules = json.loads(rp.read_text(encoding="utf-8-sig"))  # I5: 同款 BOM 问题
             except json.JSONDecodeError:
                 rules = {}
         cfg.alert_rules = rules

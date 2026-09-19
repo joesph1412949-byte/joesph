@@ -28,3 +28,29 @@ def test_trade_from_xt_noncompact_time():
                          traded_volume=100, traded_amount=850.0, order_id="o1")
     t = TradeRecord.from_xt(xt)
     assert t.traded_time == "2026-08-12 09:30:00"  # 非紧凑时间原样透传
+
+
+def _trade_xt(**kw):
+    base = dict(account_id="8888", stock_code="600000.SH", order_type=23, traded_id=None,
+                traded_time="20260812093000", traded_price=8.5, traded_volume=100,
+                traded_amount=850.0, order_id="o1")
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_trade_missing_id_gets_deterministic_key():
+    """I4: traded_id 为空时不能落 "" —— UNIQUE(account_id,traded_id) 会让 INSERT OR IGNORE
+    把同一账户下所有空 id 的成交塌成 1 行(同秒多笔成交直接丢单)。"""
+    t = TradeRecord.from_xt(_trade_xt())
+    assert t.traded_id != ""
+    # 幂等: 同一笔成交被重复回调 -> 合成键相同(仍然去重)
+    assert TradeRecord.from_xt(_trade_xt()).traded_id == t.traded_id
+    assert t.traded_id == TradeRecord.from_xt(_trade_xt(traded_id="")).traded_id
+
+
+def test_trade_synthetic_key_distinguishes_fills():
+    """I4: 确定性合成键必须能区分同秒、同委托的不同成交明细(不塌)。"""
+    base = TradeRecord.from_xt(_trade_xt()).traded_id
+    for changed in (_trade_xt(order_id="o2"), _trade_xt(traded_time="20260812093001"),
+                    _trade_xt(traded_volume=200), _trade_xt(traded_price=8.6)):
+        assert TradeRecord.from_xt(changed).traded_id != base

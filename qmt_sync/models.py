@@ -123,16 +123,28 @@ class TradeRecord:
 
     @classmethod
     def from_xt(cls, xt):
+        order_id = str(_attr(xt, "order_id", default="") or "")
+        traded_time = _normalize_time(_attr(xt, "traded_time", default=""))
+        traded_volume = _i(_attr(xt, "traded_volume"))
+        traded_price = _f(_attr(xt, "traded_price"))
+        traded_id = str(_attr(xt, "traded_id", default="") or "")
+        if not traded_id:
+            # I4: 空 traded_id 不能落 ""。UNIQUE(account_id,traded_id) + INSERT OR IGNORE
+            # 会把同账户下所有空 id 的成交塌成 1 行(同秒多笔直接丢单)。
+            # 确定性合成键: 同一笔重复回调 -> 同键(仍去重), 明细不同 -> 不同键(不丢单)。
+            # ponytail: 同一委托同一秒内"明细完全相同"的两笔仍会合并; QMT 正常会带 traded_id,
+            # 真要区分只能靠券商流水号, 换来源即可。
+            traded_id = "auto:{}|{}|{}|{}".format(order_id, traded_time, traded_volume, traded_price)
         return cls(
             account_id=str(_attr(xt, "account_id", default="")),
             stock_code=str(_attr(xt, "stock_code", default="")),
             order_type=_i(_attr(xt, "order_type")),
-            traded_id=str(_attr(xt, "traded_id", default="")),
-            traded_time=_normalize_time(_attr(xt, "traded_time", default="")),
-            traded_price=_f(_attr(xt, "traded_price")),
-            traded_volume=_i(_attr(xt, "traded_volume")),
+            traded_id=traded_id,
+            traded_time=traded_time,
+            traded_price=traded_price,
+            traded_volume=traded_volume,
             traded_amount=_f(_attr(xt, "traded_amount")),
-            order_id=str(_attr(xt, "order_id", default="")),
+            order_id=order_id,
             received_at=_now(),
         )
 

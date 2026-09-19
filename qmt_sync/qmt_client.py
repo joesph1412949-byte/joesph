@@ -28,25 +28,35 @@ def _require_xtquant():
 
 class QmtCallback:
     """把 xtquant 回调转发给 SyncEngine。为避免强制继承 XtQuantTraderCallback,
-    只依赖其 on_stock_trade / on_stock_order / on_disconnected 三个方法名。"""
+    只依赖其 on_stock_trade / on_stock_order / on_order_error / on_cancel_error /
+    on_disconnected 五个方法名(xtquant 共 16 个回调, 其余仍不接)。"""
 
     def __init__(self, engine):
         self._engine = engine
 
-    def on_stock_trade(self, trade):
+    def _forward(self, name, *args):
         try:
-            self._engine.on_trade(trade)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("on_stock_trade failed: %s", exc)
+            getattr(self._engine, name)(*args)
+        except Exception as exc:  # noqa: BLE001 — 回调异常不得冒泡进 xtquant 线程
+            logger.exception("%s failed: %s", name, exc)
+
+    def on_stock_trade(self, trade):
+        self._forward("on_trade", trade)
 
     def on_stock_order(self, order):
-        try:
-            self._engine.on_order(order)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("on_stock_order failed: %s", exc)
+        self._forward("on_order", order)
+
+    def on_order_error(self, order_error):
+        """I2: 废单/委托失败 —— 原来不接, orders 表只有正常回报。"""
+        self._forward("on_order_error", order_error)
+
+    def on_cancel_error(self, cancel_error):
+        """I2: 撤单失败 —— 同上。"""
+        self._forward("on_cancel_error", cancel_error)
 
     def on_disconnected(self):
         logger.warning("QMT disconnected")
+        self._forward("on_disconnect")
 
 
 class QmtClient:
@@ -63,9 +73,10 @@ class QmtClient:
         xttrader, xttype = _require_xtquant()
         self._callback = xttrader.XtQuantTraderCallback.__new__(xttrader.XtQuantTraderCallback)
         # 把回调方法绑定到本对象的同名方法
-        self._callback.on_stock_trade = QmtCallback(self.engine).on_stock_trade
-        self._callback.on_stock_order = QmtCallback(self.engine).on_stock_order
-        self._callback.on_disconnected = QmtCallback(self.engine).on_disconnected
+        cb = QmtCallback(self.engine)
+        for name in ("on_stock_trade", "on_stock_order", "on_order_error",
+                     "on_cancel_error", "on_disconnected"):
+            setattr(self._callback, name, getattr(cb, name))
         self._trader = xttrader.XtQuantTrader(self.cfg.qmt_data_dir, int(time.time()),
                                               self._callback)
         self._trader.start()
