@@ -28,6 +28,16 @@ asof 切片(防未来), 与 SEC1/SEC2/SEC4/SEC6 同源; 未新增取数/依赖/�
 test_engine_weights.py::test_candidate_min_model_ignores_layer_weights);
 S6 命中率 81%→28% ⇒ 势能层更难凑够 3 分 ⇒ filtered_min_model 959→1274(+315)。
 该副作用与 composite 模式无关: weighted_sum 与 average 下同为 1274(候选数据逐因子相同)。
+
+A/B 口径(务必按此读, 别过度解读): 固定 weighted_sum 配置、本窗口 20260601-20260918
+(79 交易日)下, 新 S6 使总收益 +3.25%→-0.54%、sharpe 0.45→0.22。**不可**据此说
+"新 S6 更差": 单窗口 + n≈300 + 无显著性检验(单笔 sd≈9.7% ⇒ 均值标准误≈0.56pp,
+差异约 1 SE); 且绝对收益量级由 composite 配置支配(同候选数据下 average=+16.60%
+vs weighted_sum=-0.54%) ⇒ 收益变化不能归给 S6。资质线上升本身是**双刃**的:
+入场门槛更严 —— 在别的窗口既可能筛掉噪声, 也可能筛掉好票。
+结论只到: **结构目标(消除双重计数)达成; 本窗口同时带来一个可量化的资质线副作用
+(+315 候选被过滤)与一个方向为负但不显著的收益变化。** 保留 / 下调层内 S6 权重 /
+回撤 —— 由用户拍板, 本文件不预设。
 """
 from prism.registry import factor
 
