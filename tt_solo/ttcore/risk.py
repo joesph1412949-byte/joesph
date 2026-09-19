@@ -11,6 +11,7 @@
 Verdict.ok=False 时, code 标明是哪一道拦下的, 便于网页告警与日志归因。
 """
 from collections import namedtuple
+from datetime import datetime
 
 from ._vendor import limit_ratio_for_code
 
@@ -39,10 +40,17 @@ def _f(v, default=None):
 
 # ---------------------------------------------------------------- 时段
 
-def session_phase(hhmm, session_cfg):
-    """当前时刻 → 交易阶段。参数非法 → CLOSED(fail-closed)。"""
+def session_phase(hhmm, session_cfg, now=None):
+    """当前时刻 → 交易阶段。参数非法 → CLOSED(fail-closed)。
+
+    now: 判定用的"今天"。缺省取真实墙钟。**周末一律 CLOSED** —— 2026-09-19
+    (周六)真机实测 QMT 仍在推 tick, 且 lastPrice 比 09-18 真实收盘高 10%
+    (600900 报 31.10, 真收盘 28.27); 没有日历闸门就会拿假价真报单。
+    """
     s = str(hhmm or "").strip()
     cfg = session_cfg or {}
+    if (now or datetime.now()).weekday() >= 5:
+        return PHASE_CLOSED
     start = str(cfg.get("open_start") or "")
     end = str(cfg.get("open_end") or "")
     converge = str(cfg.get("converge_after") or "")
@@ -60,12 +68,13 @@ def session_phase(hhmm, session_cfg):
     return PHASE_OPEN
 
 
-def check_session(hhmm, session_cfg, side, sold_today=0, bought_today=0):
+def check_session(hhmm, session_cfg, side, sold_today=0, bought_today=0,
+                  now=None):
     """时段闸门。CONVERGE 阶段只放行"归位买入"。"""
-    phase = session_phase(hhmm, session_cfg)
+    phase = session_phase(hhmm, session_cfg, now)
     if phase == PHASE_CLOSED:
         return _reject("SESSION_CLOSED",
-                       "非交易时段/已过硬停时点 %s" % hhmm)
+                       "非交易时段/非交易日/已过硬停时点 %s" % hhmm)
     if phase == PHASE_CONVERGE:
         if side == "BUY" and int(bought_today) < int(sold_today):
             return OK                      # 归位买入放行
@@ -148,8 +157,17 @@ def check_order_amount(price, volume, max_amount):
     return OK
 
 
-def check_position_value(order_amount, held_value, total_asset, max_position_pct):
-    """单标的市值上限(含本单)。任一输入缺失 → 放行(由上层其他闸门兜底)。"""
+def check_position_value(order_amount, held_value, total_asset, max_position_pct,
+                         side="BUY"):
+    """单标的市值上限(含本单)。任一输入缺失 → 放行(由上层其他闸门兜底)。
+
+    side: 只有**加仓**才受这道闸门约束。SELL 直接放行 —— 卖出必定降低该标的
+    市值, 把 `order_amount` 加进 `held_value` 去判"会不会超上限"在语义上就是
+    错的: held_value=99500 卖 1000@28 会算出 after=127500 > cap, 从而把
+    "持仓市值已达上限"的票的卖出腿整片掐死。缺省 "BUY" = 最保守的那一侧。
+    """
+    if str(side).upper() != "BUY":
+        return OK
     t, m = _f(total_asset), _f(max_position_pct)
     if t is None or t <= 0 or m is None or m <= 0:
         return OK
@@ -269,8 +287,11 @@ class RiskGate:
               last_close, hhmm, session_cfg, lot=100,
               sold_today=0, bought_today=0, can_use_volume=None,
               held_value=0.0, total_asset=None, daily_trades=0,
-              realized_pnl=0.0, max_net_buy_qty=None, enabled=True):
-        """返回 Verdict。短路在第一个不通过项。"""
+              realized_pnl=0.0, max_net_buy_qty=None, enabled=True, now=None):
+        """返回 Verdict。短路在第一个不通过项。
+
+        now: 日历闸门(周末)用的"今天"。缺省真实墙钟。
+        """
         cfg = self.cfg
 
         # 0) 熔断 / 标的启用
@@ -280,8 +301,9 @@ class RiskGate:
         if not enabled:
             return _reject("SYMBOL_DISABLED", "该标的未启用做T")
 
-        # 1) 时段
-        v = check_session(hhmm, session_cfg, side, sold_today, bought_today)
+        # 1) 时段(含非交易日)
+        v = check_session(hhmm, session_cfg, side, sold_today, bought_today,
+                          now)
         if not v.ok:
             return v
 
@@ -306,7 +328,7 @@ class RiskGate:
         if not v.ok:
             return v
         v = check_position_value(amount, held_value, total_asset,
-                                 cfg.get("max_position_pct"))
+                                 cfg.get("max_position_pct"), side=side)
         if not v.ok:
             return v
 

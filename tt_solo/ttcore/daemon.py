@@ -138,6 +138,9 @@ class TTDaemon:
         signals = plan.get("signals", [])
         written = 0
         booked = 0
+        # 账本是"理论成交"还是"受理结果"? 信号文件通道拿不到柜台受理结果,
+        # 演练记账更没有成交 —— 都必须显式标注, 不许假装是实际成交。
+        theoretical = False
         blocked = ""
         exec_results = []
         if self.dry_run:
@@ -149,6 +152,7 @@ class TTDaemon:
                 # 买入腿拿到 net_exposure 额度。仍在 dry_run 分支内 → 无下单可能。
                 self._book(signals, plan.get("hhmm", ""))
                 booked = len(signals)
+                theoretical = True
         elif paused:
             blocked = "paused(急停开关打开)"
         elif self.direct:
@@ -157,12 +161,21 @@ class TTDaemon:
                 blocked = "not_armed: %s" % armed_msg
             else:
                 exec_results = self._exec_direct(signals, dry_run=False)
-                self._book(signals, plan.get("hhmm", ""))
+                # **只记已受理的**: 被柜台拒掉的单一股没卖, 记进账本会让
+                # sold_today/档位水位凭空推进 → 下一轮 net_exposure 据此放行
+                # 真买入(净持仓只增不减), 违反 T+1 与"严格归位"。
+                accepted = [s for s, r in zip(signals, exec_results)
+                            if r.get("ok")]
+                self._book(accepted, plan.get("hhmm", ""))
+                booked = len(accepted)
         elif not armed:
             blocked = "not_armed: %s" % armed_msg
         else:
             written = write_signals(signals, env=env, root=self.signal_root)
+            # 信号文件通道拿不到受理结果 → 只能按挂单价做**理论**记账
             self._book(signals, plan.get("hhmm", ""))
+            booked = len(signals)
+            theoretical = True
 
         runtime = dict(plan)
         runtime.update({
@@ -176,6 +189,7 @@ class TTDaemon:
             "blocked": blocked,
             "book_dry_run": self.book_dry_run,
             "booked": booked,
+            "ledger_theoretical": theoretical,
             "rounds": self.rounds,
             "runtime_at": self.now_fn().isoformat(timespec="seconds"),
             "ledger": self.ledger.snapshot(),
@@ -192,15 +206,46 @@ class TTDaemon:
         return runtime
 
     def _exec_direct(self, signals, dry_run):
-        """经由 executor 直连下单。未配置 executor → 返回空并告警。"""
+        """经由 executor 直连下单。未配置 executor → 返回空并告警。
+
+        **分两段提交(先卖后买)并在段间做一次真正的事后核对。**
+        引擎的"先卖后买"把同一轮的卖出量预先算进了买单的净敞口额度, 而那只在
+        卖出**真的被柜台受理**之后才成立。若卖出被拒、买单照发, 日内净持仓就
+        凭空变正(违反 T+1 与"严格归位"), 与 C1 的假账是同一个失效模式的另一半
+        —— C1 管账本, 这里管在途委托。
+
+        故: 先提交全部卖单, 拿到受理结果后, **该标的卖出有被拒的, 本轮该标的的
+        买单整批不发**(保守: 宁可少买一次, 不可净加仓)。返回列表与入参 signals
+        一一对齐, 方便调用方用 `ok` 判定该记谁。
+        """
         if self.executor is None:
             LOG.error("direct 模式但未注入 executor, 跳过下单")
             return []
+        sells = [s for s in signals if s.get("action") == "SELL"]
+        buys = [s for s in signals if s.get("action") != "SELL"]
+        by_id = {}
         try:
-            return self.executor.execute(signals, dry_run=dry_run)
+            if sells:
+                for s, r in zip(sells, self.executor.execute(sells,
+                                                             dry_run=dry_run)):
+                    by_id[s["order_id"]] = r
+            bad_codes = {s["stock_code"] for s in sells
+                         if not (by_id.get(s["order_id"]) or {}).get("ok")}
+            if bad_codes and buys:
+                LOG.error("本轮卖出未被受理 %s → 同标的买单整批不发",
+                          sorted(bad_codes))
+                buys = [b for b in buys if b["stock_code"] not in bad_codes]
+            if buys:
+                for b, r in zip(buys, self.executor.execute(buys,
+                                                            dry_run=dry_run)):
+                    by_id[b["order_id"]] = r
         except Exception as e:              # 单轮异常不终止守护
             LOG.exception("直连下单异常: %r", e)
-            return []
+        skipped = {"ok": False, "code": "SELL_NOT_ACCEPTED",
+                   "msg": "同标的卖出未被受理, 本轮不发买单"}
+        return [by_id.get(s["order_id"], dict(skipped,
+                                              order_id=s["order_id"]))
+                for s in signals]
 
 
     def _book(self, signals, hhmm):

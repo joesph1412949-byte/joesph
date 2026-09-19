@@ -170,6 +170,17 @@ class TTEngine:
                 self.ledger.set_ref(code, ref)
                 ref_src = src
 
+        # 涨跌停闸门的中枢: 必须是**修正后的前收**(与 ref 同源的日K口径),
+        # 不能采信实测滞后一个交易日的 tick.last_close(2026-09-19 周六实测
+        # 600900 lastClose=28.46 = 09-17 收盘, 正确前收是 09-18 的 28.27) ——
+        # 否则涨跌停区间整体偏移, 本该拦下的"超涨停价"会漏过去。
+        # ref_mode=open 时 ref 是今开(不是昨收), 故单独按 prev_close 口径取。
+        limit_close = ref
+        if self.grid_cfg.get("ref_mode") == "open":
+            limit_close = market.prev_close(
+                tick, snap.get("daily"), snap.get("daily_prev"),
+                self.now_fn().strftime("%Y%m%d"), last_close)[0] or last_close
+
         ladder = grid.build_ladder(ref, band, sym.get("n_units")
                                    or self.grid_cfg.get("n_units", 5)) \
             if (ref and band) else None
@@ -186,6 +197,7 @@ class TTEngine:
             "skip": "" if (ladder and sw != grid.DISABLED) else
                     ("带宽不可用" if not ladder else "开关停用"),
             "last": last, "last_close": last_close, "open": tick.get("open"),
+            "limit_close": limit_close,
             "high": tick.get("high"), "low": tick.get("low"),
             "ma20": ma20, "ma20_prev": ma20p,
             "dev_pct": dev_pct, "slope_pct": slope_pct,
@@ -240,15 +252,27 @@ class TTEngine:
 
         sym_led = self.ledger.sym(code)
         intents = []
-        # 先卖后买: 先腾出净敞口与现金, 再考虑买回(与日内资金现实一致)
+        # 先卖后买: 先腾出净敞口与现金, 再考虑买回(与日内资金现实一致)。
+        # sold_run/bought_run: **本轮已通过闸门的量**, 必须累加进下一笔的账本
+        # 视角 —— 否则同一轮每笔都拿"本轮开始前"的数字过闸门, 一标的可生成
+        # 多笔时能同时突破可卖量与净敞口(README §5 "按当日已卖递减, 避免同一轮
+        # 重复卖同一批底仓" 与 "严格归位" 都要求这样)。
+        sold_run = 0
+        bought_run = 0
         for i in range(want_sell):
             unit = filled_sell + i + 1
-            intents.append(self._make_intent(
-                sym, ctx, "SELL", unit, acct, hhmm, phase))
+            it = self._make_intent(sym, ctx, "SELL", unit, acct, hhmm, phase,
+                                   sold_run, bought_run)
+            intents.append(it)
+            if it.ok:
+                sold_run += it.volume
         for i in range(want_buy):
             unit = filled_buy + i + 1
-            intents.append(self._make_intent(
-                sym, ctx, "BUY", unit, acct, hhmm, phase))
+            it = self._make_intent(sym, ctx, "BUY", unit, acct, hhmm, phase,
+                                   sold_run, bought_run)
+            intents.append(it)
+            if it.ok:
+                bought_run += it.volume
 
         ctx["net_exposure"] = int(sym_led.get("bought_today", 0)) \
             - int(sym_led.get("sold_today", 0))
@@ -256,7 +280,8 @@ class TTEngine:
         ctx["trips"] = int(sym_led.get("trips", 0) or 0)
         return ctx, intents
 
-    def _make_intent(self, sym, ctx, side, unit, acct, hhmm, phase):
+    def _make_intent(self, sym, ctx, side, unit, acct, hhmm, phase,
+                     sold_run=0, bought_run=0):
         code = sym["code"]
         ladder = ctx["ladder"]
         price = grid.ladder_price(ladder, side, unit)
@@ -303,9 +328,10 @@ class TTEngine:
                        "单价 %.3f 下单位金额 %.0f 元不足一手" % (price, unit_value))
 
         # ---- 运行时约束(纯逻辑层之外的账户事实) ----
+        # 加上本轮已放行的量: 闸门必须看到"这一笔落下去之后"的账本数字。
         sym_led = self.ledger.sym(code)
-        sold_today = int(sym_led.get("sold_today", 0))
-        bought_today = int(sym_led.get("bought_today", 0))
+        sold_today = int(sym_led.get("sold_today", 0)) + int(sold_run)
+        bought_today = int(sym_led.get("bought_today", 0)) + int(bought_run)
         can_use = (acct.get("can_use") or {}).get(code)
         held = (acct.get("positions") or {}).get(code) or {}
         held_value = float(held.get("market_value") or 0)
@@ -346,7 +372,7 @@ class TTEngine:
             side=side, code=code, price=price, volume=volume,
             ref_price=ctx["ref"],
             ladder_price_ref=ladder_ref if ladder_ref else price,
-            last_close=ctx["last_close"], hhmm=hhmm,
+            last_close=ctx["limit_close"], hhmm=hhmm,
             session_cfg=self.session_cfg, lot=self.lot,
             sold_today=sold_today, bought_today=bought_today,
             can_use_volume=can_use, held_value=held_value,
@@ -355,9 +381,11 @@ class TTEngine:
             realized_pnl=self.ledger.total_realized_pnl(),
             max_net_buy_qty=max_net_buy_qty,
             enabled=bool(sym.get("enabled")),
+            now=self.now_fn(),
         )
         meta = {"unit": unit, "band": ladder.get("band"),
                 "ref": ctx["ref"], "switch": ctx["switch"],
+                "ladder_price": ladder_ref,
                 "target_units": ctx.get("target_sell_units"
                                         if side == "SELL"
                                         else "target_buy_units")}
@@ -391,7 +419,7 @@ class TTEngine:
         phase = None
         try:
             from .risk import session_phase
-            phase = session_phase(hhmm, self.session_cfg)
+            phase = session_phase(hhmm, self.session_cfg, now)
         except Exception:
             phase = "UNKNOWN"
 

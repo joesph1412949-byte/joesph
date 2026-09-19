@@ -137,6 +137,46 @@ def test_session_closed_blocks_all(eng_factory, ledger, sym, snap_factory):
                            for i in intents)
 
 
+# ------------------------------------------------------------ 同轮累计(C2)
+
+def test_round_accumulates_sell_volume(eng_factory, ledger, sym, snap_factory):
+    """同一轮多笔卖出必须累计已卖量: 本轮 ok 卖出总量 ≤ 券商可卖量。
+
+    旧实现: `sold_today` 在循环外只读一次、循环内不累加 → can_use=600 时
+    一轮生成 2 笔 SELL×600 全部 ok(=1200 > 可卖 600), 直接违反 T+1 可卖量
+    硬约束与 README §5 的"按当日已卖递减, 避免同一轮重复卖同一批底仓"。
+    """
+    ledger.load()
+    eng, _ = eng_factory({"600900.SH": snap_factory(
+        last=28.45, last_close=28.09, high=28.57, low=28.10,
+        ma20=28.19, ma20_prev=28.19)})
+    acct = eng.account_state()
+    acct["can_use"] = {"600900.SH": 600}          # 只够一档
+    _, intents = eng.plan_symbol(sym, acct, OPEN, "OPEN")
+    sells = [i for i in intents if i.side == "SELL"]
+    assert [i for i in sells if i.ok], "至少第一档应能卖出"
+    ok_qty = sum(i.volume for i in sells if i.ok)
+    assert ok_qty <= 600, "本轮 ok 卖出 %d 股 > 可卖 600 股" % ok_qty
+
+
+def test_round_accumulates_buy_volume(eng_factory, ledger, sym, snap_factory):
+    """同一轮多笔买入必须累计: bought - sold ≤ max_net_buy_qty(严格归位=0)。
+
+    旧实现可在一轮内报出 2 笔 BUY×600, 日内净持仓从 -600 变成 +600。
+    """
+    ledger.load()
+    eng, _ = eng_factory({"600900.SH": snap_factory(
+        last=27.60, last_close=28.09, high=28.10, low=27.50,
+        ma20=28.19, ma20_prev=28.19)})
+    acct = eng.account_state()
+    ledger.record_fill("600900.SH", "SELL", 28.9, 600, hhmm="10:00")
+    _, intents = eng.plan_symbol(sym, acct, OPEN, "OPEN")
+    buys = [i for i in intents if i.side == "BUY"]
+    assert [i for i in buys if i.ok], "有卖出额度后第一档应能买回"
+    net = sum(i.volume for i in buys if i.ok) - 600
+    assert net <= 0, "本轮买入后日内净持仓 %+d 股 > 0" % net
+
+
 # ------------------------------------------------------------ 水位/幂等
 
 def test_units_advance_prevents_duplicate(eng_factory, ledger, sym,

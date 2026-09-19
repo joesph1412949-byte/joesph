@@ -11,21 +11,28 @@ from ttcore.executor import DirectExecutor, STOCK_BUY, STOCK_SELL, FIX_PRICE
 
 
 class FakeBackend:
-    """记录调用, 不真下单。"""
+    """记录调用, 不真下单。
 
-    def __init__(self, account_id="88869979", seq_start=1000):
+    seq_fn=None → 自增正数(全受理); 给了 callable(第n笔) → 用它当返回值,
+    <0 表示柜台拒单(C1 的取证场景)。
+    """
+
+    def __init__(self, account_id="88869979", seq_start=1000, seq_fn=None):
         self.account_id = account_id
         self.orders_sent = []
         self._next = seq_start
+        self.seq_fn = seq_fn
 
     def connect(self):
         return True
 
     def order(self, code, order_type, volume, price, strategy="", remark=""):
-        self._next += 1
         self.orders_sent.append(
             {"code": code, "type": order_type, "volume": volume,
              "price": price, "strategy": strategy, "remark": remark})
+        if self.seq_fn is not None:
+            return self.seq_fn(len(self.orders_sent))
+        self._next += 1
         return self._next
 
     def orders(self):
