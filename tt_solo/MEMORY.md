@@ -12,7 +12,7 @@
 |---|---|
 | 实盘（tt 做T策略） | **已接 miniQMT 外部直连**（09-14 晚决策，见「路线回退」节）。代码/测试/闸门就绪，**放行条需每日重写**，`dry_run` 默认仍 True，`--live` 才真报单。**「盘前 ref 取错日」已修两轮**（`303b860` → 真机实测推翻 → `3754841`，见下） |
 | 真实账户 | 账号 **88869979**；09-17 07:47 实读总资产 **271,808.12**、4 只持仓（全部 `可卖==持仓`，可做T）；明细见「真实账户快照」节 |
-| 测试基线 | **tt_solo 224 绿**（09-19，`--basetemp=pt_tt21`；原 198 + ref 相关 24 例） |
+| 测试基线 | **tt_solo 294 绿**（09-19 审计批次后；四路径 `tt_solo/tests + dashboard/tests + qmt_sync/tests + tests` = **400 passed / 0 failed** 实测）。原 224 → +65（C1/C2/I1~I6）+5（T7） |
 
 - **tt_solo 批次：做T策略抽成自包含项目 + 仪表盘重建**（09-16，spec/plan 见 `docs/superpowers/{specs,plans}/2026-09-16-tt-solo-extract*`）：`tt/`（24 文件/4362 行）+ `tt_web/` → **`tt_solo/`（唯一实现，旧目录已删）**。
   · **结构**：`tt_solo/ttcore/`（11 模块：`_vendor`/grid/risk/state/broker/market/config/engine/executor/daemon/arm_today）+ `tt_solo/dashboard/`（Flask + 前端，**:5011**）+ `tests/`（**221 绿**）+ `tools/compare_legacy.py`。
@@ -25,6 +25,28 @@
   · **踩坑（重要）**：①**判断文件编码只看原始字节或 `read` 工具，别信 pwsh 的 stdout** —— 它会把正常 UTF-8 中文显示成乱码；本次曾据此误判「`.bat` 与 `tt_config.json` 是 GBK 需重写」，用字节核验后推翻（`做T` = `e5 81 9a 54`），差点把好文件改坏。②**本机没有 `rg`** → 用 `Select-String` 或 grep 工具。③**测试会改写真实运行数据**：`test_env_sim` 5 处构造 `TTDaemon` 未传 `runtime_path` → 用假快照覆盖面向运维的 `tt_runtime.json`（仪表盘正是读它）；已修（两侧都补 `runtime_path=tmp_path`）。④**护栏最容易空转**：负控只测 `import prism` 而不测 `from prism.x import y` 时，把整个 `ImportFrom` 分支删掉 190 个测试仍全绿 —— 已补正向断言（本仓原有违规全是 ImportFrom 形态）。
   · **并发会话事故（09-16 晚）**：另一会话在同一仓库改 `prism/`、`prism_web/`、`backtest/`，并**把本批 5 个 tt_solo 提交一并推送到 origin/master**（`17ca025`/`182db70`/`26d8af9`/`b7b014f`/`6e9bc55`），绕过了"push 必须先问"的规矩。未回滚（已推送，回滚风险更大）。
 - **tt 做T策略（09-13，新增，独立子包）**：在实盘链路上追加「底仓+浮仓 日内高抛低吸」策略。交付：`tt/`（config/grid/risk/state/market/engine/daemon，grid 与 risk 为零 IO 纯逻辑）+ `tt_web/`（Flask 面板，**只监听 127.0.0.1:5010**，ECharts 双图+档位阶梯+被拦归因）+ `tt_README.md` + `启动做T监控台.bat`/`启动做T守护.bat`。**复用不重造**：`common`（后缀/涨跌停/日志）、`exit_rules`（跌停判定）、`prism.live_account`（账户只读）、与 `prism.trader` 同构的信号协议、桥端 `armed`/`paused` 闸门。核心口径：**中枢取前收且当日固定**（漂移就退化成趋势跟踪）+ 带宽=日波动率×k（或 `band_pct`）+ 20MA 三态开关（ENABLED/HALF/DISABLED）；闸门三道（dry_run / paused / armed）+ 生成侧 11 道风控（每道有原因码，面板逐条可见）+ **净敞口(默认严格归位) × 券商 can_use_volume 双保险 T+1**。**默认 dry_run**，本进程只写信号文件、绝不调下单接口。可调环境变量 `TT_SIGNAL_ROOT`/`TT_WEB_PORT`（演练时与真实 QMT 目录隔离）。**88 例测试，全量 808 绿**（720+88，无回归）。实测：`connect()` 可读真实账户 274,783.61、行情走 QMT 实时源、松发 DISABLED 与海油/神华 HALF 判定正确、非交易时段全部被 `SESSION_CLOSED` 拦下（fail-closed 生效）；**真实账户当前不含这四只票** → 实盘会全被 `NO_BASE_POSITION` 拦下（做T前提是先持底仓）。校准要点：`weight ≥ n_units×100×股价÷总资产`，否则每天只被 `SIZE_ZERO` 拦。**上线三步（DRY_RUN 观察→小额真实单→成交对账）一步未做**；账本按挂单价做**理论成交**记账，真实成交价/费用/拒单均未回写。
+## 2026-09-19 做T核心安全修复（已提交，均未 push）
+
+> 完整报告：`docs/reports/审计_20260919_未修问题与新想法.md`。共享教训见根 `MEMORY.md`。
+
+**两个 Critical（都会动真钱）**：
+
+| SHA | 内容 |
+|---|---|
+| `e8e1c05` | **C1 直连记账不看执行结果** —— 修前：`exec_stats={submitted:0, failed:2}`（柜台 `seq=-1`、**一股未卖**）而账本记 `sold_today=1200`；下一轮 `check_net_exposure` 因这笔**假卖出**放行 → **真报 2 笔买单**（净持仓 +1200 股 / 现金 −34083 元），FIFO 还配出 `realized_pnl=+182.40` 显示在面板。**因果**：`sold_today` 是买入额度的**唯一来源**，凭空记卖出 = 凭空发放买入额度。修法：**两段提交**「先卖 → 拿受理结果 → 同标的卖出被拒则本轮买单整批不发」（新码 `SELL_NOT_ACCEPTED`） |
+| `e8e1c05` | **C2 同一轮内多笔意图各拿"本轮开始前"的账本过闸** —— 修前：可卖 600 时一轮放行 **2×600=1200 卖**；`max_net_buy_today_ratio=0`（严格归位）时一轮仍放行 2 笔买、**净持仓 +600**。修法：循环内累计 `sold_run/bought_run` |
+
+**Important**：`I1` `POSITION_CAP` **不传 side ⇒ 卖出腿被当加仓判**（`after = held_value + order_amount`；持仓 ≥ `max_position_pct`(20%) 的票**卖不出去** —— 真实账户松发股份占比约 20.5% 会中招）→ 加 `side`、SELL 直接放行｜`I2` 滑点闸门生产链路**恒不生效**（`ladder_ref` 与 `price` 是同一纯函数同参数 ⇒ 恒 0）且 executor 文档谎称"会再跑一遍 gate" → 选 (a) 执行层补 `propose_price` 复核（无参考价即拒 `PRICE_UNVERIFIED`）｜`I3` **非交易日无闸门**：真机实测**周六** `plan()` 返回 `phase=OPEN`、QMT `lastPrice` 比真实收盘**高 10%**、`arm_today.py` 照样说"可以下单" → 加周末闸门｜`I4` `order_id` 幂等不跨进程（`_placed` 仅内存 + 账本重置即归零）→ 落 `tt_placed.jsonl`（append+fsync，按日失效）｜`I5` `--live`/`--sample` 不互斥 → `SystemExit`｜`I6` **`dry_run` 有第二条打开路径**（配置 `"dry_run": false` 会让标着"演练 DRY-RUN"的菜单变成实盘写信号）→ **`--live` 成为唯一关闭途径**，配置 false 打 WARNING 并忽略（**行为变更**；`tifosi.bat` 三个演练入口都不带 `--live`，故标签从此必然为真，**无需改 bat**） |
+| `0d0a55b` | **T7 `ttcore/broker.py` 孪生副本漂移** —— prism 侧 `positions()` 语义已修、tt 这份**没同步**（`or {}` / `or []` / `engine.py:112` 的 `acc.positions() or {}`）⇒ 同款"查询失败 → 冒充空仓"。对齐为 `None`/`{}` 可分，并新增 `POSITION_UNKNOWN` 拒因码：**`source=="qmt" and positions is None` → 买卖两侧一律拒**（否则 `max_net_buy_today_ratio>0` 时买单会放行，而 `held_value=0` 让集中度闸门形同虚设）。`broker.py` 模块头写明"与 `prism/live_account.py` 同口径，两侧必须同步"（自包含约束下这条注释是唯一同步手段） |
+
+**7 项 Minor（同批）**：涨跌停中枢改用修正后前收（`limit_close`）、非 dict 账本也留档、LIVE 分支 `booked` 恒 0、横幅忽略 `--signal-root`、`action` 乱码降级成 SELL → `SIDE_INVALID`、`armed` **子串匹配**（`x20260914000`/`120260914` 都判"已放行"）→ 整行比较、`config` 交叉校验修活。
+
+**⚠️ 两条必须记住的真相**：
+1. **`band_mode="sigma"` 从未生效**：`grid.band_of` 是「`band_pct > 0` 就优先，且**根本不看 `band_mode`**」，而部署 `tt_config.json` 每个标的都写了 `band_pct` ⇒ **100% 走 `band_pct`，`band_k`/`sigma` 一次没生效**；连带 `config.py:239` 那条 `max_units × band ≤ max_price_deviation_pct` 交叉校验被 `if band_mode == "fixed"` 包着而**整体失效**（实测 sigma + band_pct=5.0、3档=15%>5% 照样通过）。**README §1 那句"`band_mode: "sigma"` 时带宽不取 `band_pct`"是假的**（README 待另一批修）。修活校验后**唯一超限标的是 `603268.SH`（`enabled:false` 停做，3×3.41%=10.23%>5%）** ⇒ 用启动 WARNING 点名而非硬拦（硬拦会让 `tt_config.load()` ConfigError、守护与面板都起不来）。**数值待用户定**：`band_pct ≤ 1.66` 或该标的 `max_units=1`。
+2. **`--fake-now` 恒为周一**（`lambda: datetime(2026,9,14,10,0,0)`，2026-09-14 是周一）⇒ **它天生测不出交易日/周末闸门**；任何用它做的演练都**不能**当日历闸门的证据。I3 的证据用的是真周六 `2026-09-19` 与周一 `2026-09-21`。
+
+**待用户拍板**：① `603268.SH` 的 band 校验要不要升硬拦及数值 ② 信号文件→QMT 桥那条通道**仍有"卖出被拒 → 买单照发"的洞**（直连已堵；桥在 QMT 里，已有批次评估能否加最小护栏）③ tt_solo 侧的**节假日**还没落（prism 侧已落 `prism/trading_calendar.json` + 周末档；tt_solo 自包含不能 import prism ⇒ 要么复制一份 JSON 副本，要么接受只挡周末）④ T7 的 `POSITION_UNKNOWN` 是**整轮不做T**（刻意 fail-closed），若希望"抖动时退化为只做归位卖出"需新设计。
+
 ## tt 做T策略 · 信号桥安全审查发现（2026-09-14）
 
 读源码 + `audit_tt_gate.py` 逐档实证（审查脚本在 WorkBuddy 工作区）。**3 条必改，否则实盘不可用**：

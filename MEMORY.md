@@ -23,6 +23,7 @@
 - **ponytail 约束延续**：最懒可行方案；每个子代理 dispatch 注入 ponytail 约束（阶梯：needs-to-exist→reuse→stdlib→one-line→minimal；绝不简化掉校验完整性/原子写/指针回落/default保护；`# ponytail:` 标记）
 - **默认工作方式**：superpowers SDD（子代理实现 + 独立子代理两阶段审查 + 台账记录），TDD 红绿循环
 - **子代理派单铁律**：① 不得改写已提交历史（不 amend/rebase/reset）② 只 `git add` 自己那批文件，绝不夹带（并发会话的改动、`Joesph_key.pem`、`.workbuddy/`）③ 不 push ④ 报告里凡不是自己跑出来的数字要标来源
+- **并发多批次的提交铁律（2026-09-19 血泪，必须照做）**：**永远用路径限定提交** `git commit -F <msgfile> -- <path1> <path2> …`，**永不**用裸 `git commit`；`git add` 与 `git commit` **之间不要插入别的动作**（长提交信息先写成文件）；提交后核 `git show --name-only HEAD`；暂存区混入别人的文件用 `git restore --staged <路径>`（**只取消暂存**），别用 `reset --hard`/`checkout <path>`。**根因**：N 个批次共用**同一个 index**，裸 `git commit` 提交的是**整个索引**。2026-09-19 实测事故：某批次显式 add 3 个文件并核过暂存区，但它的 `git commit -m` 因 PowerShell here-string 引号解析失败改用 `-F`，**中间隔了约 2 分钟**，另一批次把 9 个 `tt_solo/**` add 进同一 index ⇒ 那 9 个文件被吃进前者的提交 `3675466`（内容零丢失，但后者失去独立 SHA、追溯断链）。**心智模型不要停在"别用 `-a`"——真正的风险是"共享索引 + 裸 commit 的时间窗"。** 同类历史事故：09-16 另一会话把别人 5 个提交一并推送。
 
 ## 项目全貌（子项目清单）
 
@@ -64,10 +65,21 @@
 - **web**：`prism_web` 新增「首板拆解」tab；`GET /api/first_board?date=&refresh=`、`GET /api/first_board/dates`。
 - **CLI**：`python -m prism.first_board_review --date YYYYMMDD --report [--backfill] [--manual PATH]`。
 - **产出**：`runtime/state/first_board_review_YYYYMMDD.json` + `docs/reports/首板拆解_YYYYMMDD.md`。
-- **数据来源**：`zt_history.qmt_zt_feed`（涨停池→筛 `boards==1`）+ `bt_intraday.features_for`（1m 还原封板盘面：首封/开板次数/一字/板上量额）+ QMT 批量日K（量额/前5日均量）+ QMT InstrumentDetail（流通市值）+ `market_data` sector_map（板块及板块内涨停家数）。实测 09-18 的 68 只首板：除封单金额外**全部自动拿到**。
+- **数据来源**：`zt_history.qmt_zt_feed`（涨停池→筛 `boards==1`）+ `bt_intraday.features_for`（1m 还原封板盘面：首封/开板次数/一字/板上量额）+ QMT 批量日K（量额/前5日均量）+ QMT InstrumentDetail（流通市值）+ `market_data` sector_map（板块及板块内涨停家数）+ `sector_stage.sector_table`（**09-19 接上**：板块阶段 → 产业逻辑维）。实测 09-18 的 68 只首板：除封单金额外**全部自动拿到**（五维**全部可用**）。
+- **产业逻辑维（09-19）**：`mkt_snapshot()` → 只取 801 申万一级 → `sector_table`（纯本地 0.07s，**不触网**；`cache["sectors"]` 只有 name 无 K 线，**不能**直接喂）。判定用 `INDUSTRY_STAGE_SCORE` —— **首板客视角，与 `POS_CAP`（趋势视角）刻意相反**：启动期 92 > 主升 78 > 孕育 58 > 休整 50 > 高潮 40 > 退潮 22。阶段不可得 → **该维 `available=False` 从分母剔除**（**不再给 60 分中性分**——那正是铁律①要防的假覆盖率）。
 - **两条铁律**（承接既有约定）：① **缺失维权重从分母剔除、其余归一**，绝不用 0 分冒充"已评估"（防假覆盖率）② **不造假** —— 拿不到的字段标 `unknown`。**封单金额（buy1 队列）盘后不可复现，永久标未知**，不推测。
 - **网页路径绝不下载 1m 特征**（沿 `bt_intraday` 约定）：面板只读落盘或做一次只读采集（90s 超时护栏）；补采只在 CLI `--backfill`。空日不落盘（`run(persist_when_empty=False)`）。
 - **定位**：观察层，**不进因子打分/买卖链路**（同 `sector_etf_map` 口径）。等用户手写因子印证出结论，再决定哪个信号升级进 `full_factor_v1`。
+
+## 2026-09-19 全仓审计（7 份只读审计 + 一批修复，跨项目）
+
+> **报告**：`docs/reports/审计_20260919_未修问题与新想法.md`（含分级总表、"已推翻更正"、按主题归纳的"同一类病"、新想法、处置顺序、未取证清单）。本次审计**从仓库重新取证**而非转述子代理，凡与派单不一致处均如实更正。
+
+- **抓出的 5 个"正在流血/上线即爆"的失效模式（都已修）**：① tt 直连**记账不看执行结果**（被柜台拒的卖单变成账本 `sold_today` → 下一轮据此**真买入**）② 同一轮内多笔意图各拿"本轮开始前"的账本过闸 → 可卖 600 放行 1200 卖、净敞口 0 放行净买入 ③ `POSITION_CAP` **不传 side** → **卖出腿被当加仓判**（持仓≥20% 的票卖不出去）④ `positions()` 查询失败返回 `{}` 与"确实空仓"**不可区分** → **抹掉实盘账本并返回 `trusted=True`** ⑤ 桥端**根本没有 `paused` 闸门**（文档称三道、实际两道）+ `armed` 整批只读一次（批次中途急停无效）。
+- **两个"一直在撒谎的校验"**：`ops/smoke_check.py:150` 恒假条件（交付自检无条件打印"CLI --help 可用"），且 `check()` 只在**抛异常**时记 FAIL ⇒ `return "字符串"` 型检查项**天生无法失败**；`test_status.py` 跨目录 `import tests.conftest` 会让**整场 collection 中止**（只是碰巧路径顺序没事）。
+- **测试判别力黑洞的实证方法（可复用）**：用 `sys.monitoring` 覆盖率 + 变异验证找"改坏了也不红"的分支 —— 实测 `_max_net_buy_qty` 净买入额度 **×10** 而 273 例全绿（夹具把 `max_net_buy_today_ratio` 恒钉 0.0 ⇒ 乘法零覆盖）。
+- **方法论教训（重要）**：**统计口径粗一档就会把"真实缺陷"漏成"潜伏项"** —— 只看首字符 `{0,3,6}` 得出"宇宙无北交所"，拆到 3 位前缀才发现 **`689:1`（`689009.SH`）真的进过涨停池**（`2025-02-21`，54.05→62.03=+14.76% 被 0.10 档误判成涨停）。**凡结论依赖分布统计，必须把口径拆到能区分的粒度。**
+- **仓库卫生（已做）**：`.gitignore` 补 `*.tmp`（`atomic_write` 的真实 tmp 名是 `<目标>.<pid>.<tid>.tmp`，旧的 `xxx.json.tmp` 早已匹配不到 ⇒ "不留 tmp 残留"的护栏形同虚设）、`*.pem`（**`Joesph_key.pem` 此前是 TRACKABLE，`git add -A` 会提交私钥**）、`/_*.py`、`/_*.txt`、`.workbuddy/`、`prism_web/_ui_backup_*/`；并加"不过度拦截"的反向测试。新增根 `pyproject.toml`（`addopts = "--import-mode=importlib"`）—— 此前该 flag 只活在命令行，IDE/CI/裸 `pytest` 必撞 `import file mismatch`。
 
 ## 仓库治理史（整理 / 目录重组 / 清理）
 
@@ -123,6 +135,10 @@
 | 12 | **子代理擅自改写已提交历史** | Task 5 实现者为了"提交信息合规"把 `207797c`+`fe3aafe` **压成新提交 `86c9110`** → 前两个变悬空对象、审查包与台账里的 SHA 全部失效（本次代码逐字节相同，侥幸无损） | 派单时明写"**不得改写已提交历史**（不 amend/rebase/reset）"；提交信息不合就追加一次提交或先问控制者 |
 | 13 | **`shared.common.atomic_write` 的 tmp 名是固定的**（`path+".tmp"`） | 同一文件有多个写者（守护快照线程 / 手动 CLI / 实盘选股器）时互相踩 tmp → `os.replace` 落地坏 JSON → `_load_cache` **静默当 `{}`**（历史全丢） | tmp 名带 pid+线程 id（`298d586`/`9349b3c`），并按路径加进程内写锁；其他自己写原子写的脚本也照此 |
 | 14 | **Windows `os.replace` 只要目标被"任何读句柄"打开就 EACCES** | 并发读者存在时 replace 抛 `PermissionError(13, 拒绝访问)`：实测 2 个 reader 线程 → 538/300 轮失败；全量测试间歇红（同跑 31 次红 11 次，隔离单跑全绿） | **给 `os.replace` 加有界退避重试**（只重试 `PermissionError`/`winerror∈{5,32}`，上限 ~1s，耗尽抛原异常）。**三份实现都要**：`shared/common.atomic_write`、`prism/zt_history._atomic_pickle`、`tt_solo/ttcore/_vendor.atomic_write`（tt_solo 自包含，不许 import shared/prism）。只加锁**不够**（锁只管写者之间） |
+| 15 | **`xtquant` 连接横幅的时间戳格式写错** | `xtquant/xtdata.py:213` 是 `strftime("%Y-%m-%d %H:%S:%M")` —— **分秒写反**，打印的"14:47:07"其实是 **14:07:47** | 别拿 xtdata 横幅时间戳与日志对时；要时间用 `Get-Date`/`datetime.now()`。上游 bug，别改 site-packages |
+| 16 | **PowerShell `Get-Content` 按 GBK 解码 UTF-8** 会吞掉中文后面的换行 | 同一文件它报 **377 行**，`[IO.File]::ReadAllLines()`/Python 报 **590 行**；据此把 `compare_legacy.py` 数成 485（真值 522） | 数行数/核内容用 `[System.IO.File]::ReadAllLines($p).Count` 或 Python；**别用 `Get-Content` 数行** |
+| 17 | **Windows 上 Werkzeug 默认 `allow_reuse_address=True`**（=`SO_REUSEADDR`）→ **第二个进程能静默绑同一端口** | 实测两个 `prism_web/app.py` **同时 LISTENING :5000**；所有"探端口"检查都返回"已在运行"，既拦不住也认不出哪个是自己的。`prism_web/app.py` 的 `debug` **默认 True** 还带来 **reloader 父子双进程 + 任一被 import 的 .py 存盘即热重启生产面板 + `/console` 调试器（实测 200）** | 启动器必须设 `APP_DEBUG=0`（`ops/start_all.py`/`watchdog.py` 一直有，**`ops/prism_launcher.ps1` 曾漏，09-19 已补**；但"直接 `python prism_web\app.py`"仍会默认开 debug）。要根治就在 `__main__` 用**不带 `SO_REUSEADDR` 的 bind 探测端口归属**（实测能检出；**别把 TIME_WAIT 误判成占用** —— bind 失败后再 connect 一下才算真有人听） |
+| 18 | **跑回测会改写真实缓存**（`backtest/cli.py` 的 `load_market_data()` → `market_data.futures_snapshot()` **联网采集并回写** `runtime/cache/.market_data_cache.pkl`） | 同一回测**连跑两轮拿到不同期货数据** → F8 命中在 **666↔719** 漂移 ⇒ A/B 对照**不是单一变量**（一个批次据此作废了自己一版结论） | **做 A/B 必须先用 `factor_hits` 逐因子核验两臂数据一致（尤其 F8/futures）**；根治方向是让 `futures_snapshot()` **默认只读、绝不回写**（显式 `refresh=True` 才采集） |
 
 **Chrome 转 PDF 配方**（可复用）：给 HTML 加 `@page{size:A4}` + `@media print{ .card,table,tr{break-inside:avoid} }` → Chrome `--headless=new --print-to-pdf` → 校验 `/BaseFont` 含 `MicrosoftYaHei`。
 
@@ -156,6 +172,11 @@
 | 2026-09-14 | **tt 暂缓接 miniQMT，改同花顺手动挂条件单做T** | 用户决定；自动链路挂起，3 条必改项优先级下调 |
 | 2026-09-14 | 外部 clone（`deepseek-harness/` 16.6MB）**移出项目到 `D:/_externals/`** | 保留 13 个未推送提交，修复 worktree 双向指针 |
 | 2026-09-18 | **`MEMORY.md` 按项目拆分**：根=共享记忆，`prism/MEMORY.md` + `tt_solo/MEMORY.md` 独立（**做哪个项目才读哪个**）；`prism_web`/`datasource`/`backtest`/`qmt` 桥并入 prism；`qmt_sync`/`shared`/`ops`/`legacy` 暂不独立（用户 09-18 拍板：只给 tt_solo 独立） | 原 548 行 / 93KB 每次会话全读，白烧上下文 |
+| 2026-09-19 | **层权重「接上」**（`composite: average` → 新增 `weighted_sum`） | 用户拍板。取证：spec 记的 `cap = 0.60×9+0.25×8+0.15×11 = 9.05` 证明 cap 从一开始就是「Σ(权重×因子数)」⇒ 正确语义是**按名字**加权 `min(Σ wᵢ×层分, cap)`；而引擎只读 `m["weights"]`（列表）、**从不读标量 `m["weight"]`** ⇒ 声明权重一直是死配置。**边界：加权只影响 composite 排序，不改 `candidate_min_model`/分级**（那会让资质线可达性剧变）。`cap 9.0 > 加权上限 8.9` ⇒ 当前恒不生效（惰性配置） |
+| 2026-09-19 | **S6「给自由度」** | 用户拍板。改前 S6 与 F4 **表达式逐字相同**（回测实测 F4/S6 命中 5041 vs 5041、**逐位相同=100% 重叠** —— 同一信号被两层各计一次）。改为「板块指数当日涨幅≥1%」（填势能层唯一缺的"当日"期限；1% 由同层 SEC6 2%/5日、SEC2 5%/10日 的**日均节奏 0.4~0.5%/日** 的 2~2.5 倍**派生**，非拍脑袋）。**A/B（79 交易日、固定 weighted_sum）显示收益 +3.25%→−0.54%、sharpe 0.45→0.22、`filtered_min_model` 959→1274** —— 单窗口、n≈300、无显著性检验，**不可据此断言"新 S6 更差"**；可断言的是"结构目标达成 + 资质线副作用归因于 S6 单独造成（与 composite 模式无关，已实证分离）" |
+| 2026-09-19 | **`band_mode` 只修校验口径、不动优先级** | 用户拍板。真相：`tt_config.json` 是 `band_mode="sigma"` 但每个标的都写了 `band_pct`，而 `grid.band_of` 是「`band_pct>0` 就优先」⇒ **`band_k`/`sigma` 从未生效**、README §1 那句话是假的；连带 `max_units × band ≤ max_price_deviation_pct` 交叉校验被 `if band_mode=="fixed"` 包着而**整体失效**。修活后**唯一超限标的是 `603268.SH`（`enabled:false` 停做，3×3.41%=10.23%>5%）** ⇒ 改用启动 **WARNING 点名**而非硬拦（硬拦会让 `tt_config.load()` ConfigError、守护与面板都起不来）。数值待定：`band_pct ≤ 1.66` 或该标的 `max_units=1` |
+| 2026-09-19 | **交易日历：方案被实测推翻** | 我原提「复用 `zt_history` 交易日索引判今天」。**不可行**：索引只含已产生数据的日子 ⇒ 对"今天"必然答"否" ⇒ 闸门**永久 CLOSED**。硬证据：`xtdata.get_trading_dates('SH')` 8729 条、**末根 2026-09-18**；未来区间返回 **`[]`**（下周一也显示"非交易日"，只因未生成）；zt 索引本身也缺零涨停的交易日。且 `tick.time/timetag` 被 QMT **重打成当前墙钟** ⇒ "tick 交易日 vs 今天"是 no-op。**改为**：周末闸门（零数据依赖）+ **可版本化的本地休市日清单**（只列假日、一年更新一次），**清单缺失/过期一律退化为仅周末闸门 —— 绝不允许"未知→CLOSED"** |
+| 2026-09-19 | **死代码全删**（授权） | 用户拍板。含 `qmt/tools/order_probe.py`（**会向真实账号打 8 笔 `passorder`**，留着比删掉危险）。**边界修正**：`datasource/manual_store.py` **不删** —— 独立复核推翻"两端全死"：链路是通的、只是 payload 恒空，删它会打断 `prism/data.py:194` 与现有测试 |
 
 ## 账户读取速查（可复用，已存为 skill）
 

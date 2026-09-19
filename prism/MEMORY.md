@@ -10,11 +10,46 @@
 
 | 维度 | 状态 |
 |---|---|
-| 测试基线 | **七路径 1150 绿 / 0 失败**（09-19 控制者 `5cd7293`：`1150 passed, 25 warnings in 110.55s`；证据 `.superpowers/sdd/final-verify-245.txt`）。⚠️ **用例数不是可靠指纹**：另一会话有未跟踪的测试文件（`prism/tests/test_first_board_review.py` 等）会被一并收集（1099↔1134↔1150 跳），**"零失败"才是不变量**。**口径校正**：老记录里的「945/995」是 6 路径（漏 `tt_solo/dashboard/tests` 23 例），别再用 |
+| 测试基线 | **七路径 1441 绿 / 0 失败**（09-19 批次 W1 实跑：`1441 passed, 25 warnings in 113.52s`；证据 `.superpowers/sdd/fixw1-full-final4.txt`）。⚠️ **用例数不是可靠指纹**（未跟踪测试文件会被一并收集：1099↔1134↔1150↔1391↔1441），**"零失败"才是不变量**。⚠️ **更硬的教训（09-19 实测）**：**全量七路径不是顺序无关的** —— 同一份代码连跑 5 次得到 **5 个不同失败集**，且失败文件**单独跑全绿**（`77 passed`）。根因是 ≥4 个会话并发写同一棵工作树（最多 40+ 脏文件），会读到别人在途的半成品。⇒ **"零失败基线"只在"无人并发写树"时才有意义**；判定某个失败归谁，必须看它落在谁的文件上（或做 `git archive HEAD` 纯净树对照）。**口径校正**：老记录里的「945/995」是 6 路径（漏 `tt_solo/dashboard/tests` 23 例），别再用 |
 | 模拟盘 | 守护**当前未运行**（09-17 23:38 起过一次 paper_daemon + prism_web，09-18 14:30 实测只剩一个回测进程）；账本仍 1,000,000 现金、**零持仓** |
 | 实盘（prism 主策略） | **未上线**。代码已通（`prism/live_daemon.py`），三步验收一步未做 |
-| Git | **master 与 origin 同步**（09-18 两次推送：`f205fed..1d2b55b`、`1d2b55b..51eac57`）；回测复活批次 + tt ref 修复 + 一轮 bug 猎杀修复全部上远端。**push 前仍必须先问用户** |
+| Git | **本地领先 origin 约 18 个提交，未推送**（09-19 审计批次；`origin/master` 停在 `0445b46`）。已推送的最近一次是 `f205fed..1d2b55b` + `..51eac57`。**push 前仍必须先问用户** |
+| 首板拆解（观察层） | `prism/first_board_review.py` 五维拆解 + `prism_web`「首板拆解」tab（含板块阶段列）；**09-19 接上 `sector_stage`**（产业逻辑维，五维全可用）。**不进因子打分/买卖链路**。细节见根 `MEMORY.md`「首板盘后拆解」节 |
 | QMT | **09-18 23:32 实测在线**（`xtdata.connect()` 成功返回 IPythonApiClient, 服务 127.0.0.1:58610）—— 同日 14:31 曾离线, 状态会变; **跑长任务前仍先探一次**。注意: **xtquant 逐码调用会硬崩进程**（68 只逐个 download_history_data2 直接崩到 Python 异常都捕获不了）→ 必须批量一次下载 |
+
+## 2026-09-19 全仓审计与修复批次（prism 侧）
+
+> 完整报告：`docs/reports/审计_20260919_未修问题与新想法.md`（从仓库**重新取证**、非转述子代理，含"已推翻更正"13 条）。共享教训见根 `MEMORY.md`。**全部本地未推**。
+
+**已修复并提交（SHA 顺序即提交序）**：
+
+| SHA | 内容 |
+|---|---|
+| `2697985` | 涨跌停口径统一：`shared/common` 补北交所 `92` 段；F1 删自带实现改走 `shared.common`；加**参数化一致性守卫**（common vs exit_rules 逐码相等） |
+| `48fd258` | **东财涨停池"空池"不再当交易日**：非交易日/超保留期返回的是 `[]` 而非 `null`（实测）；改后不占 `_hybk_history` 配额、不计 `daily_counts`、不当"昨日"；20 日历日全空 → `get_market_stats` 返回 `None`。收益：周一 `yesterday_codes` 从 `[]`（N3 死）切回周五真数据，F7 窗口 2→4 交易日 |
+| `badee56` | 模拟盘账目诚实性：选股失败**不再占当日幂等键**（此前 QMT 抖一下 = 当天零建仓且日志与"今天没票"不可区分）；双腿 ¥5 最低佣金；**撤单/失效流水 `side` 改 `cancel`/`expire`**（此前 9 条撤单在面板上被显示成 9 笔"买入"）；paper 侧补北交所 30% 档 |
+| `1c07934` | **实盘链路 fail-closed**：`positions()` 查询失败/None → `None`（**不再与"确实空仓"不可区分**，此前会**抹掉实盘账本并返回 `trusted=True`**）；对账**自愈采纳**（券商有账本无 → 取 `open_price`/`buy_date=今日`）；`tick_once` **最开头**查急停；可卖量拿不到不回落全量；建仓受**可用现金**约束（`budget=min(总资产,可用现金)` 逐只扣减）；`exit_rules` 坏数据不再中断整轮、`buy_date` 未知不回落 today（T+1 交给券商可卖量） |
+| `3675466`+`ac6f188` | **层权重接线**：新增 `composite.mode="weighted_sum"` = `min(Σ(模型 weight×层分), cap)`，**按名字**加权；`full_factor_v1.json` 切到该模式。**边界**：加权只改排序，不动 `candidate_min_model`/分级（已用 `filter_stats` 逐项相同实证） |
+| `e94e5d3`+`81a620b`+`65c8fa8` | **S6 独立自由度**：改前 S6 与 F4 **逐字相同**（回测命中 5041 vs 5041 逐位相同）；改为「板块指数当日涨幅≥1%」。**A/B（79 交易日、固定 weighted_sum）：+3.25%→−0.54%、sharpe 0.45→0.22、`filtered_min_model` 959→1274** —— 单窗口/n≈300/无显著性检验，**不可据此断言"更差"**；可断言"去双重计数达成 + 资质线副作用由 S6 单独造成（与 composite 模式无关，已实证分离）"。保留/调权/回撤**留待用户拍板** |
+| `6cbe510` | 涨跌停档位补 `689`（科创CDR 20%）与 `400/420`（老三板 5%，从 `"4"` 前缀拆出）。**实测 `689009.SH` 真的进过涨停池**（`2025-02-21`，54.05→62.03=+14.76% 被 0.10 档误判）⇒ `backtest/cli.py` 该日 `up_price` 59.46→64.86。**⚠️ 只做了一半**：`prism/zt_history.py:70-77 _limit_ratio`（决定**池子成员**那份）仍缺 689 ⇒ 该股**仍会**被收进池子 → 已排队等合并批次 |
+| `43731ae` | **交易日闸门**：`schedule.in_session` 加周末闸门（`prism/zt_history.py` 亦被其改动，见下"方案被推翻"） |
+| `4a44bc8` | **`prism/strategy_lint.py`**（新）：策略 JSON 声明键消费自检（AST 扫"哪些键从没被生产代码读过"），未消费即 exit 1 |
+| `b3781c9` | ops/测试诚实性：`ops/smoke_check.py:150` **恒假条件**修活（此前交付自检**无条件**打印"CLI --help 可用"，且引用了不存在的 `scripts/` 路径）+ 新增 `pyproject.toml`（`--import-mode=importlib` 此前只活在命令行）+ `.gitignore` 补 `*.tmp`/`*.pem`/`/_*.py`/`/_*.txt`/`.workbuddy/` |
+| `c50162d` | 删已证实死代码（旧 `backtest/engine.py` + `legacy/` + `tt_solo/tools/compare_legacy.py` + `qmt` 三个零引用工具，**含会向真实账号打 8 笔 `passorder` 的 `order_probe.py`**） |
+
+**实测口径更正（重要，别再用旧说法）**：
+- **"涨跌停缺 92 档让回测算错"** → `92` 段**零影响**（池子 5224 只里北交所 **0 只**）；`400/420` 拆分也**零影响**；**只有 `689` 段有影响（1 只股 × 1 天）**。
+- **"交易所后缀 4 份副本已造成北交所漏判"** → **过度声称**。`sector_map` 5220 键与 zt 缓存 5224 只**只有 0/3/6 开头**（`.BJ` 0 只），两种口径逐键**差异 0 个** ⇒ 是**维护陷阱**，不是活跃 bug（但手写后缀实际有 **11 处**，整类会丢 BJ）。
+- **北交所为何不在池子里**：真因是 `build_cache`/`refresh_cache` 取 `xtdata.get_stock_list_in_sector("沪深A股")`（**该板块本身不含 BJ**），**不是** `zt_history._with_suffix` —— 那函数**零调用、是死代码**（我的假说被实测推翻，如实记下）。
+- **`backtest/cli.py` 会改写真实缓存**：`load_market_data()` → `market_data.futures_snapshot()` **在跑批时联网采集并回写** `.market_data_cache.pkl` ⇒ **连跑两轮期货数据不同**（F8 命中 666↔719）⇒ **A/B 必须先用 `factor_hits` 逐因子核验两臂一致**。已让 `market_data` 批次把 `futures_snapshot()` 改成**默认只读**。
+- **通达信 K 线通道当前是死的**：`python -m prism.tdx_source` 自检个股/大盘/板块日K **全 0 根**，逐台直连 pytdx 均 `TdxFunctionCallError`，**只放行财务/统计**。⇒ `benchmark`（停更在 09-07）的降级链改为 **东财 → 通达信 → QMT**（`000001.SH` 本地有货，174 根至 2026-09-18，正好补上缺的 9 个交易日）。
+
+**仍未闭环（需用户拍板 / 排队）**：
+1. **`prism/zt_history.py:70-77 _limit_ratio` 对齐**（决定池子成员）—— 排队合并批次：连 `datasource/factors.py:87-88`、`datasource/data_source.py:94`、`prism/tdx_source.py:85`、`tt_solo/ttcore/_vendor.py:101`(代码+`:8` 注释) 与守卫扩展一起做。
+2. **`first_board_review.py:324` 调 `live_account.seal_snapshot()`，该函数不存在**（被 `except` 吞成 None）→ 并发会话的新功能，**只报告未修**。
+3. `GET /api/first_board?refresh=1` **会 `write_text` 覆盖 `docs/reports/首板拆解_<日期>.md`**（可为并发会话的脏文件），且护栏对 GET 一律放行、无单飞锁 → 应改 POST + 进 `_LOCAL_ONLY`（**归属并发会话，待用户定**）。
+4. `ops/watchdog.py` 服务清单与 `start_all.py` 不一致（**不守护 `qmt_sync`**），且 `install_watchdog.bat` 的计划任务**从未安装成功**（`cd /d` 是 cmd 语法、在 PowerShell 里报错）→ "有守护"是文档假象。
+5. `shared/common.with_market_suffix` 把 `400xxx → .BJ`，而其档位自 `6cbe510` 起是 0.05（老三板）→ **同文件内不一致**；**老三板正确后缀待查，无证据不改**。
 
 ## 项目现状（截至 2026-09-18）
 
