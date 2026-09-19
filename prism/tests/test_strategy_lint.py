@@ -147,3 +147,25 @@ def test_declared_keys_walks_nested_lists(tmp_path):
     assert ("scoring_models[0].weight", "weight") in keys
     assert ("composite.cap", "cap") in keys
     assert ("composite", "composite") not in keys
+
+
+# ---------------------------------------------------------------- 二阶观察
+def test_dormant_cap_hint(tmp_path):
+    """cap 被读但数值永不触发: 报 weighted_sum 理论上限(与引擎校验器同式)。"""
+    strat = {"id": "s12", "composite": {"mode": "weighted_sum", "cap": 9.0},
+             "scoring_models": [{"id": "m1", "weight": 0.6,
+                                 "factors": ["F1", "F2"]},
+                                {"id": "m2", "weight": 0.4, "factors": ["F3"]}]}
+    rep = _run(tmp_path, strat)
+    assert len(rep["hints"]) == 1, rep["hints"]
+    assert "恒不生效" in rep["hints"][0] and "1.6" in rep["hints"][0]
+    strat["composite"]["cap"] = 1.0
+    rep = _run(tmp_path, strat)
+    assert "会触发" in rep["hints"][0] and "1.6" in rep["hints"][0]
+
+
+def test_no_cap_hint_for_other_modes(tmp_path):
+    """只有 weighted_sum 的上限能由 JSON 直接算出; 其它模式不硬猜。"""
+    for mode in ("average", "top3_weighted", "sum"):
+        rep = _run(tmp_path, {"id": "s13", "composite": {"mode": mode, "cap": 9.0}})
+        assert rep["hints"] == [], (mode, rep["hints"])

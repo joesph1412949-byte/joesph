@@ -125,7 +125,7 @@ def read_keys(root, roots=None):
 
 # ---------------------------------------------------------------- 判定
 def lint_file(path, root=REPO_ROOT, roots=SCAN_ROOTS):
-    """单份策略 → {strategy, file, scanned_files, unconsumed, consumed}。"""
+    """单份策略 → {strategy, file, scanned_files, unconsumed, consumed, hints}。"""
     path = Path(path)
     data = json.loads(path.read_text(encoding="utf-8"))
     hits, n_files = read_keys(root, roots)
@@ -146,7 +146,48 @@ def lint_file(path, root=REPO_ROOT, roots=SCAN_ROOTS):
     sid = (data.get("id") or path.stem) if isinstance(data, dict) else path.stem
     return {"strategy": sid,
             "file": path.as_posix(), "scanned_files": n_files,
+            "hints": [h for h in [_cap_hint(data)] if h],
             "unconsumed": unc, "consumed": con}
+
+
+# ---------------------------------------------------------------- 二阶观察
+def _weight_bound(data):
+    """weighted_sum 的理论上限 Σ(层权重 × 对齐后因子权重和)。
+
+    与引擎校验器同式(prism/engine.py:435), 因子条目权重的对齐规则同
+    engine._compute_scores(字符串形态按位读 m["weights"], 否则读 item["weight"])。
+    只有这一种模式的上限能**只从 JSON** 算出, 故其余模式返回 None(不硬猜)。
+    """
+    comp = data.get("composite") or {}
+    if comp.get("mode") != "weighted_sum" or not data.get("scoring_models"):
+        return None
+    total = 0.0
+    for m in data["scoring_models"]:
+        ws = [float(x) for x in (m.get("weights") or [])]
+        s = 0.0
+        for idx, item in enumerate(m.get("factors") or []):
+            if isinstance(item, str):
+                s += ws[idx] if idx < len(ws) else 1.0
+            else:
+                s += float((item or {}).get("weight", 1.0))
+        total += float(m.get("weight", 1.0)) * s
+    return round(total, 4)
+
+
+def _cap_hint(data):
+    """cap 被读取 ≠ cap 生效: 声明值 ≥ 理论上限时 min(total, cap) 永不触发。"""
+    try:
+        bound = _weight_bound(data)
+    except (TypeError, ValueError):
+        return None
+    cap = ((data.get("composite") or {}).get("cap")
+           if isinstance(data, dict) else None)
+    if bound is None or not isinstance(cap, (int, float)):
+        return None
+    return ("composite.cap=%s %s weighted_sum 理论上限 %s → %s"
+            % (cap, ">=" if cap >= bound else "<", bound,
+               "恒不生效(惰性配置: min(total, cap) 永不触发)" if cap >= bound
+               else "会触发"))
 
 
 def lint_all(root=REPO_ROOT, strategies_dir=None, roots=SCAN_ROOTS):
@@ -169,6 +210,8 @@ def _fmt(rep):
              "   扫描 %d 个 .py(已排除 tests*/test_*.py)" % rep["scanned_files"]]
     unc, con = rep["unconsumed"], rep["consumed"]
     lines.append("   未消费 %d / 声明 %d" % (len(unc), len(unc) + len(con)))
+    for h in rep["hints"]:
+        lines.append("   提示(不计入退出码): %s" % h)
     for e in unc:
         lines.append("     [X] %s" % e["key"])
         lines.append("         声明于: %s" % _join(e["paths"]))
