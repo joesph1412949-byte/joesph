@@ -20,13 +20,15 @@ def test_commodity_by_name_covers_core_sectors():
 
 def test_futures_snapshot_keys_follow_sector_cache(monkeypatch):
     # futures 快照键 = 缓存 sectors 段的板块代码(与 sector_map/mkt["sector"] 同源)
+    # 09-19: futures_snapshot() 改为默认纯读缓存(不再调 fetch_futures 联网采集,
+    # 防回测跑批中途回写缓存 → F8 命中漂移), 故 futures 段直接进 _load_cache 桩。
     monkeypatch.setattr(md, "_load_cache", lambda: {
         "sectors": {"801030": {"name": "基础化工"},
                     "801950": {"name": "煤炭"},
-                    "801150": {"name": "医药生物"}}})
-    monkeypatch.setattr(md, "fetch_futures", lambda force=False: {
-        "MA0": {"name": "甲醇", "dates": ["2026-07-01"], "close": [1.0]},
-        "JM0": {"name": "焦煤", "dates": ["2026-07-01"], "close": [2.0]}})
+                    "801150": {"name": "医药生物"}},
+        "futures": {
+            "MA0": {"name": "甲醇", "dates": ["2026-07-01"], "close": [1.0]},
+            "JM0": {"name": "焦煤", "dates": ["2026-07-01"], "close": [2.0]}}})
     out = md.futures_snapshot()
     assert set(out) == {"801030", "801950"}      # 医药生物无映射 → 不出现
     assert "MA0" in out["801030"]["commodities"]

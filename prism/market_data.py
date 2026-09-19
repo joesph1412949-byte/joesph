@@ -18,13 +18,15 @@
   * stock/kline/get(secid=100.NDX 等) 全球指数历史K线(push2his)
 """
 import logging
+import os
 import pickle
 import sys
+import threading
 import time
 from datetime import date
 from pathlib import Path
 
-from shared.common import CACHE_DIR
+from shared.common import CACHE_DIR, replace_with_retry
 
 try:
     import requests
@@ -472,16 +474,52 @@ def _load_cache():
     if CACHE_PATH.exists():
         try:
             return pickle.loads(CACHE_PATH.read_bytes())
-        except Exception:
+        except Exception as e:
+            # 不静默: 损坏的缓存被当空, 调用方(含 _save_cache 的合并)会按空段走 ——
+            # 必须留下痕迹, 否则 5.9MB 缓存被无声清零也查不出(09-19 D2)
+            logger.warning("市场数据缓存读取失败, 按空缓存继续: %s: %r",
+                           CACHE_PATH, e)
             return {}
     return {}
 
 
+def _atomic_pickle(path, obj):
+    """原子写 pickle: 同目录唯一 tmp(pid+线程 id) → fsync → replace_with_retry。
+
+    不能走 shared.common.atomic_write: 它收的是 str + utf-8 + 平台换行转换
+    (Windows 上 '\\n'→'\\r\\n'), pickle 二进制经它必然损坏 —— 实测 protocol=0
+    的 ASCII pickle 也会因 CRLF 变成 "could not convert string to float"。
+    故这里用同一库的 replace_with_retry(发布撞车有界退避重试, 预算耗尽原样抛:
+    写失败绝不当成功), 与 prism/zt_history.py::_atomic_pickle 同一手法。
+
+    ponytail: 不加写者锁 —— 唯一 tmp 名防互踩, M12 的 replace 重试已覆盖同路径
+    写者/读者撞车; 真出现预算耗尽再按路径补锁。"""
+    tmp = path.with_name("%s.%d.%d.tmp" % (path.name, os.getpid(),
+                                           threading.get_ident()))
+    with open(tmp, "wb") as fp:
+        fp.write(pickle.dumps(obj, protocol=4))
+        fp.flush()
+        os.fsync(fp.fileno())
+    try:
+        replace_with_retry(str(tmp), str(path))
+    except BaseException:
+        try:
+            os.unlink(str(tmp))
+        except OSError:
+            pass
+        raise
+
+
 def _save_cache(cache):
-    """整文件保存。保留文件里已有的、本次未更新的段(如 global)。"""
+    """整文件原子保存。保留文件里已有的、本次未更新的段(如 global)。
+
+    cache 只传本次真正拥有的段: 调用方启动时读到的整份快照里带着别的段的陈旧
+    副本, 整份回写会把并发写者刚落的新值按旧快照盖回去(09-19 D3 实测:
+    build_global_cache/fetch_futures 整份交 → 期间的 flow_rank 当日行 LOST)。
+    """
     merged = dict(_load_cache())
     merged.update(cache)
-    CACHE_PATH.write_bytes(pickle.dumps(merged, protocol=4))
+    _atomic_pickle(CACHE_PATH, merged)
 
 
 # ---------------------------------------------------------------- 采集
@@ -509,7 +547,7 @@ def build_sector_cache(probe=None, beg=BACKFILL_BEG, end=None,
 
     source: "eastmoney"(默认, 东财板块+资金流) / "sw"(申万行业指数,
     东财封禁时的备用; 申万无资金流, flow 段留空)。
-    rebuild: True 时清空已有 kline/flow 段后全量重采(用于切换数据源:
+    rebuild: True 时清空已有 sectors/kline/flow 段后全量重采(用于切换数据源:
     申万体系 → 东财体系, 避免两套板块代码混在同一缓存)。
 
     增量口径: 无缓存的板块新采; 已有缓存但最后日期早于 end(尾部过期)
@@ -533,10 +571,16 @@ def build_sector_cache(probe=None, beg=BACKFILL_BEG, end=None,
     cache = _load_cache()
     sectors = cache.get("sectors") or {}
     if rebuild:
-        # 切换数据源: 清空旧体系 K线/资金流(避免申万801xxx与东财BKxxx混杂)
+        # 切换数据源: 板块列表与 K线/资金流一起清(避免申万 801xxx 与东财 BKxxxx
+        # 混杂)。真实缓存 sectors=527 里 496 个是东财 BK 孤儿 —— 不清则每次
+        # --source sw 都对它们发注定失败的申万请求(永久 warning)且永远"缺K线",
+        # futures_snapshot 还会据此产出与 sector_map(801xxx)不同源的 BK 键。
+        # 清空后 fetch_sector_list 失败会走下面的"无已有缓存"分支抛错(fail-closed,
+        # 且此时尚未落盘, 缓存不会被写坏)。
+        sectors = {}
         kline = {}
         flow = {}
-        logger.info("rebuild=True: 清空 kline/flow, 按 %s 全新采集", source)
+        logger.info("rebuild=True: 清空 sectors/kline/flow, 按 %s 全新采集", source)
     else:
         kline = cache.get("kline") or {}
         flow = cache.get("flow") or {}
@@ -640,8 +684,8 @@ def build_global_cache(probe=None, beg=BACKFILL_BEG, end=None,
                              "dates": [r["date"] for r in kl],
                              "close": [r["close"] for r in kl]}
     if globald:
-        cache["global"] = globald
-        _save_cache(cache)
+        # 只交 global 段: 整份 cache 会带着启动时的陈旧段按旧值盖回并发写者的新值
+        _save_cache({"global": globald})
     return globald
 
 
@@ -681,12 +725,28 @@ def _fetch_futures_daily(sym):
 
 
 def fetch_futures(force=False):
-    """采集全部映射品种日线 → 缓存 futures 键。
+    """采集全部映射品种日线 → 缓存 futures 段。**会联网并回写缓存**。
+
+    只允许从显式采集入口调用: CLI `--build-futures` /
+    `futures_snapshot(refresh=True)`。回测跑批与实盘快照走
+    `futures_snapshot()` 的默认纯读路径 —— 跑批中途不得改写缓存
+    (09-19 实测: 同一回测连跑两轮因中途回写拿到不同期货数据, F8 命中在
+    666↔719 间漂移, A/B 对照不再单一变量)。
+
     返回 {品种代码: {"name", "dates", "close"}}; 单品种失败跳过(fail-open)。
-    force=True 强制重采(默认走缓存)。"""
+    force=True 忽略缓存全量重采。
+
+    新鲜度(09-19 修 D4): 与板块K线同一门 `_tail_stale` —— 尾部早于今日的品种
+    重采, 不再是"只采缓存没有的"("已有即跳过"曾让 15 个品种全部冻在
+    2026-08-31, 而 F8 的 20 日涨幅就吃这份死数据; 与 ETF 首下载冻结同类病)。"""
     cache = _load_cache()
     fut = {} if force else dict(cache.get("futures") or {})
-    todo = [sym for sym in _FUTURES_NAMES if sym not in fut]
+    today = date.today().strftime("%Y%m%d")
+    if force:
+        todo = list(_FUTURES_NAMES)
+    else:
+        todo = [sym for sym in _FUTURES_NAMES
+                if sym not in fut or _tail_stale(fut[sym], today)]
     for sym in todo:
         try:
             df = _fetch_futures_daily(sym)
@@ -699,18 +759,23 @@ def fetch_futures(force=False):
         except Exception as e:
             logger.warning("期货 %s 采集失败: %r", sym, e)
         time.sleep(0.5)
-    cache["futures"] = fut
-    if todo:   # 本次确有新采集才落盘; 缓存完整时(mkt_snapshot 只读路径)不重写文件
-        _save_cache(cache)
+    if todo:   # 本次确有采集才落盘; 无新采集时不重写文件
+        # 只交 futures 段: 整份 cache 会带着启动时的陈旧段按旧值盖回并发写者的新值
+        _save_cache({"futures": fut})
     return fut
 
 
-def futures_snapshot():
+def futures_snapshot(refresh=False):
     """组装 mkt["futures"] 快照: {板块代码: {"name", "commodities": {品种: K线}}}。
     板块代码/名称来自缓存 sectors 段(与 sector_map / mkt["sector"] 同源);
-    行业 → 品种按名称映射(COMMODITY_BY_NAME), 无映射行业不出现。"""
+    行业 → 品种按名称映射(COMMODITY_BY_NAME), 无映射行业不出现。
+
+    **默认纯读**(09-19 硬要求): 只读缓存 futures 段, 绝不联网、绝不回写 ——
+    回测跑批(backtest/cli.py::load_market_data)与实盘/网页快照都走这条。
+    原先默认调 fetch_futures() 会在跑批中途采集并回写真实缓存。
+    refresh=True 才允许"采集 + 落盘"(给 --build-futures 这类显式入口用)。"""
     cache = _load_cache()
-    fut = fetch_futures()
+    fut = fetch_futures() if refresh else dict(cache.get("futures") or {})
     out = {}
     for scode, rec in (cache.get("sectors") or {}).items():
         name = (rec or {}).get("name") or ""
@@ -726,9 +791,9 @@ def mkt_snapshot():
     """组装引擎/实盘用的市场数据快照(run_screen 下发 ctx._extra["mkt"])。
 
     结构与回测 CLI 注入一致: sector/global/sector_flow + benchmark/flow_rank
-    (板块感知层) + futures(F8) + zt_prev(F9)。全部读本地缓存(fetch_futures
-    force=False 走缓存, 缓存完整时不重写文件), 单段失败降级缺键(fail-open),
-    不抛。
+    (板块感知层) + futures(F8) + zt_prev(F9)。全部读本地缓存, 单段失败降级缺键
+    (fail-open), 不抛。**纯读**: 不联网、不回写(futures 段走
+    futures_snapshot() 默认路径, 见其 docstring)。
     """
     cache = _load_cache()
     snap = {}
@@ -758,6 +823,9 @@ def mkt_snapshot():
 
 # ------------------------------------------------- 资金惯性/基准(板块感知层)
 
+# 上证指数代码: 东财 secid=1.000001 / 通达信指数通道(取点号前6位) / QMT 000001.SH
+BENCHMARK_INDEX_CODE = "000001.SH"
+
 def build_flow_rank(probe=None):
     """当日行业板块主力净流入快照 → 前向累积落盘 cache["flow_rank"]。
     东财 BK 细分行业口径, 自洽使用(不回填 SEC3 申万 flow 段)。
@@ -783,21 +851,105 @@ def build_flow_rank(probe=None):
     return {"dates": len(dates), "sectors_today": len(rows)}
 
 
+def _tdx_benchmark_kline(beg=None, end=None):
+    """通达信上证指数日K → [{date, close, amount}](与东财通道逐字段同构)。
+
+    东财 push2his 被封(09-07 起逐段, 09-13 复查确认)后的降级通道; 指数必须走
+    get_index_bars(见 prism/tdx_source.py 文档: get_security_bars 取指数返回垃圾
+    内存)。单次上限 800 根(≈3 年)足够覆盖 BACKFILL_BEG 起全区间, 再按 beg/end
+    过滤。取不到 → 返回 [](调用方据此走 fail-open 保留旧缓存)。"""
+    from prism import tdx_source
+    try:
+        df = tdx_source.get_index_kline(BENCHMARK_INDEX_CODE, days=800)
+    except Exception as e:      # 补充源 fail-open, 不能反过来炸掉基准任务
+        logger.warning("通达信上证指数取数异常: %r", e)
+        return []
+    if df is None or len(df) == 0:
+        return []
+    beg_fmt, end_fmt = _norm_day(beg), _norm_day(end)
+    out = []
+    for _, row in df.iterrows():
+        d = str(row["date"])[:10]
+        if beg_fmt and d < beg_fmt:
+            continue
+        if end_fmt and d > end_fmt:
+            continue
+        out.append({"date": d, "close": _f(row["close"]),
+                    "amount": _f(row.get("amount"))})
+    return out
+
+
+def _qmt_xtdata():
+    """QMT xtdata 模块(延迟导入; 不可用 → None)。测试可整体替换。"""
+    try:
+        from xtquant import xtdata
+        return xtdata
+    except Exception as e:
+        logger.warning("QMT(xtquant) 不可用: %r", e)
+        return None
+
+
+def _qmt_benchmark_kline(beg=None, end=None):
+    """QMT 上证指数日K → [{date, close, amount}](与东财通道逐字段同构)。
+
+    最后一路降级(09-19): 东财 push2his 已封, 通达信 K线通道实测全灭
+    (4 台白名单服务器全报 calling function error, 只有财务接口活着) —— 本机
+    QMT 在线且本地已有 000001.SH 日K。QMT 索引形如 '20260918' → 用 _norm_day
+    归一成 '2026-09-18'(与东财段同构)。取不到 → [](fail-open)。"""
+    xt = _qmt_xtdata()
+    if xt is None:
+        return []
+    code = BENCHMARK_INDEX_CODE
+    try:
+        data = xt.get_market_data_ex([], [code], period="1d", count=800) or {}
+    except Exception as e:
+        logger.warning("QMT 上证指数取数异常: %r", e)
+        return []
+    df = data.get(code)
+    if df is None or len(df) == 0:
+        return []
+    beg_fmt, end_fmt = _norm_day(beg), _norm_day(end)
+    out = []
+    for idx, row in df.iterrows():
+        d = _norm_day(str(idx)[:8])
+        if not d:
+            continue
+        if beg_fmt and d < beg_fmt:
+            continue
+        if end_fmt and d > end_fmt:
+            continue
+        out.append({"date": d, "close": _f(row.get("close")),
+                    "amount": _f(row.get("amount"))})
+    return out
+
+
 def build_benchmark(probe=None, beg=BACKFILL_BEG, end=None):
     """上证指数日K → cache["benchmark"] 全量替换(单指数成本低, 自愈)。
-    拉取失败/为空 → 保留旧缓存(fail-open)。
+
+    取数降级链(09-19 D7): 东财 kline(原源) → 通达信 get_index_bars
+    (prism/tdx_source) → QMT 本地日K(xtdata)。三路都拿不到 → 保留旧缓存
+    (fail-open, kept_old=True; CLI 据此非零退出, 绝不把"没刷新成功"当成功)。
     返回 {"days": n, "kept_old": bool}。"""
     probe = probe or EastMoneyProbe()
     end = end or date.today().strftime("%Y%m%d")
     old = _load_cache().get("benchmark") or {}
     old_days = len(old.get("dates") or [])
+    kl = []
     try:
         kl = probe.fetch_benchmark_kline(beg, end)
     except MarketDataError as e:
-        logger.warning("上证基准拉取失败, 保留旧缓存 %d日: %r", old_days, e)
-        return {"days": old_days, "kept_old": True}
+        logger.warning("上证基准东财取数失败(%r), 降级补充源", e)
     if not kl:
-        logger.warning("上证基准拉取为空, 保留旧缓存 %d日", old_days)
+        kl = _tdx_benchmark_kline(beg, end)
+        if kl:
+            logger.warning("上证基准走通达信降级通道: %d 日", len(kl))
+    if not kl:
+        kl = _qmt_benchmark_kline(beg, end)
+        if kl:
+            logger.warning("上证基准走 QMT 本地降级通道: %d 日", len(kl))
+    if not kl:
+        logger.warning("上证基准三路都拿不到(东财封禁 + 通达信无数据 + QMT 无数据), "
+                       "保留旧缓存 %d 日", old_days)
         return {"days": old_days, "kept_old": True}
     _save_cache({"benchmark": {"dates": [r["date"] for r in kl],
                                "close": [r["close"] for r in kl],
@@ -968,6 +1120,8 @@ def build_cli():
                     help="构建个股→申万行业映射(成分股采集)")
     ap.add_argument("--build-flow-rank", action="store_true",
                     help="当日板块主力净流入快照(前向累积, 幂等)")
+    ap.add_argument("--build-futures", action="store_true",
+                    help="商品期货日线采集(尾部过期的品种重采)")
     ap.add_argument("--build-benchmark", action="store_true",
                     help="上证指数日K基准(全量替换, 失败保留旧缓存)")
     ap.add_argument("--beg", default=BACKFILL_BEG,
@@ -976,9 +1130,7 @@ def build_cli():
                     choices=["eastmoney", "sw", "sina", "fred"],
                     help="板块/指数数据源: eastmoney(默认) / sw(申万) / sina(新浪美股)")
     ap.add_argument("--rebuild", action="store_true",
-                    help="清空 kline/flow 后全量重采(切换数据源时用, 避免混杂)")
-    ap.add_argument("--stats", action="store_true",
-                    help="显示缓存统计(无采集动作时同效)")
+                    help="清空 sectors/kline/flow 后全量重采(切换数据源时用, 避免混杂)")
     args = ap.parse_args()
 
     def prog(done, total):
@@ -998,6 +1150,10 @@ def build_cli():
         r = build_sector_map(progress=prog)
         print("\n个股→行业映射完成: %d 只" % r["stocks"])
         return
+    if args.build_futures:
+        fut = fetch_futures()
+        print("\n商品期货采集完成: %d 个品种" % len(fut))
+        return
     failures = []
     if args.build_flow_rank:
         try:
@@ -1011,16 +1167,23 @@ def build_cli():
         try:
             r = build_benchmark(beg=args.beg)
             print("上证基准:", r)
+            if r.get("kept_old"):
+                # build_benchmark 拉取失败/为空时 fail-open 保留旧缓存(不抛异常) ——
+                # 这里补记点名失败: 否则"没刷新成功"照样 exit 0, 自动化无从察觉
+                # (09-19 实证: benchmark 缓存停更 9 个交易日而盘后任务判成功)
+                failures.append("benchmark")
         except MarketDataError as e:
             failures.append("benchmark")
             print("上证基准失败: %r" % e)
-        return
+        if not failures:
+            # 09-19 D1: 原先无条件 return 在 raise 之前 → 成功失败都 exit 0
+            return
     if failures:
         # 点名的采集有失败 → 非零退出(自动化可感知), 不静默吞
         raise SystemExit("market_data: %s 采集失败(东财可能封禁), 稍后重试"
                          % "+".join(failures))
     cache = _load_cache()
-    # 无采集动作(或显式 --stats) → 打印缓存统计
+    # 无采集动作 → 打印缓存统计
     print("板块数:", len(cache.get("sectors") or {}))
     print("K线板块数:", len(cache.get("kline") or {}))
     print("资金流板块数:", len(cache.get("flow") or {}))
