@@ -1,5 +1,16 @@
 #encoding:gbk
 # QMT signal bridge - ASCII only (no CJK to avoid QMT GBK encoding issues)
+# ============================================================
+#  SIMULATION bridge. NOT for real trading.
+#  It has NO per-day dedup (HAS_DAILY_DEDUP = False): the same order_id
+#  can be submitted twice. It also does not validate the account -- it
+#  orders on whatever account the current QMT terminal is logged into.
+#  If ENVIRONMENT is ever flipped to "real", the arm file must at least be
+#  dated today (same rule as signal_bridge_real.py), but real orders belong
+#  in qmt/bridge/signal_bridge_real.py, which carries the full gate chain
+#  (paused / dated armed file / per-day dedup / same-round sell guard /
+#  price sanity).
+# ============================================================
 import json
 import os
 import sys
@@ -14,7 +25,12 @@ SIGNAL_ROOT = r"D:/QMT_SIGNALS"
 # env: "sim" = simulation (safe), "real" = live (must arm + DRY_RUN=False)
 ENVIRONMENT = "sim"
 
-# live arm file: only when this exists does real mode allow running/ordering
+# This bridge deliberately has NO per-day dedup (see the header). Kept as an
+# explicit constant so the flag is machine-checkable instead of comment-only.
+HAS_DAILY_DEDUP = False
+
+# live arm file: only when this exists (dated today) does real mode allow
+# running/ordering
 ARM_FILE = os.path.join(SIGNAL_ROOT, ".REAL_ARMED")
 
 # DRY_RUN=True: log only, never call passorder. real mode forbids True.
@@ -43,13 +59,35 @@ _queue_lock = threading.Lock()
 _queued_files = set()
 
 # ---------------- safety ----------------
+def _is_armed():
+    """Check the arm file. Real mode runs ONLY while an arm file exists whose
+    content contains today's YYYYMMDD.
+    Same rule as signal_bridge_real.py _is_armed() -- a stale arm file must NOT
+    keep the live channel open forever.
+    Returns (ok: bool, message: str)."""
+    try:
+        if not os.path.exists(ARM_FILE):
+            return False, "armed file missing: %s" % ARM_FILE
+        with open(ARM_FILE, "r", encoding="utf-8") as fp:
+            content = (fp.read() or "").strip()
+        today = datetime.now().strftime("%Y%m%d")
+        if today not in content:
+            return False, "armed file not dated today (%s): %s" % (today, ARM_FILE)
+        return True, "armed"
+    except Exception as e:
+        return False, "armed file check error %r" % e
+
 def _check_safety():
     if ENVIRONMENT == "real":
         if DRY_RUN:
             return False, "real env forbids DRY_RUN=True"
-        if not os.path.exists(ARM_FILE):
-            return False, "real not armed, create %s" % ARM_FILE
-        return True, "real mode armed (live trading channel open)"
+        armed, armed_msg = _is_armed()
+        if not armed:
+            return False, "real not armed (%s), create %s containing today's " \
+                          "YYYYMMDD" % (armed_msg, ARM_FILE)
+        return True, "real mode armed (live trading channel open%s)" % (
+            "" if HAS_DAILY_DEDUP else
+            "; WARNING: this bridge has NO per-day dedup -- not for production")
     return True, "simulation mode (safe)"
 
 # ---------------- utils ----------------
@@ -77,9 +115,17 @@ def _safe_unlink(f):
         pass
 
 def _with_market_suffix(code):
+    # Keep in sync with signal_bridge_real.py / shared/common.py
+    # with_market_suffix. This file stays self-contained on purpose: QMT runs it
+    # as a pasted strategy where project-root imports are not available.
+    # BJ 92xx MUST be matched before the "9" -> .SH branch.
     code = str(code).strip()
     if "." in code:
         return code
+    if code.startswith("92"):
+        return code + ".BJ"                    # BJ 92xx (before the "9" branch)
+    if code.startswith(("8", "4")):
+        return code + ".BJ"
     if code.startswith(("6", "5", "9")):
         return code + ".SH"
     if code.startswith(("0", "3", "2")):

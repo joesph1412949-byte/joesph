@@ -27,19 +27,33 @@ ADD_MARKET_SUFFIX = True
 # Optional: hardcode your REAL fund account below.
 # Leave "" to auto-use the account currently logged into QMT (recommended).
 FIXED_ACCOUNT = ""
-# REAL-order safety gates (keep enabled):
-# 1) ARM file: pending signals are consumed ONLY while an armed file dated
+# REAL-order safety gates (keep enabled). Each one is evaluated PER ORDER
+# inside drain_queue() (the decision logic is the pure function _should_place):
+# 1) PAUSE file: <SIGNAL_ROOT>/paused exists -> place NOTHING (emergency stop).
+#    Pending files are KEPT while paused so they can be processed after release.
+#    Same convention as prism/trader.check_paused and ttcore/daemon.is_paused:
+#    the file lives in the signal ROOT, not inside the env dir.
+# 2) ARM file: pending signals are consumed ONLY while an armed file dated
 #    today exists at SIGNAL_ROOT/real/armed.txt  (content contains today YYYYMMDD).
 #    Prevents accidental order placement when the strategy runs by mistake.
-ARMED_FILE = os.path.join(SIGNAL_ROOT, ENVIRONMENT, "armed.txt")
-# 2) Per-day dedup: the same order_id is ordered at most once per calendar
+# 3) Per-day dedup: the same order_id is ordered at most once per calendar
 #    day. Keyed on order_id, NOT stock_code -- a T+0 grid strategy places
 #    several orders for one stock per day (one per ladder rung, both ways);
 #    keying on stock_code would reject rung 2+ with DUPLICATE.
+# 4) Same-round sell guard: if a SELL for a code was NOT accepted by the
+#    terminal in THIS drain round, later BUYs for the SAME code are not sent
+#    (the buy-back only makes sense if the sell was actually accepted).
+# 5) Price sanity: reject absurd limit prices (e.g. 999999.99 from a typo).
+#    A-share stocks are all well below this; keeps a fat-finger order out.
+#    This one lives in _call_passorder (it needs the parsed order params).
+# NOTE on time-based checks: never gate on tick.time/timetag -- QMT re-stamps
+# them to the current wall clock every round (see tt_solo/ttcore/market.py).
+# If a session-window check is ever needed, use the local wall clock plus a
+# once-a-day WARNING.
+PAUSE_FILE = os.path.join(SIGNAL_ROOT, "paused")
+ARMED_FILE = os.path.join(SIGNAL_ROOT, ENVIRONMENT, "armed.txt")
 DEDUP_FILE = os.path.join(SIGNAL_ROOT, ENVIRONMENT, "placed_today.json")
 DEDUP_ENABLED = True
-# 3) Price sanity: reject absurd limit prices (e.g. 999999.99 from a typo).
-#    A-share stocks are all well below this; keeps a fat-finger order out.
 MAX_ORDER_PRICE = 100000.0
 # ===================================================================
 
@@ -83,23 +97,66 @@ def _is_armed():
     except Exception as e:
         return False, "armed file check error %r" % e
 
+def _is_paused():
+    """Emergency stop: <SIGNAL_ROOT>/paused exists -> place nothing.
+
+    Same convention as prism/trader.check_paused and ttcore/daemon.is_paused:
+    the file lives in the signal ROOT, not inside the env dir. Being a plain
+    existence test it is cheap enough to re-run for EVERY order. While it exists,
+    pending files are kept (not consumed) so releasing the stop resumes them."""
+    return os.path.exists(PAUSE_FILE)
+
 def _load_placed():
-    """Load the per-day placed-codes record. Returns dict {date: [codes]}."""
+    """Load the per-day placed record {date: [keys]}.
+
+    - file missing -> {} (nothing placed yet today)
+    - file present but unreadable / not a dict -> None = FAIL CLOSED. The caller
+      must refuse to place rather than read it as "{}" and silently re-open the
+      dedup gate (that is how a truncated file turns into a duplicate order)."""
+    if not os.path.exists(DEDUP_FILE):
+        return {}
     try:
         with open(DEDUP_FILE, "r", encoding="utf-8") as fp:
             data = json.load(fp)
-            if isinstance(data, dict):
-                return data
-    except Exception:
-        pass
-    return {}
+        if isinstance(data, dict):
+            return data
+    except Exception as e:
+        print("[SignalBridge] load placed ERR %r (fail-closed)" % e, flush=True)
+    return None
 
 def _save_placed(placed):
+    """Write the dedup record ATOMICALLY: serialize first, then tmp + fsync +
+    os.replace. A crash or power loss can therefore never leave a truncated
+    file behind (which _load_placed would read as unusable and refuse on).
+
+    On Windows os.replace() onto a path that any process holds an open read
+    handle for raises PermissionError (WinError 32) -- retry once after a short
+    pause, then give up loudly (the next order will hit fail-closed instead of
+    running with a stale account)."""
+    tmp = DEDUP_FILE + ".tmp"
     try:
-        with open(DEDUP_FILE, "w", encoding="utf-8") as fp:
-            json.dump(placed, fp, ensure_ascii=False, indent=2)
+        blob = json.dumps(placed, ensure_ascii=False, indent=2)
+        with open(tmp, "w", encoding="utf-8") as fp:
+            fp.write(blob)
+            fp.flush()
+            os.fsync(fp.fileno())
+        for attempt in (1, 2):
+            try:
+                os.replace(tmp, DEDUP_FILE)
+                return
+            except PermissionError:
+                if attempt == 1:
+                    time.sleep(0.05)
+                    continue
+                raise
     except Exception as e:
         print("[SignalBridge] save placed ERR %r" % e, flush=True)
+
+def _code_key(sig):
+    """Normalized stock code, for comparing two signals on the same stock.
+    Same rule as shared/common.py with_market_suffix (see _with_market_suffix)."""
+    code = str(sig.get("stock_code") or "")
+    return _with_market_suffix(code) if ADD_MARKET_SUFFIX else code
 
 def _dedup_key(sig):
     """Dedup key for a signal. Prefer order_id (unique per trade), fall back
@@ -114,9 +171,7 @@ def _dedup_key(sig):
     oid = str(sig.get("order_id") or "").strip()
     if oid:
         return oid
-    if ADD_MARKET_SUFFIX:
-        return _with_market_suffix(sig.get("stock_code") or "")
-    return str(sig.get("stock_code") or "")
+    return _code_key(sig)
 
 def _already_placed_today(sig, placed):
     """True if this signal (by order_id) was already placed today (dedup)."""
@@ -131,6 +186,41 @@ def _mark_placed_today(sig, placed):
     if key not in keys:
         keys.append(key)
         _save_placed(placed)
+
+
+def _should_place(sig, armed, paused, placed, rejected_sells=()):
+    """Pure gate chain: no file I/O, no order, no QMT. Returns (decision, detail).
+
+    decision: "paused" | "not_armed" | "dedup_unreadable" | "duplicate"
+              | "sell_not_accepted" | "place"
+
+    Chain order (first hit wins):
+        paused -> armed -> per-day dedup -> same-round sell guard.
+
+    Price/volume sanity is deliberately NOT here: it needs the parsed order
+    parameters, so it stays in _call_passorder (the single choke point before
+    passorder is called).
+
+    `placed` is the loaded per-day record; None means the dedup file exists but
+    could not be read -> fail closed. `rejected_sells` holds the normalized
+    codes whose SELL was not accepted in this drain round.
+    """
+    if paused:
+        return "paused", "paused file exists: %s" % PAUSE_FILE
+    if not armed:
+        return "not_armed", "not armed"
+    if DEDUP_ENABLED:
+        if placed is None:
+            return "dedup_unreadable", "DEDUP UNREADABLE (fail-closed): %s" % DEDUP_FILE
+        if _already_placed_today(sig, placed):
+            return "duplicate", "DUPLICATE: %s already placed today" % sig.get("stock_code")
+    if rejected_sells:
+        action = str(sig.get("action") or sig.get("order_type") or "").upper()
+        if action == "BUY" and _code_key(sig) in rejected_sells:
+            return ("sell_not_accepted",
+                    "SELL_NOT_ACCEPTED: sell of %s not accepted this round"
+                    % sig.get("stock_code"))
+    return "place", ""
 
 
 def _get_attr(obj, *names, default=""):
@@ -347,29 +437,78 @@ def scan_and_execute():
             print("[SignalBridge] scan %s ERR %r" % (os.path.basename(f), e), flush=True)
 
 # ---------------- main thread: drain queue + place orders ----------------
+# Files kept (not consumed) while a keep-gate blocks them; logged at most once
+# per process so an emergency stop does not spam the log every scan tick.
+_kept_files = set()
+
 def drain_queue(ctx=None):
     with _queue_lock:
         items = _signal_queue[:]
         _signal_queue[:] = []
-    # REAL-order safety gate 1: armed file must be present and dated today.
-    armed, armed_msg = _is_armed()
-    placed = _load_placed() if DEDUP_ENABLED else {}
+    # Codes whose SELL was not accepted in THIS round (see _should_place gate 4).
+    rejected_sells = set()
     for sig, f in items:
         try:
-            if not armed:
+            # Both emergency gates (paused / armed) are re-read PER ORDER on
+            # purpose. The files are the operator's stop button and one drain
+            # round may hold many signals: reading them once per batch would let
+            # a stop pressed mid-batch still place every remaining order (and the
+            # batch is exactly when someone panics and presses stop). The cost is
+            # one os.path.exists plus one small file read per order -- orders are
+            # rare, so this is nothing, and there is no lock to race for.
+            armed, armed_msg = _is_armed()
+            paused = _is_paused()
+            # The dedup account is re-read per order too. Combined with the
+            # atomic write in _save_placed it shrinks the window in which two
+            # QMT terminals running this same bridge both fail to see each
+            # other's record down to a single order. It is NOT a lock: a true
+            # read-check-place interleave across two terminals is still possible
+            # (fixing that needs a pid/lock file -- deliberately not added here,
+            # a stale lock would block real orders).
+            placed = _load_placed() if DEDUP_ENABLED else {}
+            decision, why = _should_place(sig, armed, paused, placed, rejected_sells)
+
+            # Gates that KEEP the pending file: nothing was ordered and nothing
+            # failed, so there is no done/failed result to write -- the file is
+            # simply left for the next round once the operator clears the block.
+            if decision in ("paused", "dedup_unreadable"):
+                if f not in _kept_files:
+                    _kept_files.add(f)
+                    print("[SignalBridge] KEPT %s (%s)"
+                          % (os.path.basename(f), why), flush=True)
+                continue
+
+            if decision == "not_armed":
                 _write_result(FAILED_DIR, sig, False, "NOT ARMED: %s" % armed_msg)
                 _safe_unlink(f)
                 continue
-            # REAL-order safety gate 2: same stock code only once per day.
-            if DEDUP_ENABLED and _already_placed_today(sig, placed):
-                _write_result(FAILED_DIR, sig, False,
-                              "DUPLICATE: %s already placed today" % sig.get("stock_code"))
+            if decision == "duplicate":
+                _write_result(FAILED_DIR, sig, False, why)
                 _safe_unlink(f)
                 continue
+            if decision == "sell_not_accepted":
+                # Drop the buy-back outright instead of keeping the file: the
+                # scanner would re-queue it on the NEXT round (2 s later) with
+                # no memory of the rejected sell, so "keep" would make this gate
+                # a no-op. The failed result records why.
+                _write_result(FAILED_DIR, sig, False, why)
+                _safe_unlink(f)
+                continue
+
+            action = str(sig.get("action") or sig.get("order_type") or "").upper()
             success, detail = _call_passorder(sig, ctx)
             _write_result(DONE_DIR if success else FAILED_DIR, sig, success, detail)
-            if success:
+            # Record a passorder EXCEPTION as placed, too: the exception may hit
+            # after the order already reached the broker (submit timeout), and a
+            # re-send would then be a SECOND real order -- missing one order
+            # beats sending it twice. A non-zero return code is a definite
+            # rejection by the terminal (nothing reached the broker), so that is
+            # NOT recorded. Local validation failures return other messages and
+            # are not recorded either.
+            if success or detail.startswith("passorder ERR"):
                 _mark_placed_today(sig, placed)
+            if action == "SELL" and not success:
+                rejected_sells.add(_code_key(sig))
             _safe_unlink(f)
         except Exception as e:
             print("[SignalBridge] order %s ERR %r" % (os.path.basename(f), e), flush=True)
@@ -425,7 +564,11 @@ def after_init(ContextInfo):
         print("[SignalBridge] DRY_RUN=False: orders are LIVE.", flush=True)
     armed, armed_msg = _is_armed()
     print("[SignalBridge] armed=%s (%s)" % (armed, armed_msg), flush=True)
+    print("[SignalBridge] paused=%s (file %s)" % (_is_paused(), PAUSE_FILE), flush=True)
     print("[SignalBridge] dedup=%s file=%s" % (DEDUP_ENABLED, DEDUP_FILE), flush=True)
+    if _is_paused():
+        print("[SignalBridge] !!! PAUSED: %s exists -> no orders until it is "
+              "removed (pending files are kept)." % PAUSE_FILE, flush=True)
     if not armed:
         print("[SignalBridge] !!! NOT ARMED: create %s containing today's YYYYMMDD "
               "to allow order placement." % ARMED_FILE, flush=True)

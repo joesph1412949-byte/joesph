@@ -121,9 +121,13 @@ def check_interfaces():
                        asset.frozen_cash))
             else:
                 rec(WARN, "接口", "资产查询", "返回 None")
-            pos = trader.query_stock_positions(acc) or []
-            rec(OK if pos is not None else WARN, "接口", "持仓查询",
-                "%d 只持仓" % len(pos))
+            raw_pos = trader.query_stock_positions(acc)
+            pos = raw_pos or []
+            # 判据: 查询返回 None = 该接口没工作(WARN); 返回 [](空仓) 是正常结果。
+            # 旧写法 `pos is not None` 在上一行 `or []` 之后恒真 → 永不 WARN。
+            rec(OK if raw_pos is not None else WARN, "接口", "持仓查询",
+                "%d 只持仓" % len(pos) if raw_pos is not None
+                else "查询返回 None(接口未工作或账户未就绪)")
             orders = trader.query_stock_orders(acc) or []
             trades = trader.query_stock_trades(acc) or []
             rec(OK, "接口", "委托/成交查询",
@@ -173,7 +177,8 @@ def check_config():
     armed_ok = False
     if os.path.isfile(ARMED_FILE):
         try:
-            content = open(ARMED_FILE, encoding="utf-8").read().strip()
+            with open(ARMED_FILE, encoding="utf-8") as fp:
+                content = fp.read().strip()
             today = datetime.now().strftime("%Y%m%d")
             armed_ok = today in content
             rec(OK if armed_ok else WARN, "配置", "实盘 armed 闸门",
@@ -187,17 +192,20 @@ def check_config():
         rec(WARN, "配置", "实盘下单被拦截",
             "armed 缺失 → 桥端把 pending 全部判 NOT ARMED 转 failed(安全)")
 
-    # 暂停开关
-    rec(OK if os.path.isfile(PAUSE_FILE) else WARN, "配置", "一键暂停开关",
-        "已暂停(存在 %s)" % PAUSE_FILE if os.path.isfile(PAUSE_FILE)
-        else "未暂停(不存在 %s)" % PAUSE_FILE)
+    # 暂停开关(桥端每单重读该文件, 与发送侧 prism.trader/ttcore 同口径)
+    paused_now = os.path.isfile(PAUSE_FILE)
+    rec(OK if paused_now else WARN, "配置", "一键暂停开关",
+        "已按下(存在 %s): 发送侧不再产生信号, QMT 内桥端也不再下单" % PAUSE_FILE
+        if paused_now else "未按下(不存在 %s)" % PAUSE_FILE)
 
-    # 去重账
+    # 去重账(去重键是 order_id, 一笔委托一档 → 计"笔"不计"只")
     if os.path.isfile(DEDUP_FILE):
         try:
-            d = json.load(open(DEDUP_FILE, encoding="utf-8"))
+            with open(DEDUP_FILE, encoding="utf-8") as fp:
+                d = json.load(fp)
             today = datetime.now().strftime("%Y%m%d")
-            rec(OK, "配置", "当日去重账", "今日已下单 %d 只" % len(d.get(today, [])))
+            rec(OK, "配置", "当日去重账",
+                "今日已下单 %d 笔(order_id)" % len(d.get(today, [])))
         except Exception as e:
             rec(WARN, "配置", "当日去重账", "解析失败: %r" % (e,))
     else:
@@ -206,7 +214,8 @@ def check_config():
     # 桥脚本 DRY_RUN 状态
     if os.path.isfile(BRIDGE):
         try:
-            txt = open(BRIDGE, encoding="gbk", errors="replace").read()
+            with open(BRIDGE, encoding="gbk", errors="replace") as fp:
+                txt = fp.read()
             dry = "DRY_RUN = True" in txt
             fixed = "FIXED_ACCOUNT = \"\"" in txt
             rec(OK, "配置", "桥脚本 DRY_RUN",
@@ -220,7 +229,8 @@ def check_config():
     # 策略指针
     if os.path.isfile(STRATEGY_POINTER):
         try:
-            p = json.load(open(STRATEGY_POINTER, encoding="utf-8"))
+            with open(STRATEGY_POINTER, encoding="utf-8") as fp:
+                p = json.load(fp)
             sid = p.get("id")
             f = os.path.join(REPO, "prism", "strategies", "%s.json" % sid)
             rec(OK if os.path.isfile(f) else FAIL, "配置", "激活策略",
@@ -255,7 +265,8 @@ def check_live_exit():
                         ("positions.json", POSITIONS)):
         if os.path.isfile(path):
             try:
-                json.load(open(path, encoding="utf-8"))
+                with open(path, encoding="utf-8") as fp:
+                    json.load(fp)
                 rec(OK, "实盘出口", label, "在位可解析 (%s)" % path)
             except Exception as e:
                 rec(FAIL, "实盘出口", label, "解析失败: %r" % (e,))
@@ -264,10 +275,12 @@ def check_live_exit():
                 "不存在(守护尚未跑过): %s" % path)
 
     try:
-        p = json.load(open(STRATEGY_POINTER, encoding="utf-8"))
+        with open(STRATEGY_POINTER, encoding="utf-8") as fp:
+            p = json.load(fp)
         f = os.path.join(REPO, "prism", "strategies", "%s.json" % p.get("id"))
         if os.path.isfile(f):
-            s = json.load(open(f, encoding="utf-8"))
+            with open(f, encoding="utf-8") as fp:
+                s = json.load(fp)
             ex = s.get("execution") or {}
             miss = [k for k in ("pct", "top_n", "open_window", "pick_slot")
                     if not ex.get(k)]
@@ -291,7 +304,8 @@ def check_data():
     # 市场数据缓存
     if os.path.isfile(MKT_CACHE):
         try:
-            d = pickle.load(open(MKT_CACHE, "rb"))
+            with open(MKT_CACHE, "rb") as fp:
+                d = pickle.load(fp)
             kl = d.get("kline") or {}
             g = d.get("global") or {}
             sw = sorted(c for c in (d.get("sectors") or {}) if c.startswith("80"))
