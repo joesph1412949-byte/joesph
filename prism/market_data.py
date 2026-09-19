@@ -16,6 +16,19 @@
   * stock/kline/get  板块历史K线(push2his, 可回溯任意日期)
   * fflow/daykline   板块资金流历史(push2his)
   * stock/kline/get(secid=100.NDX 等) 全球指数历史K线(push2his)
+
+CLI 退出码(6 个 --build-* 开关统一; 与 `--help` epilog 同步, 改一处必改另一处):
+  * 0 = 所有点名的段本次都真的取到/推进了数据;
+  * 1 = 有点名的段真失败 —— 抛异常 / `build_sector_cache` 本次尝试的板块全失败 /
+        `--build-benchmark` 三路全灭(kept_old, 有意保留的 fail-open 点名) /
+        拿不到数据且**无旧缓存可留**;
+  * 3 = 无失败但有段本次没推进(空数据; 旧缓存原样保留)—— 警告级, **绝不与 0 同码**。
+  多个 --build-* 可同时给出: 全部按参数声明顺序执行(不再静默短路); 一段失败
+  不连累其余段(全部照跑), 最后统一报码。
+  ⚠️ 多条目段的"本次一条都没取到"在**有旧缓存可留**且采集函数不自报失败计数时
+  判 3 而非 1 —— 它在返回值层面与"非交易日没有新数据"不可区分(global/futures
+  没有新鲜度门, 每次都会尝试全部条目)。把"周末没新数据"判成失败会让盘后任务
+  每周报灾难; 只在证据明确时判 1(09-19 A 批次口径)。
 """
 import logging
 import os
@@ -577,7 +590,10 @@ def build_sector_cache(probe=None, beg=BACKFILL_BEG, end=None,
     的重采替换(09-07 修复: 原先"已有即跳过"导致日期永久冻结, 与
     zt_history ④ 同类病); 已追平的不重复请求。
 
-    返回 {"sectors": n, "kline_codes": n, "flow_codes": n}。
+    返回 {"sectors": n, "kline_codes": n, "flow_codes": n,
+          "attempted": n, "failed": n}。attempted/failed = 本次**尝试采集**的
+    板块数与其中失败的板块数 —— CLI 用它区分"全失败"(退出码 1)与"本次无可采"
+    (退出码 3): 没有这个自报计数时二者不可区分(K线/资金流段无返回值)。
     缓存结构: {
       "sectors": {code: {"name": ...}},
       "kline":   {code: {"dates": [...], "close": [...], "amount": [...]}},
@@ -594,12 +610,22 @@ def build_sector_cache(probe=None, beg=BACKFILL_BEG, end=None,
     cache = _load_cache()
     sectors = cache.get("sectors") or {}
     if rebuild:
-        # 切换数据源: 板块列表与 K线/资金流一起清(避免申万 801xxx 与东财 BKxxxx
-        # 混杂)。真实缓存 sectors=527 里 496 个是东财 BK 孤儿 —— 不清则每次
-        # --source sw 都对它们发注定失败的申万请求(永久 warning)且永远"缺K线",
-        # futures_snapshot 还会据此产出与 sector_map(801xxx)不同源的 BK 键。
-        # 清空后 fetch_sector_list 失败会走下面的"无已有缓存"分支抛错(fail-closed,
-        # 且此时尚未落盘, 缓存不会被写坏)。
+        # 切源重建: sectors/kline/flow **三段一起清**, 再按 source 全新采集。
+        # 理由是 kline/flow 由同一个采集循环写出, 混族(申万 801xxx 与东财 BKxxxx)
+        # 会让按前缀过滤的下游看见半套; sectors 单独留旧码则每次 --source sw 都对
+        # 东财 BK 码发注定失败的申万请求(实测 496 个, 见
+        # test_rebuild_clears_mixed_source_sectors)。清空后 fetch_sector_list 失败
+        # 会走下面的"无已有缓存"分支抛错(fail-closed, 且此时尚未落盘)。
+        #
+        # 边界(09-19 B 复核, 别过度解读这句): 上述只是 **rebuild 的语义**,
+        # **不是**"缓存必须单源"的不变量。不带 --rebuild 的 `--build-sectors`
+        # (默认 source=eastmoney)会把东财 BK 码追加进 sectors, 于是 sectors
+        # 长期同时装着两族(真实缓存实测 527 = 31 个 801 + 496 个 BK) —— 这是
+        # **已知且被容忍**的正常状态: prism_web/app.py、prism/first_board_review.py
+        # 都只取 801 前缀, qmt/tools/live_check.py 只取 "80" 前缀, flow_rank 段自带
+        # code/name 不读 sectors, F8 只按 sector_map 目标(全 801)反查。真正被依赖
+        # 的不变量见 tests 的 _assert_source_invariants: kline/flow 同源族, 且
+        # kline/flow ⊆ sectors ⊆ sector_map 的映射目标集合。**无证据不要"顺手清理"。**
         sectors = {}
         kline = {}
         flow = {}
@@ -624,10 +650,13 @@ def build_sector_cache(probe=None, beg=BACKFILL_BEG, end=None,
     # 2. 板块历史K线 + 资金流(增量: 已有完整数据的跳过)
     total = len(sectors)
     done = 0
+    attempted = 0       # 本次真去采集的板块数(尾部过期的)
+    failed = 0          # 其中失败的 —— CLI 据此区分"全失败"(1)与"无可采"(3)
     for code, info in sectors.items():
         need_kline = _tail_stale(kline.get(code), end)
         need_flow = flow_enabled and _tail_stale(flow.get(code), end)
         if need_kline or need_flow:
+            attempted += 1
             try:
                 if source == "sw":
                     kl = feed.fetch_sector_kline(code)
@@ -637,6 +666,7 @@ def build_sector_cache(probe=None, beg=BACKFILL_BEG, end=None,
                 fl = feed.fetch_sector_flow("90.%s" % code) if flow_enabled \
                     else None
             except MarketDataError as e:
+                failed += 1
                 logger.warning("板块 %s 采集失败: %r (跳过)", code, e)
                 done += 1
                 if progress:
@@ -668,7 +698,7 @@ def build_sector_cache(probe=None, beg=BACKFILL_BEG, end=None,
 
     _save_cache({"sectors": sectors, "kline": kline, "flow": flow})
     return {"sectors": len(sectors), "kline_codes": len(kline),
-            "flow_codes": len(flow)}
+            "flow_codes": len(flow), "attempted": attempted, "failed": failed}
 
 
 def build_global_cache(probe=None, beg=BACKFILL_BEG, end=None,
@@ -1132,9 +1162,70 @@ def _code6(s):
 
 # ---------------------------------------------------------------- CLI
 
+# 统一退出码(6 个 --build-* 开关一致; 模块 docstring 与 --help epilog 同步):
+EXIT_OK, EXIT_FAIL, EXIT_EMPTY = 0, 1, 3
+EXIT_HELP = """退出码(6 个 --build-* 开关统一):
+  0  所有点名的段本次都真的取到/推进了数据
+  1  有点名的段真失败: 抛异常 / sectors 本次尝试的板块全失败 /
+     --build-benchmark 三路全灭(kept_old) / 拿不到数据且无旧缓存可留
+     (点名消息走 stderr, 进程退出码 = 1)
+  3  无失败但有段本次未推进(空数据; 旧缓存原样保留) —— 警告级, 绝不与 0 同码
+多个 --build-* 可同时给出: 全部按参数声明顺序执行(不再静默短路);
+一段失败不连累其余段, 最后统一报码。不带任何 --build-* 只打印缓存统计(退出码 0)。"""
+
+# 各段的缓存键(判"本次是否真推进"用; 与 prism/data_refresh.py 的 SEGMENTS 同口径;
+# 段名直接用缓存键名, 报错点名与 data_refresh 的段名一一对应)
+_SEG_KEYS = {"sectors": ("sectors", "kline", "flow"),
+             "global": ("global",),
+             "sector_map": ("sector_map",),
+             "flow_rank": ("flow_rank",),
+             "futures": ("futures",),
+             "benchmark": ("benchmark",)}
+
+
+def _seg_state(keys):
+    """该段当前落盘状态 → {缓存键: (条目数, 末日期)}; 判"本次是否真推进"。"""
+    cache = _load_cache()
+    out = {}
+    for k in keys:
+        seg = cache.get(k)
+        ds = seg.get("dates") if isinstance(seg, dict) else None
+        if isinstance(ds, list):            # flow_rank/benchmark: 单序列段
+            out[k] = (len(ds), str(ds[-1]) if ds else "")
+            continue
+        lasts = []
+        for r in (seg or {}).values():      # 逐子键段(kline/global/futures...)
+            rds = r.get("dates") if isinstance(r, dict) else None
+            if rds:
+                lasts.append(str(rds[-1]))
+        out[k] = (len(seg or {}), max(lasts) if lasts else "")
+    return out
+
+
+def _advanced(before, after):
+    """缓存是否真的推进了(条目数或末日期变大)。"""
+    return any(after.get(k, (0, "")) > before.get(k, (0, "")) for k in after)
+
+
+def _produced(name, r):
+    """采集函数自报的"本次真的写出了新数据"。
+
+    只有自报字段**确实表示"本次"**的段才用它 —— sectors 的 kline_codes/flow_codes
+    是**累积**条数(len(kline)), 不是本次写入量, 故不在此列(它走 _advanced);
+    拿不到"本次"信号的段返回 False, 调用方退回 _advanced。"""
+    if name == "flow_rank":
+        return bool(r.get("sectors_today"))   # 空快照(盘前/非交易日)不落盘
+    if name == "benchmark":
+        return not r.get("kept_old")          # kept_old 由调用方先点名失败
+    return False
+
+
 def build_cli():
     import argparse
-    ap = argparse.ArgumentParser(description="市场数据层采集(板块/K线/资金流/全球指数)")
+    ap = argparse.ArgumentParser(
+        description="市场数据层采集(板块/K线/资金流/全球指数)",
+        epilog=EXIT_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build-sectors", action="store_true",
                     help="采集行业板块K线+资金流(增量; 东财封禁时 --source sw 换"
                          "申万K线, 申万无资金流 ⇒ flow 段只能东财)")
@@ -1165,62 +1256,101 @@ def build_cli():
         sys.stdout.write("\r  采集 %d/%d" % (done, total))
         sys.stdout.flush()
 
+    # 点名的段全部入列并按声明顺序执行 —— 改前前四个 flag 是"打印完裸 return",
+    # 组合调用时后面的 flag 被静默丢弃(--build-sectors --build-flow-rank 里
+    # flow-rank 根本不跑, 实测退出码 0)。
+    # 选"组合执行"而不是"组合即报错": ① `--build-flow-rank --build-benchmark`
+    # 的组合本来就是既有行为且有回归锁(test_cli_build_flags_run_both);
+    # ② 文档与 data_refresh 已按多段组合写命令(如"东财解封后
+    # `--build-sectors --build-flow-rank`"), 拒绝组合会把它们判成用法错误;
+    # ③ 组合执行是对既有意图的兑现, 拒绝只是把静默忽略换成显式忽略。
+    jobs = []
     if args.build_sectors:
-        r = build_sector_cache(beg=args.beg, progress=prog,
-                               source=args.source, rebuild=args.rebuild)
-        print("\n板块采集完成(source=%s):" % args.source, r)
-        return
+        jobs.append(("sectors",
+                     lambda: build_sector_cache(beg=args.beg, progress=prog,
+                                                source=args.source,
+                                                rebuild=args.rebuild),
+                     lambda r: print("\n板块采集完成(source=%s):"
+                                     % args.source, r)))
     if args.build_global:
-        g = build_global_cache(beg=args.beg, source=args.source)
-        print("全球指数采集完成(source=%s): %d 个" % (args.source, len(g)))
-        return
+        jobs.append(("global",
+                     lambda: build_global_cache(beg=args.beg,
+                                                source=args.source),
+                     lambda r: print("全球指数采集完成(source=%s): %d 个"
+                                     % (args.source, len(r)))))
     if args.build_sector_map:
-        r = build_sector_map(progress=prog)
-        print("\n个股→行业映射完成: %d 只" % r["stocks"])
-        return
-    if args.build_futures:
-        fut = fetch_futures()
-        print("\n商品期货采集完成: %d 个品种" % len(fut))
-        return
-    failures = []
+        jobs.append(("sector_map",
+                     lambda: build_sector_map(progress=prog),
+                     lambda r: print("\n个股→行业映射完成: %d 只" % r["stocks"])))
     if args.build_flow_rank:
-        try:
-            r = build_flow_rank()
-            print("资金惯性快照:", r)
-        except MarketDataError as e:
-            # 容错: 一段被封不连累另一段(push2/push2his 封禁常不同步)
-            failures.append("flow_rank")
-            print("资金惯性快照失败: %r" % e)
+        jobs.append(("flow_rank", lambda: build_flow_rank(),
+                     lambda r: print("资金惯性快照:", r)))
+    if args.build_futures:
+        jobs.append(("futures", lambda: fetch_futures(),
+                     lambda r: print("\n商品期货采集完成: %d 个品种" % len(r))))
     if args.build_benchmark:
+        jobs.append(("benchmark", lambda: build_benchmark(beg=args.beg),
+                     lambda r: print("上证基准:", r)))
+
+    if not jobs:
+        cache = _load_cache()
+        # 无采集动作 → 打印缓存统计
+        print("板块数:", len(cache.get("sectors") or {}))
+        print("K线板块数:", len(cache.get("kline") or {}))
+        print("资金流板块数:", len(cache.get("flow") or {}))
+        print("全球指数:", {k: len(v.get("dates") or [])
+                            for k, v in (cache.get("global") or {}).items()})
+        bench = cache.get("benchmark") or {}
+        fr = cache.get("flow_rank") or {}
+        print("上证基准:", len(bench.get("dates") or []), "日")
+        print("资金惯性:", len(fr.get("dates") or []), "日快照")
+        return EXIT_OK
+
+    fails, empties, oks = [], [], []
+    for name, fn, emit in jobs:
+        keys = _SEG_KEYS[name]
+        before = _seg_state(keys)
         try:
-            r = build_benchmark(beg=args.beg)
-            print("上证基准:", r)
-            if r.get("kept_old"):
-                # build_benchmark 拉取失败/为空时 fail-open 保留旧缓存(不抛异常) ——
-                # 这里补记点名失败: 否则"没刷新成功"照样 exit 0, 自动化无从察觉
-                # (09-19 实证: benchmark 缓存停更 9 个交易日而盘后任务判成功)
-                failures.append("benchmark")
+            r = fn()
         except MarketDataError as e:
-            failures.append("benchmark")
-            print("上证基准失败: %r" % e)
-        if not failures:
-            # 09-19 D1: 原先无条件 return 在 raise 之前 → 成功失败都 exit 0
-            return
-    if failures:
-        # 点名的采集有失败 → 非零退出(自动化可感知), 不静默吞
+            # 容错: 一段被封不连累其余段(push2/push2his 封禁常不同步)
+            fails.append(name)
+            print("\n%s 采集失败: %r" % (name, e))
+            continue
+        emit(r)
+        after = _seg_state(keys)
+        if name == "benchmark" and r.get("kept_old"):
+            # build_benchmark 三路都拿不到时 fail-open 保留旧缓存(不抛异常) ——
+            # 这里补记点名失败: 否则"没刷新成功"照样 exit 0 (09-19 实证: 缓存
+            # 停更 9 个交易日而盘后任务判成功)。**有意保留的 fail-open 语义**。
+            fails.append(name)
+            print("  → 三路都拿不到, 保留旧缓存(fail-open), 退出码 %d" % EXIT_FAIL)
+            continue
+        if _produced(name, r) or _advanced(before, after):
+            oks.append(name)
+            continue
+        if (name == "sectors" and r.get("attempted")
+                and r.get("failed") == r.get("attempted")):
+            fails.append(name)               # 全失败(自报计数, 证据明确)
+            print("  → 本次 %d 个板块全部采集失败, 退出码 %d"
+                  % (r["attempted"], EXIT_FAIL))
+        elif any(n for n, _ in after.values()):
+            empties.append(name)             # 旧缓存还在 → 未推进(警告级)
+            print("  → 本次未推进(空数据, 旧缓存原样保留), 退出码 %d" % EXIT_EMPTY)
+        else:
+            fails.append(name)               # 拿不到数据且无旧缓存可留
+            print("  → 拿不到数据且无旧缓存可留, 退出码 %d" % EXIT_FAIL)
+
+    print("\n汇总: 成功 %d 段 / 未推进 %d 段 / 失败 %d 段 (共 %d 段)"
+          % (len(oks), len(empties), len(fails), len(jobs)))
+    if fails:
+        # 点名的采集有失败 → 非零退出(自动化可感知), 不静默吞。
+        # 部分成功也报 1: 其余段已照跑完(上面的循环不提前中断), 逐段结果都在 stdout。
         raise SystemExit("market_data: %s 采集失败(东财可能封禁), 稍后重试"
-                         % "+".join(failures))
-    cache = _load_cache()
-    # 无采集动作 → 打印缓存统计
-    print("板块数:", len(cache.get("sectors") or {}))
-    print("K线板块数:", len(cache.get("kline") or {}))
-    print("资金流板块数:", len(cache.get("flow") or {}))
-    print("全球指数:", {k: len(v.get("dates") or [])
-                        for k, v in (cache.get("global") or {}).items()})
-    bench = cache.get("benchmark") or {}
-    fr = cache.get("flow_rank") or {}
-    print("上证基准:", len(bench.get("dates") or []), "日")
-    print("资金惯性:", len(fr.get("dates") or []), "日快照")
+                         % "+".join(fails))
+    if empties:
+        raise SystemExit(EXIT_EMPTY)
+    return EXIT_OK
 
 
 if __name__ == "__main__":

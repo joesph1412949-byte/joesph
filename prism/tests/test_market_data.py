@@ -649,7 +649,9 @@ def test_cli_flow_rank_failure_does_not_block_benchmark(_ws_tmp, monkeypatch,
     assert ran == ["bm"]           # benchmark 不被连累
     assert "flow_rank" in str(ei.value)
     out = capsys.readouterr().out
-    assert "资金惯性快照失败" in out
+    # 09-19 A 批次: 逐段失败行改成统一的 "<段名> 采集失败: ..." 格式
+    # (原为 flow_rank 专用的"资金惯性快照失败", 统一后点名与段名一一对应)
+    assert "flow_rank 采集失败" in out
 
 
 def test_cli_single_flag_failure_exits_nonzero(_ws_tmp, monkeypatch):
@@ -1292,3 +1294,315 @@ def test_build_benchmark_primary_wins_no_fallback_call(_ws_tmp, monkeypatch):
     r = md.build_benchmark(probe=p, beg="20260101", end="20260823")
     assert r == {"days": 1, "kept_old": False}
     assert md._load_cache()["benchmark"]["close"] == [4147.72]
+
+
+# ---------------- D8: 6 个 --build-* 统一退出码(0/1/3) + 组合 flag 不静默短路
+#
+# 改前实测(每个 flag 真跑一次, 临时 CACHE_PATH + 全失败桩):
+#   --build-sectors      全失败有旧缓存 → 0(!!)  无旧缓存 → 1(未捕获异常 traceback)
+#   --build-global       全失败           → 0(!!)
+#   --build-sector-map   列表拿不到       → 1(未捕获异常 traceback)
+#   --build-futures      全失败           → 0(!!)
+#   --build-flow-rank    失败             → 1(SystemExit, 有意)
+#   --build-benchmark    三路全灭          → 1(SystemExit, 有意)
+#   组合 --build-sectors --build-flow-rank → 0 且 flow_rank 静默没跑(!!)
+#   组合 --build-sectors --build-global    → 0 且 global 静默没跑(!!)
+# 约定(见 market_data 模块 docstring 与 --help epilog):
+#   0 = 所有点名段本次真取到/推进了数据; 1 = 有段真失败;
+#   3 = 无失败但有段本次没推进(空数据; 旧缓存原样保留) —— 绝不与成功同码。
+
+def _exc_rc(e):
+    """SystemExit → 进程退出码(字符串 code = 失败消息 ⇒ 1; None ⇒ 0)。"""
+    if isinstance(e.code, int):
+        return e.code
+    return 1 if e.code else 0
+
+
+def _cli_rc():
+    """跑 build_cli() → 进程退出码。
+
+    FAIL 走 `raise SystemExit(点名消息)`(消息进 stderr, 进程码 = 1),
+    EMPTY 走 `raise SystemExit(3)`; 正常返回 = 0。
+    """
+    try:
+        md.build_cli()
+    except SystemExit as e:
+        return _exc_rc(e)
+    return 0
+
+
+def test_cli_help_documents_exit_codes(_ws_tmp, monkeypatch, capsys):
+    """--help 必须写清退出码约定 —— 自动化靠它解读, 不能只活在代码注释里。"""
+    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
+    monkeypatch.setattr("sys.argv", ["market_data.py", "--help"])
+    with pytest.raises(SystemExit):
+        md.build_cli()
+    out = capsys.readouterr().out
+    assert "退出码" in out
+    assert "未推进" in out and "3" in out
+    assert "1" in out and "失败" in out
+
+
+def test_cli_no_progress_with_old_cache_exits_3(_ws_tmp, monkeypatch, capsys):
+    """空数据/未推进 ≠ 成功: 段本次没推进但旧缓存还在 → 3(警告级, 不是 0)。
+
+    判别力(变异取证): 把"没推进"判成 0 → 本用例红。
+    """
+    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
+    md._save_cache({"futures": {"MA0": {"name": "甲醇",
+                                        "dates": ["2026-01-01"],
+                                        "close": [1.0]}}})
+    monkeypatch.setattr("sys.argv", ["market_data.py", "--build-futures"])
+    monkeypatch.setattr("time.sleep", lambda *a: None)
+
+    def boom(sym):
+        raise RuntimeError("net down")
+
+    monkeypatch.setattr(md, "_fetch_futures_daily", boom)
+    with pytest.raises(SystemExit) as ei:
+        md.build_cli()
+    assert ei.value.code == 3, "未推进必须与成功(0)分开"
+    assert "未推进" in capsys.readouterr().out
+
+
+def test_cli_empty_segment_without_old_cache_exits_1(_ws_tmp, monkeypatch):
+    """拿不到数据且无旧缓存可留 → 1(真失败), 不是 3(空数据警告)。"""
+    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
+    monkeypatch.setattr("sys.argv", ["market_data.py", "--build-global"])
+    monkeypatch.setattr(md, "RETRY_SLEEP", 0.0)
+    p, _ = _fake_probe(fail_urls=[md.EastMoneyProbe.KLINE_URL])
+    monkeypatch.setattr(md, "EastMoneyProbe", lambda *a, **k: p)
+    assert _cli_rc() == 1
+
+
+def test_cli_sectors_total_failure_exits_1(_ws_tmp, monkeypatch):
+    """sectors 段本次尝试的板块全部失败 → 1(全失败), 即使旧缓存还在。
+
+    判别力: 一个都没成功不是"部分成功"; 判 3/0 会让盘后任务看不见数据停更。
+    """
+    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
+    md._save_cache({"sectors": {"801010": {"name": "农林牧渔"}},
+                    "kline": {"801010": {"dates": ["2020-01-01"],
+                                         "close": [1.0], "amount": [1.0]}}})
+    monkeypatch.setattr("sys.argv", ["market_data.py", "--build-sectors"])
+    monkeypatch.setattr(md, "RETRY_SLEEP", 0.0)
+    p, _ = _fake_probe(
+        {md.EastMoneyProbe.CLIST_URL: _resp(
+            {"total": 1, "diff": [{"f12": "801010", "f14": "农林牧渔"}]})},
+        fail_urls=[md.EastMoneyProbe.KLINE_URL, md.EastMoneyProbe.FFLOW_URL])
+    monkeypatch.setattr(md, "EastMoneyProbe", lambda *a, **k: p)
+    assert _cli_rc() == 1
+
+
+def test_build_sector_cache_reports_attempt_counts(_ws_tmp, monkeypatch):
+    """采集函数须自报"本次尝试/失败"条目数 —— 退出码靠它区分全失败与未推进。"""
+    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
+    f = md.SWIndexFeed(ak=_HalfDeadSWAK())
+    r = md.build_sector_cache(probe=f, beg="20260101", end="20260823",
+                              source="sw")
+    assert r["attempted"] == 2       # 两个行业尾部都过期 → 都尝试
+    assert r["failed"] == 1          # 801030 抛错
+    assert r["kline_codes"] == 1
+
+
+def test_cli_sectors_partial_failure_is_not_failure(_ws_tmp, monkeypatch):
+    """A1 底线: 部分板块失败不得把整段判成失败(否则盘后任务天天"灾难")。"""
+    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
+    monkeypatch.setattr("sys.argv", ["market_data.py", "--build-sectors",
+                                     "--source", "sw"])
+    f = md.SWIndexFeed(ak=_HalfDeadSWAK())
+    monkeypatch.setattr(md, "SWIndexFeed", lambda *a, **k: f)
+    assert _cli_rc() == 0
+
+
+def test_cli_combo_runs_every_requested_segment(_ws_tmp, monkeypatch):
+    """组合 flag 不再静默短路: 6 个一起点名 → 6 个都执行(声明顺序)。
+
+    判别力(变异取证): 恢复"前四个裸 return"式的短路 → 本用例只记录到 1~4 个调用 → 红。
+    """
+    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
+    monkeypatch.setattr("sys.argv", ["market_data.py",
+                                     "--build-sectors", "--build-global",
+                                     "--build-sector-map", "--build-flow-rank",
+                                     "--build-futures", "--build-benchmark"])
+    calls = []
+
+    def _stub(name, payload, ret=None):
+        def fn(**k):
+            calls.append(name)
+            md._save_cache(payload)
+            return payload if ret is None else ret
+        return fn
+
+    monkeypatch.setattr(md, "build_sector_cache", _stub("sectors", {
+        "sectors": {"801010": {"name": "农林牧渔"}},
+        "kline": {"801010": {"dates": ["2026-09-18"], "close": [1.0]}},
+        "flow": {"801010": {"dates": ["2026-09-18"], "main_net_in": [1.0]}}}))
+    monkeypatch.setattr(md, "build_global_cache", _stub("global", {
+        "global": {"NDX": {"name": "纳指", "dates": ["2026-09-18"],
+                           "close": [1.0]}}}))
+    monkeypatch.setattr(md, "build_sector_map", _stub("sector_map", {
+        "sector_map": {"000001": {"sector": "801010", "name": "平安银行"}}},
+        ret={"stocks": 1}))
+    monkeypatch.setattr(md, "build_flow_rank",
+                        lambda **k: calls.append("flow_rank") or {
+                            "dates": 1, "sectors_today": 2})
+    monkeypatch.setattr(md, "fetch_futures", _stub("futures", {
+        "futures": {"MA0": {"name": "甲醇", "dates": ["2026-09-18"],
+                            "close": [1.0]}}}))
+    monkeypatch.setattr(md, "build_benchmark",
+                        lambda **k: calls.append("benchmark") or {
+                            "days": 1, "kept_old": False})
+    assert _cli_rc() == 0
+    assert calls == ["sectors", "global", "sector_map", "flow_rank",
+                     "futures", "benchmark"]
+
+
+def test_cli_combo_failure_does_not_block_and_names_segment(_ws_tmp, monkeypatch):
+    """一段失败不连累其余段, 且整体 exit 1 并把失败段点名。"""
+    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
+    monkeypatch.setattr("sys.argv", ["market_data.py", "--build-sectors",
+                                     "--build-flow-rank", "--build-benchmark"])
+
+    def boom(**k):
+        raise md.MarketDataError("push2 banned")
+
+    ran = []
+    monkeypatch.setattr(md, "build_sector_cache", boom)
+    monkeypatch.setattr(md, "build_flow_rank",
+                        lambda **k: ran.append("flow_rank") or {
+                            "dates": 1, "sectors_today": 1})
+    monkeypatch.setattr(md, "build_benchmark",
+                        lambda **k: ran.append("benchmark") or {
+                            "days": 1, "kept_old": False})
+    with pytest.raises(SystemExit) as ei:
+        md.build_cli()
+    assert _exc_rc(ei.value) == 1
+    assert ran == ["flow_rank", "benchmark"]
+    assert "sectors" in str(ei.value)
+
+
+# ---------------- B(甲): sectors 可以并存 申万801 与 东财BK, 但真正的不变量必须守
+#
+# 09-19 复核结论(证据见报告 §B): BK 码不是"无意残留" —— 它是**默认源(eastmoney)
+# 的正常产物**, 且三处消费者按前缀显式过滤(prism_web/app.py 只取 801、
+# prism/first_board_review.py 只取 801、qmt/tools/live_check.py 只取 "80"),
+# flow_rank 段自带 code/name 不读 sectors, F8 只按 sector_map 目标(全 801)反查。
+# 真实缓存实测: sectors 527(31×801 + 496×BK)、kline 31(全 801)、flow 16(全 801)、
+# sector_map 5220(目标全 801)、kline/flow ⊆ sectors ⊆ sector_map 目标集合。
+# 故**不删任何数据**, 只把 :597 的注释说准, 并钉住因子路径真正依赖的两条不变量。
+
+def _assert_source_invariants(cache):
+    """同源不变量(因子路径真正依赖的):
+
+    1) kline 与 flow 的代码前缀族必须相同 —— 这两段由同一采集循环一起写,
+       混族说明缓存被两个源的采集结果拼过(下游按前缀过滤的消费者只见半套);
+    2) kline/flow 的键必须 ⊆ sectors(段内不得有孤儿码);
+    3) kline/flow 的键必须 ⊆ sector_map 的映射目标集合 —— F8/SEC* 靠
+       `sector_map[code]` 反查快照键, 目标集合之外的键永远取不到。
+    """
+    kl = set(cache.get("kline") or {})
+    fl = set(cache.get("flow") or {})
+    sec = set(cache.get("sectors") or {})
+    targets = {v.get("sector") for v in (cache.get("sector_map") or {}).values()
+               if isinstance(v, dict)}
+    targets.discard(None)
+    fam = lambda s: {c[:3] for c in s}          # noqa: E731 - 前缀族
+    if kl and fl:      # 一段本来就空(如 --source sw 无 flow 段)不算混源
+        assert fam(kl) == fam(fl), "kline/flow 不同源: %s vs %s" % (fam(kl),
+                                                                   fam(fl))
+    assert kl <= sec, "kline 有孤儿码: %s" % sorted(kl - sec)
+    assert fl <= sec, "flow 有孤儿码: %s" % sorted(fl - sec)
+    if targets:        # sector_map 空 = 另一类缺口(由 data_refresh/live_check 报), 不在此判
+        assert kl <= targets, "kline 键不在 sector_map 目标内: %s" % sorted(
+            kl - targets)
+        assert fl <= targets, "flow 键不在 sector_map 目标内: %s" % sorted(
+            fl - targets)
+
+
+def test_source_invariants_hold_on_mixed_sectors_cache():
+    """真实缓存形状(801+BK 并存的 sectors, 单源的 kline/flow/sector_map)→ 绿灯。
+
+    这条就是"BK 可以留在 sectors"的书面依据: 不变量只约束 kline/flow/sector_map。
+    """
+    _assert_source_invariants({
+        "sectors": {"801010": {"name": "农林牧渔"}, "BK0475": {"name": "银行"},
+                    "BK1627": {"name": "综合Ⅲ"}},
+        "kline": {"801010": {"dates": ["2026-09-02"], "close": [1.0]}},
+        "flow": {"801010": {"dates": ["2026-09-02"], "main_net_in": [1.0]}},
+        "sector_map": {"000001": {"sector": "801010", "name": "平安银行"}},
+    })
+
+
+def test_source_invariant_red_when_kline_switched_to_bk():
+    """负控(变异 ③): 把 kline 换成东财 BK 键 → 守卫必须红。"""
+    bad = {
+        "sectors": {"801010": {"name": "农林牧渔"}, "BK0475": {"name": "银行"}},
+        "kline": {"BK0475": {"dates": ["2026-09-02"], "close": [1.0]}},
+        "flow": {"801010": {"dates": ["2026-09-02"], "main_net_in": [1.0]}},
+        "sector_map": {"000001": {"sector": "801010", "name": "平安银行"}},
+    }
+    with pytest.raises(AssertionError, match="不同源"):
+        _assert_source_invariants(bad)
+
+
+def test_source_invariant_red_when_kline_orphan_outside_sector_map():
+    """负控: kline 键不在 sector_map 目标集合里 → 守卫必须红(F8 永远取不到)。"""
+    bad = {
+        "sectors": {"801010": {"name": "农林牧渔"}, "801980": {"name": "美容护理"}},
+        "kline": {"801010": {"dates": ["2026-09-02"], "close": [1.0]},
+                  "801980": {"dates": ["2026-09-02"], "close": [1.0]}},
+        "flow": {"801010": {"dates": ["2026-09-02"], "main_net_in": [1.0]}},
+        "sector_map": {"000001": {"sector": "801010", "name": "平安银行"}},
+    }
+    with pytest.raises(AssertionError, match="不在 sector_map 目标内"):
+        _assert_source_invariants(bad)
+
+
+def test_without_rebuild_sw_run_mixes_kline_sources(_ws_tmp, monkeypatch):
+    """这是 :597 那句"一起清"存在的**理由**, 不是"缓存必须单源"的不变量。
+
+    实证(生产代码, 不是构造的): 已有东财 BK 的 kline 上再跑 `--source sw`
+    且不带 --rebuild → 801 键被追加进同一段 ⇒ kline 混族, 守卫变红。
+    故切源必须 `--rebuild`; 反之, 默认源(eastmoney)长期往 sectors 追加 BK
+    是**正常**的, 不该为它做"清理"。
+    """
+    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
+    p = _MixedSourceProbe({
+        "sectors": {"BK0475": {"name": "银行"}},
+        "kline": {"BK0475": {"dates": ["2026-07-01"], "close": [1.0]}},
+        "flow": {"BK0475": {"dates": ["2026-07-01"], "main_net_in": [1.0]}},
+        "sector_map": {"000001": {"sector": "801010", "name": "平安银行"}},
+    })
+    md.build_sector_cache(probe=p, beg="20260101", end="20260823",
+                          source="sw")
+    mixed = md._load_cache()
+    assert {"801010", "BK0475"} <= set(mixed["kline"])     # 生产路径真的混了
+    with pytest.raises(AssertionError, match="不同源"):
+        _assert_source_invariants(mixed)
+    # 同一份旧缓存走 --rebuild → kline/flow 一起清, 不变量恢复
+    md.build_sector_cache(probe=p, beg="20260101", end="20260823",
+                          source="sw", rebuild=True)
+    _assert_source_invariants(md._load_cache())
+
+
+class _HalfDeadSWAK(FakeSWAK):
+    """801030 的日K直接抛错(模拟单个行业取数失败), 801010 正常。"""
+
+    def index_hist_sw(self, symbol="", period="day"):
+        if symbol == "801030":
+            raise RuntimeError("模拟单行业取数失败")
+        return super().index_hist_sw(symbol, period)
+
+
+class _MixedSourceProbe:
+    """在已有东财 BK 的缓存上跑一次申万采集(用于复现 kline 混族)。"""
+
+    def __init__(self, cache):
+        md._save_cache(cache)                 # CACHE_PATH 已被用例改到 tmp
+
+    def fetch_sector_list(self):
+        return [{"code": "801010", "name": "农林牧渔"}]
+
+    def fetch_sector_kline(self, code, beg=None, end=None):
+        return [{"date": "2026-07-02", "close": 1005.0, "amount": 1.2}]
