@@ -36,10 +36,11 @@ def test_take_profit(acc):
     assert len(out) == 1 and out[0]["reason"] == "take_profit"
     sp = out[0]["price"]                    # 10.5×0.999=10.4895
     assert sp == round(10.5 * 0.999, 4)
-    amount = round(1000 * sp, 2)
-    fee = round(amount * 0.00076, 2)
-    assert out[0]["fee"] == fee
-    assert acc.state["cash"] == round(600000.0 + amount - fee, 2)
+    amount = round(1000 * sp, 2)            # 10489.5
+    # F2 卖出腿: 佣金 max(10489.5×万2.5, ¥5)=5(下限生效) + 过户 0.1049
+    # + 印花 5.2448 = 10.3496 → 10.35(与回测 prism/backtest.py 逐分同口径)
+    assert out[0]["fee"] == 10.35
+    assert acc.state["cash"] == round(600000.0 + amount - 10.35, 2)
     assert acc.state["holdings"] == []
     assert acc.state["trades"][-1]["side"] == "sell"
     # live_nav 同步(无持仓 → 纯现金)

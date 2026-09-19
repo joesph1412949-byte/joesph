@@ -2,10 +2,12 @@
 """模拟盘账目诚实性修复(F1~F4) — 全离线, 账本一律注入 tmp_path。
 
 - F1 收盘选股失败不占当日幂等键 → 同 slot 真的重试(不再"失败即整日零建仓")
-- F2 买卖双腿各收 ¥5 最低佣金(小额单恰为 5.0; 大额单仍按比例, 不被抬高)
+- F2 双腿佣金下限: 佣金 max(成交额×佣金率, ¥5) + 过户费(+卖出印花税) ——
+  与 prism/backtest.py 同一笔单腿费用逐分相等(见 test_fee_matches_backtest_*)
 - F3 撤单/失效流水在数据上不再冒充 "buy"(side=cancel/expire), _buyable 语义不变
 - F4 北交所 92/8/4 开头的 30% 涨跌停档补齐(跌停顺延判别性对照)
 """
+import inspect
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -13,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import pytest
 
+from prism import backtest
 from prism.paper import PaperAccount, _limit_ratio
 
 
@@ -62,16 +65,18 @@ def test_pick_screen_failure_does_not_consume_slot(tmp_path, monkeypatch):
 
 # --------------------------------------------------------------- F2
 def test_min_commission_floor_small_buy(tmp_path):
-    """F2: 1000 股 × 10.0 = 1 万 → 比例费 2.6 < 5 → 恰收 5.0(买入腿)。"""
+    """F2: 1000 股 × 10.0 = 1 万 → 佣金比例 2.5 < 5 → 佣金按下限 5,
+    **过户费按比例另计**(下限不覆盖它) → 5 + 0.1 = 5.1(同回测口径)。"""
     acc = _acc(tmp_path)
     done = acc._record_buy("600000", 1000, 10.0,
                            datetime(2026, 9, 2, 10, 0), "screen")
-    assert done["fee"] == 5.0
-    assert acc.state["cash"] == 1000000.0 - 10000.0 - 5.0
+    assert done["fee"] == 5.1
+    assert acc.state["cash"] == round(1000000.0 - 10000.0 - 5.1, 2)
 
 
 def test_min_commission_floor_small_sell(tmp_path):
-    """F2: 卖出腿同样有下限(1000×6.0×0.999 = 5994 → 比例 4.56 < 5 → 5.0)。"""
+    """F2: 卖出腿 = max(成交额×佣金率, 5) + 过户费 + 印花税。
+    1000×6.0×0.999 = 5994 → 5 + 0.05994 + 2.997 = 8.05694 → 8.06。"""
     acc = _acc(tmp_path)
     acc.state["holdings"].append({
         "code": "600000.SH", "shares": 1000, "cost": 6.0,
@@ -79,12 +84,12 @@ def test_min_commission_floor_small_sell(tmp_path):
     out = acc._execute_sell("600000.SH", 6.0, "take_profit",
                             now=datetime(2026, 9, 2, 10, 0))
     amount = round(1000 * round(6.0 * 0.999, 4), 2)          # 5994.0
-    assert out["fee"] == 5.0
-    assert acc.state["cash"] == round(1000000.0 + amount - 5.0, 2)
+    assert out["fee"] == 8.06
+    assert acc.state["cash"] == round(1000000.0 + amount - 8.06, 2)
 
 
 def test_min_commission_does_not_inflate_large_order(tmp_path):
-    """F2: 30 万买入 → 比例费 78.0 > 5, 不被下限抬高(与旧口径/回测同值)。"""
+    """F2: 30 万买入 → 佣金比例 75 > 5, 下限不触发 → 78.0(与旧口径/回测同值)。"""
     acc = _acc(tmp_path)
     done = acc._record_buy("600000", 30000, 10.0,
                            datetime(2026, 9, 2, 10, 0), "screen")
@@ -97,7 +102,68 @@ def test_min_commission_is_configurable_and_echoed(tmp_path):
     assert acc.min_commission == 3.0
     assert acc._record_buy("600000", 1000, 10.0,
                            datetime(2026, 9, 2, 10, 0),
-                           "screen")["fee"] == 3.0
+                           "screen")["fee"] == 3.1     # max(2.5, 3) + 过户 0.1
+
+
+# ---- F2 强一致性守卫: 与回测 prism/backtest.py 同一笔单腿费用**逐分相等** ----
+def _bt_cost_defaults():
+    """回测侧**真实**成本默认值(读真实签名默认值, 不重写常量)。"""
+    sig = inspect.signature(backtest.Backtester.__init__)
+    return {k: float(sig.parameters[k].default)
+            for k in ("fee_rate", "transfer_fee", "stamp_duty",
+                      "min_commission")}
+
+
+class _BtFloorStub:
+    """只喂 `_commission_floor` 真正用到的两个属性(不构造完整 Backtester,
+    但仍调用**回测的真实方法**)。"""
+
+    def __init__(self, fee_rate, min_commission):
+        self.fee_rate = fee_rate
+        self.min_commission = min_commission
+
+
+def _bt_floor(notional):
+    d = _bt_cost_defaults()
+    return backtest.Backtester._commission_floor(
+        _BtFloorStub(d["fee_rate"], d["min_commission"]), notional)
+
+
+def _bt_leg_fee(notional, sell):
+    """回测侧同笔单腿费用(元): 名义额×费率 + 佣金下限差额。
+
+    费率为回测 `_simulate_trade`(买) / `_simulate_equity` 卖出分支(卖)的内联
+    口径 —— 佣金 fee_rate 走**真实** `Backtester._commission_floor`
+    (= max(名义额×fee_rate, ¥5) − 名义额×fee_rate), 过户费/印花税按比例另计。
+    """
+    d = _bt_cost_defaults()
+    rate = d["fee_rate"] + d["transfer_fee"] \
+        + (d["stamp_duty"] if sell else 0.0)
+    return round(notional * rate + _bt_floor(notional), 2)
+
+
+# 佣金下限的临界点是 ¥20000(名义额×万2.5 = 5): 下方下限生效、上方纯比例,
+# 两侧各取样; 另取本账户真实单笔量级(30 万)与极端小额做端到端对照。
+_FEE_NOTIONALS = [2000.0, 6000.0, 19999.0, 20001.0, 30000.0, 300000.0,
+                  1000000.0]
+
+
+@pytest.mark.parametrize("sell", [False, True], ids=["buy", "sell"])
+@pytest.mark.parametrize("notional", _FEE_NOTIONALS)
+def test_fee_matches_backtest_leg_by_leg(tmp_path, notional, sell):
+    """F2 守卫: 同一笔单腿费用 paper 与回测**逐分相等**(两侧口径不许再漂移)。"""
+    acc = _acc(tmp_path)
+    amount = round(notional, 2)
+    assert acc._fee(amount, sell=sell) == _bt_leg_fee(amount, sell)
+
+
+def test_fee_constants_match_backtest_defaults(tmp_path):
+    """F2 守卫: 费率常量本身也必须与回测默认值一致(常量漂移也算口径漂移)。"""
+    acc = _acc(tmp_path)
+    d = _bt_cost_defaults()
+    assert (acc.fee_rate, acc.transfer_fee, acc.stamp_duty,
+            acc.min_commission) == (d["fee_rate"], d["transfer_fee"],
+                                    d["stamp_duty"], d["min_commission"])
 
 
 # --------------------------------------------------------------- F3

@@ -106,8 +106,9 @@ def test_tick_settle_after_close(tmp_path, monkeypatch):
     assert acc.state["settled_dates"] == ["2026-09-08"]
     assert len(out["settle"]["closed"]) == 1
     assert out["settle"]["closed"][0]["reason"] == "hold_expire"
-    # nav = 现金 + 卖出回款: 1e6 + 9790.2(=1000×9.8×0.999) - fee 7.44
-    assert out["settle"]["nav"] == 1009782.76
+    # nav = 现金 + 卖出回款: 1e6 + 9790.2(=1000×9.8×0.999) - fee 9.99
+    # (F2 卖出腿: 佣金 max(9790.2×万2.5, ¥5)=5 + 过户 0.0979 + 印花 4.8951)
+    assert out["settle"]["nav"] == 1009780.21
     # 幂等: 二次不重复结算
     out2 = d.tick_once(now=datetime(2026, 9, 8, 15, 10))
     assert out2["settle"] is None

@@ -425,18 +425,24 @@ class PaperAccount:
                     filled.append(p["code"])
         return {"filled": filled, "canceled": canceled}
 
-    def _fee(self, amount, rate):
-        """单腿费用(元): max(成交额×费率, min_commission)。
+    def _fee(self, amount, sell=False):
+        """单腿费用(元): 佣金 + 过户费 (+ 卖出印花税)。
 
-        F2: 买入腿费率 = 佣金+过户费, 卖出腿 = 佣金+印花税+过户费, **双腿各自**
-        至少收 min_commission(¥5)。口径与回测 prism/backtest.py 对齐 —— 同源
-        (Vibe-Trading china_a.calc_commission, MIT)的"每次成交取
-        max(名义额×fee_rate, ¥5)"。差异披露: 回测的 _commission_floor 只给
-        **佣金腿**补差额(下限之上还叠过户费/印花税, 小额单实付 >5), 这里把下限
-        兜在**总费用**上(小额单恰为 ¥5, 最多低 ~0.5 元); 成交额 ≥ ¥6.6k(卖)
-        /¥19.3k(买) 后两者逐分一致, 而本账户单笔 ≈ 净值 15~30%(15~30 万),
-        恒在一致区。"""
-        return round(max(amount * float(rate), self.min_commission), 2)
+        F2 口径与回测 prism/backtest.py **逐分一致**(同源 Vibe-Trading
+        china_a.calc_commission, MIT): 只有**佣金腿**有 ¥5 最低
+        `max(成交额×fee_rate, min_commission)`; 过户费/印花税按比例另计,
+        下限不覆盖它们。回测侧的等价写法是 `_commission_floor()` 只补
+        "佣金下限与比例之差"(买在 _trade_notional, 卖在 _simulate_equity
+        卖出分支从回款里扣), 过户费/印花税在 `_simulate_trade` 里按比例加上
+        —— 本函数是同一公式的合并写法。守卫测试:
+        prism/tests/test_paper_honesty.py::test_fee_matches_backtest_leg_by_leg
+        (跨佣金下限临界点 ¥20000 双侧 × 买/卖, 逐分相等)。
+        """
+        fee = max(amount * self.fee_rate, self.min_commission) \
+            + amount * self.transfer_fee
+        if sell:
+            fee += amount * self.stamp_duty
+        return round(fee, 2)
 
     def _record_buy(self, code, shares, price, now, reason):
         """买入记账内核(临界段内): 扣款 + holdings + 流水, 返回成交 dict; 失败 None。
@@ -448,7 +454,7 @@ class PaperAccount:
         st = self.state
         nav = self._nav_estimate()            # 记账前净值(必须先于扣款)
         amount = round(shares * price, 2)
-        fee = self._fee(amount, self.fee_rate + self.transfer_fee)
+        fee = self._fee(amount)               # 买入腿: 佣金(¥5 下限)+过户费
         cash_after = round(st["cash"] - amount - fee, 2)
         if cash_after < 0:
             return None
@@ -490,7 +496,13 @@ class PaperAccount:
         失效), 绝不再写 "buy" —— 旧语义下 `_buyable` 之外任何按 side 读流水的
         消费者(面板"交易流水"表)都会把 9 笔撤单显示成 9 笔买入。真实成交只由
         _record_buy/_execute_sell 写 side=buy/sell, 且带 amount/fee/cash_after;
-        未成交流水一律不带这三个字段 → 两种行在数据上可区分。"""
+        未成交流水一律不带这三个字段 → 两种行在数据上可区分。
+
+        ponytail: 旧的 9 条 side="buy" 脏流水**不做追溯迁移**(控制者 2026-09-19
+        裁定): 那是 09-03 "当时确实记成了 buy" 的历史事实记录, 改写历史反而破坏
+        "账本是历史真相"的性质; 面板对历史 9 条继续显示为买入, 新语义只对新流水
+        生效。若哪天确需迁移, 应作为一次显式的、留痕的数据订正单独做, 不在本
+        写路径里顺手改。"""
         snap = self._snapshot_state()
         try:
             st = self.state
@@ -594,8 +606,7 @@ class PaperAccount:
         h = self.state["holdings"][idx]
         sell_price = round(price * (1 - self.slippage), 4)
         amount = round(h["shares"] * sell_price, 2)
-        fee = self._fee(amount, self.fee_rate + self.stamp_duty
-                        + self.transfer_fee)
+        fee = self._fee(amount, sell=True)    # 卖出腿: 佣金(¥5 下限)+过户+印花
         cash_after = round(self.state["cash"] + amount - fee, 2)
         d = now.strftime("%Y-%m-%d")
         ts = now.strftime("%Y-%m-%dT%H:%M:%S")
