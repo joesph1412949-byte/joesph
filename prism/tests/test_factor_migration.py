@@ -613,19 +613,26 @@ def test_removed_factors_absent():
 
 
 def test_full_factor_v1_loads():
-    """验收: full_factor_v1 四层 36 因子可加载且因子全部注册。"""
+    """验收: full_factor_v1 四层 35 因子可加载且因子全部注册。
+
+    2026-09-19: S2(量价堆积密度)已从势能板块层**摘除**(全窗口 0 命中, 改 T-1
+    窗口后仍 0/492 —— 两子条件在涨停池宇宙量级互斥; A/B 同窗回测逐项一致),
+    故评分 28→27、合计 36→35、cap 9.3333→9.0。S2 因子本身**仍注册**(未被删),
+    只是不再进本策略; 见 `docs/reports/回测全因子复活对比_20260916.md` §6.2。
+    """
     from prism.engine import load_strategy
     s = load_strategy(Path(__file__).parent.parent / "strategies"
                       / "full_factor_v1.json")
     assert s["id"] == "full_factor_v1"
     fids = [f for m in s["scoring_models"] for f in m["factors"]]
     gate = s["market_gate"]["factors"]
-    assert len(fids) == 28            # 9 首板 + 8 妖股 + 11 势能板块
+    assert len(fids) == 27            # 9 首板 + 8 妖股 + 10 势能板块(原 11, 摘 S2)
     assert len(gate) == 8             # N1-N8
-    assert len(set(fids) | set(gate)) == 36   # 评分与门控无重叠, 合计 36
+    assert len(set(fids) | set(gate)) == 35   # 评分与门控无重叠, 合计 35
+    assert "S2" not in fids, "S2 已于 2026-09-19 摘除(0 命中 + A/B 无差异)"
     assert all(f in reg.FACTORS for f in set(fids) | set(gate))
     comp = s["composite"]
-    assert comp["mode"] == "average" and abs(comp["cap"] - 9.3333) < 1e-9
+    assert comp["mode"] == "average" and abs(comp["cap"] - 9.0) < 1e-9
     assert "weights" not in comp
     ex = s["execution"]
     assert ex["top_n"] == 5 and ex["pct"] == 0.15

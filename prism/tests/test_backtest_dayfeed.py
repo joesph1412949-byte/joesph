@@ -668,3 +668,39 @@ def test_build_day_feed_single_day_io_failure_does_not_kill_run(monkeypatch):
     assert feed(CAL[3]) is None           # 当天降级, 不抛
     assert feed(CAL[3]) is None           # 仍可再试(失败不入缓存)
     assert feed(CAL[2]) is None
+
+
+# ---------------- ⑬ 日K契约塌陷披露(无 volume 的兜底行) ----------------
+
+def test_close_only_kline_contract_is_disclosed(monkeypatch):
+    """⑬ 老缓存兜底只有 (date, close) → volume 缺失, 必须在 data_notes 里点名。
+
+    2026-09-19 S2 诊断附带发现: `qmt_kline_feed` 的 close-only 兜底**非空** ⇒
+    联网 OHLCV 回退永不被走到, F5/Y3/S2/S3/M6/M7 对该股静默失效。若不披露,
+    读者只会看到"某因子命中率骤降"却找不到原因。
+    """
+    cli, calls = _lazy_io(monkeypatch)
+
+    def fake_klines(codes):
+        return {c: (_kline2(KLINE_CLOSES, start=CAL[0]) if c == "600000.SH"
+                    else _kline6(KLINE_CLOSES, start=CAL[0]))
+                for c in codes}
+
+    monkeypatch.setattr(cli, "_batch_klines", fake_klines)
+    feed = cli.build_day_feed(CAL[0], CAL[3])
+    feed(CAL[3])
+    notes = list(getattr(feed, "data_notes", []) or [])
+    hit = [n for n in notes if n.startswith("日K契约: ")]
+    assert len(hit) == 1, notes
+    assert "只有收盘价" in hit[0] and "F5/Y3/S2/S3/M6/M7" in hit[0]
+    num, den = hit[0].split()[1].split("/")      # 形如 "2/5"
+    assert 1 <= int(num) <= int(den), hit[0]
+
+
+def test_kline_note_absent_when_all_rows_have_volume(monkeypatch):
+    """⑬ 全是 6 元组(有 volume) → 不许出现这条说明(避免噪音)。"""
+    cli, calls = _lazy_io(monkeypatch)
+    feed = cli.build_day_feed(CAL[0], CAL[3])
+    feed(CAL[3])
+    notes = list(getattr(feed, "data_notes", []) or [])
+    assert not [n for n in notes if n.startswith("日K契约: ")], notes

@@ -22,7 +22,7 @@ except Exception:
 
 from shared.common import limit_ratio_for_code, with_market_suffix
 from prism import bt_intraday
-from prism.backtest import Backtester, _parse_kline_date
+from prism.backtest import Backtester, _kline_close, _parse_kline_date
 from prism.engine import load_strategy
 from prism.strategies import STRATEGIES_DIR
 import prism.factors  # noqa: F401  触发因子库扫描注册
@@ -483,7 +483,10 @@ def _day_payload(d, pools, cal, klines, floats, indices):
         rows = _upto(klines.get(code), d8)
         if len(rows) < 2:
             continue        # 无昨收 → 算不出涨停价, 宁缺勿假
-        close, prev_close = rows[-1][4], rows[-2][4]
+        # 契约三档(与 _kline_close/_stock_ctx 同一套规则): 6 元组的 [4] 是收盘,
+        # 而老缓存兜底的 2/3 元组里收盘在 [1] —— 硬取 [4] 会 IndexError, 让
+        # **整天**的按日上下文装配失败并静默退回静态参数(2026-09-19 修)。
+        close, prev_close = _kline_close(rows[-1]), _kline_close(rows[-2])
         if not close or not prev_close or close <= 0 or prev_close <= 0:
             continue
         if code not in today_codes and rows[-1][0] != d8:
@@ -672,13 +675,39 @@ def _refresh_intra_note(notes, stats):
     """
     note = ("1m特征: 个股日覆盖 %d/%d (缓存缺失静默降级 → F2/F3 fail-open 0; "
             "缺 one_word 时买入不拦(未知), 计入 filter_stats.one_word_unknown; "
-            "早于 2025-09-16 无 1m 数据(QMT 保留边界); 另有 20260615~18 共 4 天"
-            "为采集缺口, 可补采: python -m backtest.cli --build-intraday)"
+            "早于 2025-09-16 无 1m 数据(QMT 保留边界); 其余缺口为个别个股无 1m "
+            "数据, 可补采: python -m backtest.cli --build-intraday)"
             % (stats["got"], stats["asked"]))
     if notes:
         notes[0] = note
     else:
         notes.append(note)
+
+
+def _refresh_kline_note(notes, stats):
+    """日K契约披露(单条, 滚动态覆盖自己的槽位)。
+
+    兜底链里"老 zt 缓存"只有 (date, close) → volume 缺失, 由 backtest 占位 1.0,
+    F5/Y3/S2/S3/M6/M7 这些**量能/形态因子**对该股静默失效。若不披露, 读者只会
+    看到"某因子命中率骤降"却找不到原因(2026-09-19 S2 诊断附带发现:
+    `qmt_kline_feed` 的 close-only 兜底非空 ⇒ 联网 OHLCV 回退永不被走到)。
+    close_only == 0 时不写这条(避免噪音)。
+    """
+    if not stats["close_only"]:
+        for i, x in enumerate(notes):
+            if x.startswith("日K契约: "):
+                notes.pop(i)
+                break
+        return
+    note = ("日K契约: %d/%d 只股票只有收盘价(老缓存兜底, 无 volume) → "
+            "F5/Y3/S2/S3/M6/M7 对这些股票的成交量/形态判定失效(量能因子不宜"
+            "据此评估); 补数据需 QMT 本地日线" % (stats["close_only"],
+                                                stats["codes"]))
+    for i, x in enumerate(notes):
+        if x.startswith("日K契约: "):
+            notes[i] = note
+            return
+    notes.append(note)
 
 
 def build_day_feed(start, end, *, use_intraday=False, progress=None,
@@ -727,6 +756,7 @@ def build_day_feed(start, end, *, use_intraday=False, progress=None,
     # 惰性缓存的全部状态: 池/日线/股本都按需取, 取过就记(空池、无数据也不重取)
     cache = {"pools": {}, "klines": {}, "floats": {}, "ctx": {},
              "tried_k": set(), "tried_f": set(), "done": 0,
+             "kline": {"codes": 0, "close_only": 0},
              "intra": {"asked": 0, "got": 0},
              "fund": {"asked": 0, "days": 0, "net_days": 0, "net_got": 0,
                       "calc_got": 0,
@@ -747,8 +777,16 @@ def build_day_feed(start, end, *, use_intraday=False, progress=None,
     def _need_klines(codes):
         todo = [c for c in codes if c and c not in cache["tried_k"]]
         if todo:
-            cache["klines"].update(_batch_klines(todo))
+            got = _batch_klines(todo)
+            cache["klines"].update(got)
             cache["tried_k"].update(todo)   # 取过(含"确实没数据")才记账
+            # 契约塌陷披露: 只有 (date, close) 的兜底行 = 无 volume(见 _refresh_kline_note)
+            for code in todo:
+                rows = got.get(code) or []
+                cache["kline"]["codes"] += 1
+                if rows and len(rows[0]) <= 2:
+                    cache["kline"]["close_only"] += 1
+            _refresh_kline_note(data_notes, cache["kline"])
         return cache["klines"]
 
     def _need_floats(codes):

@@ -1,7 +1,7 @@
 {
   "id": "full_factor_v1",
   "name": "全因子四层 v1",
-  "description": "36因子四层框架(环境门控+首板+妖股+势能板块)。惯例: 今后新增因子默认归入对应层组合进本策略(特殊要求除外)。2026-09-03 起为模拟盘主力策略。",
+  "description": "35因子四层框架(环境门控8+首板9+妖股8+势能板块10)。惯例: 今后新增因子默认归入对应层组合进本策略(特殊要求除外)。2026-09-03 起为模拟盘主力策略。2026-09-19: S2(量价堆积密度)已从势能板块层摘除 —— 全窗口 16524 次评估 0 命中, 且改 T-1 窗口后仍 0/492(其两子条件在涨停池宇宙量级互斥, 见 docs/reports/回测全因子复活对比_20260916.md §6.2); A/B 同窗回测逐项一致(1067 笔/315.20%/sharpe 3.02), 证明摘除无行为影响。",
   "market_gate": {"model": "node", "threshold": 3,
                   "factors": ["N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8"]},
   "scoring_models": [
@@ -10,10 +10,10 @@
     {"id": "monster", "name": "妖股", "weight": 0.25,
      "factors": ["Y1", "Y2", "Y3", "Y4", "Y5", "Y6", "Y7", "Y8"]},
     {"id": "momentum", "name": "势能板块", "weight": 0.15,
-     "factors": ["M6", "M7", "S2", "S3", "S4", "S6",
+     "factors": ["M6", "M7", "S3", "S4", "S6",
                  "SEC1", "SEC2", "SEC3", "SEC4", "SEC6"]}
   ],
-  "composite": {"mode": "average", "cap": 9.3333},
+  "composite": {"mode": "average", "cap": 9.0},
   "filters": {"candidate_min_model": 3, "environment_threshold": 3},
   "sell_rules": {"take_profit_pct": 0.15, "stop_loss_pct": 0.05,
                  "max_hold_days": 5},
