@@ -16,6 +16,11 @@
                 重启重跑不产生新文件; 桥端 per-day dedup 兜底。
   #8 T+1        当日买入不卖: exit_rules enforce_t1 + 券商 can_use_volume
                 双保险; 跌停日顺延(exit_rules.is_limit_down)。
+  #9 开盘闸门   发单前判跌停(昨收 × (1−分板幅度), 权威 shared.common): **跌停
+                开盘/窗口内砸到跌停 → 跳过该只**(否则挂在涨停价上的限价买单会
+                立即成交在跌停板; 判据同 prism/paper.py::execute_open_buys)。
+                行情缺失时不判、照发(沿用本模块"行情 fail-open"口径; 改 fail-closed
+                会连 rehearsal 开盘预览一起挡掉)。
 
 安全边界(与 prism/paper_daemon.py §8 同款):
   - **默认 dry_run=True**: 只记录/日志, 零副作用; 显式 --live 才落信号;
@@ -37,7 +42,7 @@ import logging
 from datetime import date, datetime
 from pathlib import Path
 
-from shared.common import STATE_DIR, atomic_write, next_weekday
+from shared.common import STATE_DIR, atomic_write, limit_ratio_for_code, next_weekday
 from shared.exit_rules import PositionBook, is_limit_down
 from prism import schedule, trader
 from prism.live_account import LiveAccount, _num, calc_buy_volume
@@ -334,21 +339,47 @@ class LiveDaemon:
         plans = [p for p in st["plans"] if p.get("for_date") == d]
         if not plans:
             return
+        ticks = self._ticks([p["code"] for p in plans])
+        ready = []
+        for p in plans:
+            code = p["code"]
+            t = ticks.get(code) or {}
+            prev = _num(t.get("lastClose"))        # 跌停价的唯一基准
+            px = min([x for x in (_num(t.get("open")), _num(t.get("lastPrice")))
+                      if x > 0], default=0.0)
+            if prev <= 0 or px <= 0:
+                # 行情缺失 → **不判跌停, 按现状发**(模块既有口径"行情 fail-open";
+                # 改成 fail-closed 会把 rehearsal 的开盘预览一并挡掉 —— 见
+                # prism/rehearsal.py::_live_step: 开盘步不注入 tick)。
+                LOG.warning("开盘发单: %s 拿不到行情(前收/价格缺) → 未判跌停, 照发",
+                            code)
+            else:
+                low = round(prev * (1 - limit_ratio_for_code(code)), 2)
+                if px <= low + 0.001:
+                    # 跌停开盘(或窗口内砸到跌停) → 保护跳过: 挂在涨停价上的限价
+                    # 买单会立即成交在跌停板(判据同 paper.execute_open_buys)。
+                    out["skipped"].append("limit_down_open:%s" % code)
+                    LOG.warning("开盘发单: %s 开盘/现价 %.2f ≤ 跌停价 %.2f "
+                                "→ 跳过(今日不买)", code, px, low)
+                    continue
+            ready.append(p)
         sigs = [trader.build_signal(
             code=p["code"], action="BUY", price=p["price"],
             volume=p["volume"],
             order_id="BUY_%s_%s" % (d.replace("-", ""), _code_tag(p["code"])),
             strategy_id=p.get("strategy_id") or "live",
-            composite=p.get("composite")) for p in plans]
+            composite=p.get("composite")) for p in ready]
         n = self._emit(sigs, "buys", out)
         if self.dry_run:
             LOG.info("开盘发单(DRY-RUN): 将发 %d 只, 未落盘", len(sigs))
             return
-        book = self._load_positions()
-        for p in plans:
-            book.add(p["code"], p.get("name") or p["code"],
-                     buy_price=p["price"], buy_date=d, volume=p["volume"])
-        self._save_positions(book)
+        if ready:
+            book = self._load_positions()
+            for p in ready:
+                book.add(p["code"], p.get("name") or p["code"],
+                         buy_price=p["price"], buy_date=d, volume=p["volume"])
+            self._save_positions(book)
+        # 跌停跳过的计划一并消费(今日不买, 与 paper 的 "跌停开盘" skip 同款)
         st["plans"] = [p for p in st["plans"] if p.get("for_date") != d]
         LOG.info("开盘发单: %d 只写入 pending(已记账, 待券商对账校正)", n)
 

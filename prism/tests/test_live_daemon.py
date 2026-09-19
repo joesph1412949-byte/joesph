@@ -378,6 +378,20 @@ def _seed_plan(tmp_path, code="600000.SH", price=10.55, vol=14200,
     _seed_state(tmp_path, [_plan(code, price, vol, for_date)])
 
 
+def _open_tick(open_px=None, last=None, last_close=None):
+    """开盘窗口 tick 替身(只带 daemon 判定用得上的三个价格字段)。
+
+    None = 该字段缺失(用来构造"行情半残/前收缺失"的输入缺失态)。"""
+    t = {}
+    if open_px is not None:
+        t["open"] = open_px
+    if last is not None:
+        t["lastPrice"] = last
+    if last_close is not None:
+        t["lastClose"] = last_close
+    return lambda codes: {c: dict(t) for c in codes}
+
+
 def test_open_send_writes_signal_and_records_position(tmp_path):
     _seed_plan(tmp_path)
     d = _daemon(tmp_path, dry_run=False)
@@ -405,6 +419,86 @@ def test_open_send_dry_run_has_no_side_effects(tmp_path):
     assert not (tmp_path / "positions.json").exists()
     # 计划保留(演练无副作用, 可随时切 --live)
     assert len(_read_json(tmp_path / "live_state.json")["plans"]) == 1
+
+
+# ---------------- 开盘发单的"跌停开盘跳过"闸门(实盘侧缺口) ----------------
+
+def test_open_send_skips_limit_down_open(tmp_path):
+    """开盘即跌停(开盘价=跌停价) → 不发 BUY、不记账。
+
+    paper.execute_open_buys 同类闸门: `open_px <= low + 0.001` → skipped 跌停开盘。
+    缺这道闸门时, 挂在涨停价上的限价买单会立即成交在跌停板。"""
+    _seed_plan(tmp_path)                     # 计划价 10.55, 昨收 10.0 → 跌停价 9.0
+    d = _daemon(tmp_path, dry_run=False, ticks_fn=_open_tick(9.0, 9.0, 10.0))
+    out = d.tick_once(TUE_OPEN)
+    assert out["action"] == "open_send" and out["buys"] == []
+    assert "limit_down_open:600000.SH" in out["skipped"]
+    assert _pending(tmp_path) == []
+    assert not (tmp_path / "positions.json").exists()
+    # 跌停开盘 = 今日不买(与 paper 同款: 计划被消费, 不在窗口内反复重试)
+    assert _read_json(tmp_path / "live_state.json")["plans"] == []
+
+
+def test_open_send_skips_limit_down_at_rounded_limit_price(tmp_path):
+    """边界: 昨收 10.55 → 交易所跌停价 9.50(四舍五入到分) ⇒ 9.50 必须判跌停。
+
+    判别力: exit_rules.is_limit_down 用未取整的 10.55×0.9+0.001 = 9.496, 会把
+    9.50 判成"非跌停"; paper 用 round(prev×(1−ratio), 2)+0.001 ⇒ 本用例卡取整口径。"""
+    _seed_plan(tmp_path, price=10.55)
+    d = _daemon(tmp_path, dry_run=False, ticks_fn=_open_tick(9.5, 9.5, 10.55))
+    out = d.tick_once(TUE_OPEN)
+    assert "limit_down_open:600000.SH" in out["skipped"]
+    assert out["buys"] == [] and _pending(tmp_path) == []
+
+
+def test_open_send_skips_when_last_price_hits_limit_down(tmp_path):
+    """开盘没跌停、窗口内砸到跌停 → 同样不发(挂涨停价的买单会成交在跌停板)。"""
+    _seed_plan(tmp_path)
+    d = _daemon(tmp_path, dry_run=False, ticks_fn=_open_tick(9.6, 9.0, 10.0))
+    out = d.tick_once(TUE_OPEN)
+    assert "limit_down_open:600000.SH" in out["skipped"]
+    assert out["buys"] == [] and _pending(tmp_path) == []
+
+
+def test_open_send_uses_board_limit_ratio(tmp_path):
+    """20cm 创业板: 昨收 10.0 → 跌停 8.0; 开 8.5(−15%) 不是跌停 → 照发。
+
+    判别力: 硬编 ±10% 会把这只误杀(paper 的分板系数口径)。"""
+    _seed_plan(tmp_path, code="300001.SZ", price=8.8)
+    d = _daemon(tmp_path, dry_run=False, ticks_fn=_open_tick(8.5, 8.5, 10.0))
+    out = d.tick_once(TUE_OPEN)
+    assert out["skipped"] == [] and len(out["buys"]) == 1
+    sig = json.loads(_pending(tmp_path)[0].read_text(encoding="utf-8"))
+    assert sig["order_id"] == "BUY_20260915_300001SZ"
+    assert sig["price"] == 8.8
+
+
+def test_open_send_partial_skip_other_still_sent(tmp_path):
+    """一跌停一正常 → 只发正常那只(不因一只拖死整批)。"""
+    _seed_state(tmp_path, [_plan("600000.SH", 10.55, 14200),
+                           _plan("000001.SZ", 20.0, 3100)])
+    d = _daemon(tmp_path, dry_run=False, ticks_fn=lambda codes: {
+        "600000.SH": {"open": 9.0, "lastPrice": 9.0, "lastClose": 10.0},
+        "000001.SZ": {"open": 19.8, "lastPrice": 19.9, "lastClose": 20.0}})
+    out = d.tick_once(TUE_OPEN)
+    assert [s["stock_code"] for s in out["buys"]] == ["000001.SZ"]
+    assert "limit_down_open:600000.SH" in out["skipped"]
+    assert len(_pending(tmp_path)) == 1
+    assert set(_read_json(tmp_path / "positions.json")) == {"000001.SZ"}
+
+
+def test_open_send_without_quote_still_sends(tmp_path):
+    """行情缺失 → 不判跌停, 照发(**有意保留的现状**, 非漏判)。
+
+    本模块口径是"行情 fail-open / 决策 fail-closed(账户事实)"; 若把这条改成
+    fail-closed(不发单), `prism/rehearsal.py::_live_step` 的开盘步**不注入 tick**
+    ⇒ 回放预览会整段变空(实测 test_rehearsal_never_writes_signals 变红)。要收
+    紧成 fail-closed, 先让回放的开盘步注入 tick(那是另一个文件的事)。"""
+    _seed_plan(tmp_path)                     # 假 provider 的 ds 返回 {} = 行情链路没数据
+    d = _daemon(tmp_path, dry_run=False)
+    out = d.tick_once(TUE_OPEN)
+    assert len(out["buys"]) == 1 and len(_pending(tmp_path)) == 1
+    assert _read_json(tmp_path / "live_state.json")["plans"] == []
 
 
 def test_stale_plan_discarded(tmp_path):
