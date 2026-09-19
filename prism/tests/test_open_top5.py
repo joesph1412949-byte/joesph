@@ -19,8 +19,7 @@ STRATEGY = {"market_gate": {"factors": ["N1"], "threshold": 1},
             "sell_rules": {"take_profit_pct": 0.15, "stop_loss_pct": 0.05,
                            "max_hold_days": 5},
             "execution": {"mode": "next_open_topn", "top_n": 2, "pct": 0.15,
-                          "open_window": "09:26-09:35", "pick_slot": "15:05",
-                          "one_word_fallback": "queue"}}
+                          "open_window": "09:26-09:35", "pick_slot": "15:05"}}
 
 
 class FakeProvider:

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """策略"声明了却不生效"的接线测试(2026-09-19 批)。
 
-三处键, 每处都注明判别力(这条能抓到什么错):
+四处键, 每处都注明判别力(这条能抓到什么错):
   A. execution.pick_slot / execution.open_window —— 改前 prism/schedule.py:39-40
      是**硬编码**常量: 改 JSON 不生效, 也不报错(配置看着被尊重, 实际被忽略)。
      现在 schedule 在 import 时走 engine.resolve_strategy 解析(与守护/引擎同一 loader)。
@@ -11,6 +11,12 @@
   C. filters.environment_threshold —— 与 market_gate.threshold 是同一个数
      (engine.validate_strategy_payload 由同一个 gt 写出两份), 全仓零读取点 ⇒
      停止声明; 历史文件仍带该键时必须能读(忽略而非报错)。
+  D. execution.one_word_fallback —— 桥(qmt/bridge/signal_bridge_real.py)的
+     ACTION_TO_OP 只有 BUY/SELL(**没有撤单通道**), paper 的一字板腿是**无条件**
+     排队(create_pending_buy/check_pending_buys 不读该键, 也没有"跳过"实现), 且
+     语义不同(实盘计划价 = **前一日**涨停价, 次日真一字板时那张低位限价单根本不
+     成交) ⇒ 它是**描述无条件行为的死声明**, 停止声明(留着会误导"实盘也能排队打板");
+     历史文件仍带该键(含垃圾值)时必须能读、行为不变。
 
 离线: 篡改用例在 tmp 目录造策略文件 + 改 engine.STRATEGIES_DIR, **不碰**真实
 策略文件; 不联网、不连 QMT、不写 D:/QMT_SIGNALS。
@@ -252,3 +258,43 @@ def test_legacy_json_still_carrying_the_key_loads_fine(tmp_path):
     p = tmp_path / "legacy_dup_key.json"
     p.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
     assert engine.load_strategy(p)["filters"]["environment_threshold"] == 99
+
+
+# ---------------- D. execution.one_word_fallback: 停止声明 ----------------
+
+def test_shipped_strategies_stop_declaring_one_word_fallback():
+    """判别力: 随仓策略都不再声明 execution.one_word_fallback —— 见文件头 D 段:
+    桥没有撤单通道 + paper 的一字板腿无条件排队(不读该键) + 实盘计划价是前一日
+    涨停价 ⇒ 它只是描述无条件行为的死声明, 留着会误导"实盘也能排队打板"。"""
+    files = [p for p in sorted(REAL.glob("*.json"))
+             if not p.name.startswith(".")]
+    assert files, "策略目录里没有策略?"
+    for p in files:
+        assert "one_word_fallback" not in (_doc(p).get("execution") or {}), p.name
+
+
+@pytest.mark.parametrize("bogus", ["cancel", "skip", 0, None, {"x": 1}])
+def test_legacy_one_word_fallback_is_ignored_not_validated(tmp_path, bogus):
+    """兼容旧 JSON(硬要求): 历史文件仍带该键(**含垃圾值**)必须能正常加载、行为不变。
+    全仓零读取点 ⇒ 不校验、不报错、不参与任何判定。
+    判别力: 加载结果与"不带该键"的**同一份策略**逐字段相等(只多出这一个不被读的
+    键), 取值原样透传不被改写 —— 这条钉的是"静默忽略"而不是"悄悄纠正"。"""
+    clean = _doc(REAL / "full_factor_v1.json")
+    clean["execution"].pop("one_word_fallback", None)
+    doc = json.loads(json.dumps(clean))          # 兼容性只取决于 loader, 不依赖随仓值
+    doc["execution"]["one_word_fallback"] = bogus
+    p = tmp_path / "legacy_one_word.json"
+    p.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+    loaded = engine.load_strategy(p)
+    assert loaded["execution"].pop("one_word_fallback") == bogus
+    assert loaded == clean
+
+
+def test_shipped_strategies_pass_the_declared_key_lint():
+    """判别力(复生防线): 随仓策略声明的**每个**键都必须有生产读取点 —— lint 一报出
+    未消费键(又有人声明"只写不读"的键)这条就红。本批删掉 one_word_fallback 的收口,
+    不改 lint 的判定逻辑, 只钉它的结论。"""
+    from prism import strategy_lint as sl
+    bad = [(r["strategy"], [e["key"] for e in r["unconsumed"]])
+           for r in sl.lint_all() if r["unconsumed"]]
+    assert bad == [], bad
