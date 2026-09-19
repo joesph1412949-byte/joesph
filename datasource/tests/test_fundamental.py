@@ -226,6 +226,81 @@ def test_f7_history_fetch_error_fail_open():
     assert "F7" not in out
 
 
+# ---------- R1: 空池不占 F7 窗口配额, 全空窗口 fail-open(2026-09-19 修复) ----------
+# 真打东财 getTopicZTPool 实测(只读): 非交易日/超保留期返回**空列表**而非 null ——
+# 20260911(周五)=40 家 / 20260912(周六)=0 家 / 20260913(周日)=0 家 / 20260820(超期)=0 家。
+# 修复前 `_hybk_history` 只判 `pool is None`, 空池照样吃掉 RECENT_DAYS-1=4 的配额
+# → 周一 asof 实际只看 0911/0910 两个交易日 → 窗口偏窄 → F7 假命中 1。
+MON = "20260914"                      # 周一(缓存/请求键为 YYYYMMDD)
+_ASOF_MON = date(2026, 9, 14)
+
+
+def test_hybk_history_empty_pools_do_not_consume_window():
+    """0909(周三)出现过的题材落在"近 4 个交易日"窗口内 → 不新颖 → F7=0。
+
+    修复前: 周日/周六各吃一个配额 → 窗口只剩 0911/0910 → 同题材被判"首次出现" → F7=1。
+    """
+    pool_by_date = {
+        MON: [_pool_row("000001", "旧题材C")],       # 今日池: 该股题材
+        "20260913": [],                              # 周日: 空池 → 不占配额
+        "20260912": [],                              # 周六: 空池 → 不占配额
+        "20260911": [_pool_row("999999", "旧题材A")],
+        "20260910": [_pool_row("999999", "旧题材B")],
+        "20260909": [_pool_row("999999", "旧题材C")],
+    }
+    http = FakeHTTP(_base_routes(pool_by_date=pool_by_date))
+    f = FundamentalFeed(http_get=http, cache_path=None)
+    out = f.compute_for_stock("000001.SZ", asof=_ASOF_MON)
+    assert out["F7"]["score"] == 0, \
+        "窗口被周末吃掉 → 4 个交易日前的题材被误判新颖(F7 假命中)"
+
+
+def test_hybk_history_window_spans_four_trading_days_after_weekend():
+    """R2 正向对照: 空池不占配额后, 周一 asof 的窗口 = 最近 4 个**有数据**的交易日。"""
+    pool_by_date = {
+        "20260913": [],
+        "20260912": [],
+        "20260911": [_pool_row("999999", "旧题材A")],
+        "20260910": [_pool_row("999999", "旧题材B")],
+        "20260909": [_pool_row("999999", "旧题材C")],
+        "20260908": [_pool_row("999999", "旧题材D")],
+        "20260907": [_pool_row("999999", "旧题材E")],   # 第 5 个交易日: 超出窗口, 不收
+    }
+    f = FundamentalFeed(http_get=FakeHTTP(_base_routes(pool_by_date=pool_by_date)),
+                        cache_path=None)
+    assert f._hybk_history(_ASOF_MON) == {"旧题材A", "旧题材B", "旧题材C", "旧题材D"}
+
+
+def test_hybk_history_all_empty_window_fail_open():
+    """整个窗口一个非空池都没有(超保留期/接口整体异常) → F7 必须 fail-open。
+
+    修复前: hist=set() → 池内所有题材都判"新颖" → F7 对全池恒 1(假命中)。
+    修复后: 抛异常 → compute_for_stock 捕获 → F7 缺键 = **未评估**(回落手填),
+    且空历史集合绝不落缓存。
+    """
+    pool_by_date = {MON: [_pool_row("000001", "任意题材")]}   # 今日有池, 历史日全空/缺失
+    f = FundamentalFeed(http_get=FakeHTTP(_base_routes(pool_by_date=pool_by_date)),
+                        cache_path=None)
+    out = f.compute_for_stock("000001.SZ", asof=_ASOF_MON)
+    assert "F7" not in out, "历史窗口全空 → 绝不能恒判'新颖'(F7 假命中)"
+    assert not [k for k in f._cache if k.startswith("hybk_history:")], \
+        "空历史集合绝不落缓存(否则后续全池继续保持假命中)"
+
+
+def test_hybk_history_counts_only_data_days_on_normal_week():
+    """R2 零回归: 正常一周(无空池)窗口长度不变 —— 仍是最近 4 个交易日。"""
+    pool_by_date = {
+        dk(1): [_pool_row("999999", "旧题材A")],
+        dk(2): [_pool_row("999999", "旧题材B")],
+        dk(3): [_pool_row("999999", "旧题材C")],
+        dk(4): [_pool_row("999999", "旧题材D")],
+        dk(5): [_pool_row("999999", "旧题材E")],   # 第 5 个交易日: 超出窗口, 不收
+    }
+    f = FundamentalFeed(http_get=FakeHTTP(_base_routes(pool_by_date=pool_by_date)),
+                        cache_path=None)
+    assert f._hybk_history() == {"旧题材A", "旧题材B", "旧题材C", "旧题材D"}
+
+
 # ---------- Y7 游资现身(龙虎榜) ----------
 def test_y7_dragon_tiger_hit():
     lhb = [_lhb_row("000001", d(3), 5000000), _lhb_row("000001", d(1), 1.2e6)]

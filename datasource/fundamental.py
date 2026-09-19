@@ -207,9 +207,12 @@ class FundamentalFeed:
         return (d.get("result") or {}).get("data") or []
 
     def _ztpool(self, date_yyyymmdd):
-        """getTopicZTPool → data.pool 列表; 非交易日(data.pool==null)/空 → None。
+        """getTopicZTPool → data.pool 列表; data 缺失 / pool==null(显式无数据) → None。
+        注意: **非交易日与超保留期返回的是 []（空列表）而不是 None**（真打端点实测）,
+        两者都表示"该日历日没有可用涨停池", 由调用方(`_novel_concept`/`_hybk_history`)
+        判定语义, 本函数只保证 `None` 与 `[]` 各自原样保留。
         按日缓存键 'ztpool:YYYYMMDD' 与各股票无关, 一天只请求一次(全股票共用);
-        结果无论 list 还是 None(非交易日)都缓存, 避免每只股重复请求同日池。
+        结果无论 list(含空池 []) 还是 None(显式无数据)都缓存, 避免每只股重复请求同日池。
         请求失败 / 解析失败 → 抛异常(不写缓存, 由 compute_for_stock 捕获, 该因子 fail-open)。"""
         cache_key = "ztpool:%s" % date_yyyymmdd
         if cache_key in self._cache:
@@ -238,10 +241,21 @@ class FundamentalFeed:
         return result
 
     def _hybk_history(self, asof=None):
-        """近 RECENT_DAYS-1 个交易日的全部涨停池 hybk 集合(按日缓存, 全股票共用)。
-        从 asof 前一天起逐日历日回溯, data.pool==null(非交易日)→跳过该日历日继续,
-        上限 20 日; 端点失败(HTTP/超时/解析)→ 直接抛异常(F7 fail-open, 不写缓存)。
-        键 'hybk_history:YYYYMMDD' 与各股票无关, 一天只算一次, 避免每只股各回溯 N 次。"""
+        """近 RECENT_DAYS-1 个**有数据的交易日**的全部涨停池 hybk 集合(按日缓存, 全股票共用)。
+        从 asof 前一天起逐日历日回溯:
+          - 非空池 → 记入题材集合并占 1 个配额;
+          - 空池(data.pool==null 显式无数据 / data.pool==[] 非交易日与超保留期)
+            → **不占配额**, 跳过该日历日继续;
+          - 端点失败(HTTP/超时/解析) → 直接抛异常(F7 fail-open, 不写缓存)。
+        上限 20 个日历日(跨得过春节/十一等长假)。若窗口内一个 hybk 题材都没取到
+        (整个窗口没有非空池 = 超保留期/接口整体返回空, 或池里都没有 hybk 字段) →
+        抛异常, 让 F7 fail-open 跳过评价 —— **绝不能返回空集合**: 空集合会让池内
+        所有题材都判"新颖"(F7 对全池恒 1, 假命中)。
+        键 'hybk_history:YYYYMMDD' 与各股票无关, 一天只算一次, 避免每只股各回溯 N 次。
+
+        2026-09-19 修复: 东财对非交易日/超保留期返回的是空列表而非 null, 旧实现只判
+        `pool is None`, 空池照样吃掉 RECENT_DAYS-1 的配额 ⇒ 周一 asof 实际只覆盖 2 个
+        交易日(窗口偏窄) ⇒ 更早出现过的题材被误判"新颖"(F7 假命中 1)。"""
         ref = self._ref(asof)
         today_key = _ref_key(ref)
         cache_key = "hybk_history:%s" % today_key
@@ -251,26 +265,31 @@ class FundamentalFeed:
         days = 0
         day = ref - timedelta(days=1)
         for _ in range(20):
-            if days >= RECENT_DAYS - 1:  # 已凑够 N-1 个交易日
+            if days >= RECENT_DAYS - 1:  # 已凑够 N-1 个"有数据的交易日"
                 break
             try:
                 pool = self._ztpool(day.strftime("%Y%m%d"))
             except Exception as e:
-                # 端点失败(HTTP/超时/解析) ≠ 非交易日(data.pool==null): 失败日不能当
-                # "无该题材", 否则该日题材会被误判"新颖"(F7 假阳性)。上抛给
-                # compute_for_stock → F7 fail-open(不出现在输出); 此处不写缓存,
-                # 绝不让部分/空历史集合被缓存。
+                # 端点失败(HTTP/超时/解析) ≠ 非交易日/空池: 失败日不能当"无该题材",
+                # 否则该日题材会被误判"新颖"(F7 假阳性)。上抛给 compute_for_stock →
+                # F7 fail-open(不出现在输出); 此处不写缓存, 绝不让部分/空历史集合被缓存。
                 logger.warning("F7 历史涨停池 %s 获取失败, F7 跳过(fail-open): %r",
                                day.strftime("%Y%m%d"), e)
                 raise
-            if pool is None:  # 非交易日(data.pool==null) → 跳过
-                day -= timedelta(days=1)
+            day -= timedelta(days=1)
+            if not pool:   # None(显式无数据) 或 [](非交易日/超保留期) → 不占配额
                 continue
             for item in pool:
                 if isinstance(item, dict) and item.get("hybk"):
                     hist.add(item["hybk"])
             days += 1
-            day -= timedelta(days=1)
+        if not hist:
+            # 窗口内一个 hybk 题材都没取到(非空池数=%d): 没有可依据的历史题材,
+            # 返回空集合等于对全池判"新颖"(F7 恒 1)。按既有 fail-open 约定上抛, 由
+            # compute_for_stock 捕获 → F7 缺键 = **未评估**(回落手填); 不写缓存留待重试。
+            raise RuntimeError(
+                "F7 历史涨停池窗口内无可用题材(%s 起回溯 20 个日历日, 有效交易日 %d 个): "
+                "无法判断题材新颖度, F7 skip(fail-open)" % (today_key, days))
         self._cache[cache_key] = sorted(hist)
         if self.cache_path:
             self._save_cache()
