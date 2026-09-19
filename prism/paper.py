@@ -21,10 +21,15 @@ _REQUIRED_KEYS = ("version", "created", "initial_capital", "cash", "holdings",
 
 
 def _limit_ratio(code):
-    """分板涨停系数回落: 688/300/301→20%, 其余→10%。
-    ponytail: 近似——tick 无股票名, 不含 ST(±5%)/北交所(±30%); F1 因子
-    (factor_f1_first_board.py)另有 8/4→30% 档但系数是局部变量不可 import。
+    """分板涨停系数回落: 北交所 92/8/4→30%, 688/300/301→20%, 其余→10%。
+
+    F4: 30% 档此前缺失 → 920xxx/8xxxxx 按 10% 算, 一只 -11% 的**非**跌停股
+    会被当成跌停而不卖(跌停顺延误判)。权威实现在 shared/exit_rules.py
+    limit_ratio(), 同口径; 此处就地内联不 import shared(F4 不扩大改动面)。
+    ponytail: 近似——tick 无股票名, 不含 ST(±5%)。
     真实值以 daemon 注入的 upStopPrice/downStopPrice 为准, 此处仅兜底。"""
+    if code.startswith(("92", "8", "4")):
+        return 0.30
     return 0.20 if code.startswith(("300", "301", "688")) else 0.10
 
 
@@ -50,7 +55,7 @@ class PaperAccount:
     def __init__(self, strategy_path=None, initial_capital=1000000.0,
                  position_ratio=0.3, max_positions=5, fee_rate=0.00025,
                  slippage=0.001, stamp_duty=0.0005, transfer_fee=0.00001,
-                 state_path=None):
+                 state_path=None, min_commission=5.0):
         self.strategy_path = Path(strategy_path) if strategy_path \
             else _DEFAULT_STRATEGY
         self.initial_capital = float(initial_capital)
@@ -61,6 +66,9 @@ class PaperAccount:
         self.slippage = float(slippage)
         self.stamp_duty = float(stamp_duty)
         self.transfer_fee = float(transfer_fee)
+        # F2 最低佣金(元): 买、卖双腿各自兜底, 见 _fee()。缺省 ¥5 = A股券商
+        # 通用下限; 设 0 即回到"纯比例"旧口径(报告/日志里回显)。
+        self.min_commission = float(min_commission)
         if state_path is not None:
             self.state_path = Path(state_path)
         else:
@@ -209,7 +217,13 @@ class PaperAccount:
         """收盘选股(spec §5): 门禁→打分→前 top_n 存 planned_buys(整体替换)。
 
         幂等键 pickT 前缀(slot 优先, 缺省含日期)与盘中 T 键不冲突;
-        门禁不过 → 空计划; 同分按 code 升序决胜; 选股失败 fail-closed。"""
+        门禁不过 → 空计划; 同分按 code 升序决胜; 选股失败 fail-closed。
+
+        F1 失败语义: 选股抛异常时**不写** screens_done 幂等键, 返回
+        {"error": ...} —— 调用方(paper_daemon)未见到成功就不再占当日 slot,
+        下一轮 loop 会真正重试; 与实盘 live_daemon "先调用后登记" 同口径。
+        (旧行为: 异常也 append 键 → QMT 抖一下当天永久零建仓, 且日志与
+        "今天没票" 不可区分。)"""
         now = now or datetime.now()
         if self.state is None and not self.load():
             return {"error": "未初始化"}
@@ -222,12 +236,6 @@ class PaperAccount:
         try:
             result = self._screen_candidates(provider)
         except Exception as e:
-            snap = self._snapshot_state()
-            self.state["screens_done"].append(ts_key)
-            try:
-                self.save()
-            except Exception:
-                self._restore_state(snap)
             return {"error": "选股失败: %r" % e}
         env_ok = bool(result.get("environment_ok"))
         cands = sorted(result.get("candidates", []),
@@ -417,19 +425,30 @@ class PaperAccount:
                     filled.append(p["code"])
         return {"filled": filled, "canceled": canceled}
 
-    def _record_buy(self, code, shares, price, now, reason, fee=None):
+    def _fee(self, amount, rate):
+        """单腿费用(元): max(成交额×费率, min_commission)。
+
+        F2: 买入腿费率 = 佣金+过户费, 卖出腿 = 佣金+印花税+过户费, **双腿各自**
+        至少收 min_commission(¥5)。口径与回测 prism/backtest.py 对齐 —— 同源
+        (Vibe-Trading china_a.calc_commission, MIT)的"每次成交取
+        max(名义额×fee_rate, ¥5)"。差异披露: 回测的 _commission_floor 只给
+        **佣金腿**补差额(下限之上还叠过户费/印花税, 小额单实付 >5), 这里把下限
+        兜在**总费用**上(小额单恰为 ¥5, 最多低 ~0.5 元); 成交额 ≥ ¥6.6k(卖)
+        /¥19.3k(买) 后两者逐分一致, 而本账户单笔 ≈ 净值 15~30%(15~30 万),
+        恒在一致区。"""
+        return round(max(amount * float(rate), self.min_commission), 2)
+
+    def _record_buy(self, code, shares, price, now, reason):
         """买入记账内核(临界段内): 扣款 + holdings + 流水, 返回成交 dict; 失败 None。
 
         调用方持有临界段与 save/回滚; 成交价按各通道口径算好(排板成交/开盘买入
-        无上滑, screen 路径含滑点)。fee 缺省 = 金额×(佣金+过户费); entry_nav
-        取记账前净值(与 _execute_buy 原口径一致)。
+        无上滑, screen 路径含滑点)。费用由 _fee() 统一算(双腿下限口径唯一来源)。
+        entry_nav 取记账前净值(与 _execute_buy 原口径一致)。
         """
         st = self.state
         nav = self._nav_estimate()            # 记账前净值(必须先于扣款)
         amount = round(shares * price, 2)
-        if fee is None:
-            fee = round(amount * (self.fee_rate + self.transfer_fee), 2)
-        fee = round(float(fee), 2)
+        fee = self._fee(amount, self.fee_rate + self.transfer_fee)
         cash_after = round(st["cash"] - amount - fee, 2)
         if cash_after < 0:
             return None
@@ -448,13 +467,12 @@ class PaperAccount:
 
     def _execute_fill_buy(self, p, now):
         """排板成交记账(临界段): 按挂单价成交, 无上滑; 解冻差额隐含
-        (frozen 不扣——成交扣实际金额, pending 移除后冻结自然释放)。"""
+        (frozen 不扣——成交扣实际金额, pending 移除后冻结自然释放)。
+        费用走 _record_buy→_fee() 单一来源(不再本地重算, 免得漏掉 ¥5 下限)。"""
         code, shares, price = p["code"], p["shares"], p["price"]
-        fee = shares * price * (self.fee_rate + self.transfer_fee)  # 佣金万2.5+过户万0.1
         snap = self._snapshot_state()
         try:
-            if self._record_buy(code, shares, price, now, "queue_fill",
-                                fee=fee) is None:
+            if self._record_buy(code, shares, price, now, "queue_fill") is None:
                 return False
             self.state["pending_buys"] = [x for x in self.state["pending_buys"]
                                           if x["code"] != code]
@@ -466,7 +484,13 @@ class PaperAccount:
 
     def _dispose_pending(self, code, reason, now, dvol=None):
         """撤单/失效(临界段): 解冻 + 未成交流水 + 幂等键。
-        dvol: 撤单时累计成交量(股), 仅开板撤单传入——记入流水供事后归因。"""
+        dvol: 撤单时累计成交量(股), 仅开板撤单传入——记入流水供事后归因。
+
+        F3: 未成交流水**不是成交**, side 记 "cancel"(开板撤单)/"expire"(收盘
+        失效), 绝不再写 "buy" —— 旧语义下 `_buyable` 之外任何按 side 读流水的
+        消费者(面板"交易流水"表)都会把 9 笔撤单显示成 9 笔买入。真实成交只由
+        _record_buy/_execute_sell 写 side=buy/sell, 且带 amount/fee/cash_after;
+        未成交流水一律不带这三个字段 → 两种行在数据上可区分。"""
         snap = self._snapshot_state()
         try:
             st = self.state
@@ -475,7 +499,9 @@ class PaperAccount:
                 return
             st["pending_buys"] = [x for x in st["pending_buys"]
                                   if x["code"] != code]
-            entry = {"side": "buy", "code": code,
+            entry = {"side": ("cancel" if reason == "queue_cancel_break"
+                              else "expire"),
+                     "code": code,
                      "shares": p["shares"], "price": p["price"],
                      "date": now.strftime("%Y-%m-%d"),
                      "reason": reason,
@@ -532,13 +558,12 @@ class PaperAccount:
             price = float(t.get("lastPrice") or 0)
             if price <= 0:
                 continue
-            # 跌停日卖不出(设计 §4, 顺延次日): 现价 ≤ 昨收×(1-幅度); 幅度
-            # 30/68 前缀 20%, 其余 10%(ST 不特殊, §9 披露); 昨收缺失 →
-            # 不判照常卖(fail-open)。跳过=持仓保留, 止盈止损次日再判。
+            # 跌停日卖不出(设计 §4, 顺延次日): 现价 ≤ 昨收×(1-幅度); 幅度走
+            # _limit_ratio(北交所 92/8 30% / 科创创业 20% / 主板 10%, ST 不特殊,
+            # §9 披露); 昨收缺失 → 不判照常卖(fail-open)。跳过=持仓保留。
             lc = float(t.get("lastClose") or 0)
             if lc > 0:
-                ratio = 0.20 if h["code"].startswith(("30", "68")) else 0.10
-                if price <= lc * (1 - ratio) + 0.001:
+                if price <= lc * (1 - _limit_ratio(h["code"])) + 0.001:
                     continue
             cost = float(h["cost"])
             if price >= cost * (1 + tp):
@@ -569,8 +594,8 @@ class PaperAccount:
         h = self.state["holdings"][idx]
         sell_price = round(price * (1 - self.slippage), 4)
         amount = round(h["shares"] * sell_price, 2)
-        fee = round(amount * (self.fee_rate + self.stamp_duty
-                              + self.transfer_fee), 2)
+        fee = self._fee(amount, self.fee_rate + self.stamp_duty
+                        + self.transfer_fee)
         cash_after = round(self.state["cash"] + amount - fee, 2)
         d = now.strftime("%Y-%m-%d")
         ts = now.strftime("%Y-%m-%dT%H:%M:%S")

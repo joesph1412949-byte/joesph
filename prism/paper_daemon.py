@@ -271,6 +271,14 @@ class PaperDaemon:
                 out["pick"] = self.account.pick_top5_at_close(
                     self.provider, now=now, slot="%sT%s" % (d, PICK_SLOT))
                 out["action"] = "pick"
+                err = out["pick"].get("error")
+                if err:
+                    # F1: 选股失败 → paper 侧未登记当日幂等键, 本分支下一轮
+                    # (POLL_SECONDS 后)仍会进来真重试。绝不吞掉 error 再打
+                    # "env_ok=None picked=[]" 的假成功 INFO(与"今天没票"不可区分)。
+                    LOG.warning("收盘选股失败: error=%s → 未占用今日幂等键, "
+                                "约 %d 秒后自动重试", err, POLL_SECONDS)
+                    return out
                 LOG.info("收盘选股: env_ok=%s picked=%s",
                          out["pick"].get("env_ok"),
                          [p["code"] for p in out["pick"].get("picked", [])])
@@ -402,8 +410,10 @@ class PaperDaemon:
                                   if p.get("for_date", "") >= today]
             self.account.save()
             log.info("计划清理: 作废 %d 只(错过开盘窗口)", len(stale))
-        log.info("模拟盘守护启动(策略=%s, 100万, 每%d秒一轮)",
-                 self.account.strategy.get("id"), POLL_SECONDS)
+        log.info("模拟盘守护启动(策略=%s, 100万, 每%d秒一轮, fee_rate=%s "
+                 "min_commission=%s)", self.account.strategy.get("id"),
+                 POLL_SECONDS, self.account.fee_rate,
+                 self.account.min_commission)
         while True:
             try:
                 out = self.tick_once()

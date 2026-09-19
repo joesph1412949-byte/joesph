@@ -599,6 +599,42 @@ def test_tick_once_pick_triggers_refresh_zt(tmp_path, monkeypatch):
     assert zt_calls == [1]
 
 
+def test_tick_once_pick_failure_logs_warning_and_retries(tmp_path, monkeypatch,
+                                                        caplog):
+    """F1(daemon 侧): 选股失败 → LOG.warning 带 error 与重试意图, 不再打
+    "env_ok=None picked=[]" 的假成功 INFO; 因 paper 侧未占当日幂等键,
+    下一轮(约 5 秒后)仍会真的重调 pick。"""
+    d, acc = _daemon(tmp_path, monkeypatch)
+    calls = []
+    snapshots = []
+
+    def fake_pick(provider, now=None, slot=None):
+        calls.append(slot)
+        return {"error": "选股失败: RuntimeError('QMT 抖')"}   # 不登记幂等键
+
+    monkeypatch.setattr(acc, "pick_top5_at_close", fake_pick)
+    monkeypatch.setattr(PaperDaemon, "_maybe_fund_snapshot",
+                        lambda self: snapshots.append(1))
+    with caplog.at_level(logging.INFO, logger="paper_daemon"):
+        out = d.tick_once(now=datetime(2026, 9, 4, 15, 6))
+        assert out["action"] == "pick"
+        assert "QMT 抖" in out["pick"]["error"]
+        assert "收盘选股失败" in caplog.text and "重试" in caplog.text
+        assert "env_ok" not in caplog.text          # 假成功日志已消失
+        d.tick_once(now=datetime(2026, 9, 4, 15, 10))
+    assert calls == ["2026-09-04T15:05", "2026-09-04T15:05"]   # 未占键 → 重试
+    assert snapshots == []          # 失败轮不采基本面快照(留待选股成功那轮)
+
+
+def test_run_forever_echoes_cost_config(tmp_path, monkeypatch, caplog):
+    """F2 回显: 启动日志带费用口径(含 min_commission), 不靠读源码猜。"""
+    d, acc = _daemon(tmp_path, monkeypatch)
+    with caplog.at_level(logging.INFO, logger="paper_daemon"):
+        with pytest.raises(_run_forever_one_tick(monkeypatch, d)):
+            d.run_forever()
+    assert "min_commission=5.0" in caplog.text
+
+
 def test_run_forever_refresh_zt_after_connect(tmp_path, monkeypatch):
     """启动自愈: connect_provider 成功后触发 _maybe_refresh_zt
     (守护停了几天再开也能补), 早于 backfill/tick。"""
