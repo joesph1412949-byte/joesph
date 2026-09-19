@@ -1,4 +1,4 @@
-# prism_launcher.ps1 — PRISM 桌面启动器实际逻辑(守护+网页, 双防重复)。
+﻿# prism_launcher.ps1 — PRISM 桌面启动器实际逻辑(守护+网页, 双防重复)。
 # 桌面 PRISM.bat 只是 4 行 ASCII 薄壳, 指到本文件; 解析健壮性由 PowerShell 保证
 # (2026-09-04: 纯 bat 版因 if 块内引号含括号导致 cmd 解析闪退, 弃用)。
 $ErrorActionPreference = "Continue"
