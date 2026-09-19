@@ -9,7 +9,4 @@
 
         python -m qmt.tools.live_check            # 全量
         python -m qmt.tools.live_check --quiet    # 只看问题项
-
-- ``diag.py`` （原 ``qmt_diag.py``）—— 打印 xtquant 关键接口签名，排查版本差异。
-- ``order_probe.py`` （原 ``qmt_order_probe.py``）—— 探测下单方法是否可用。
 """

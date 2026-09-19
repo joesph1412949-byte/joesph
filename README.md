@@ -217,47 +217,39 @@ python prism_web/app.py
   F4/S6 板块共振从纯申万行业扩展到**题材共振**(题材优先,申万兜底)。
 - **绩效追踪**(`perf_store.py`):每次选股自动按日期存档候选清单(`runtime/state/perf/YYYYMMDD.json`),
   之后用行情回填 N 日实际涨跌,按 A-E 等级统计胜率/平均收益,验证打分体系有效性。
-- **回测框架**(`backtest.py` + `backtest_cli.py`):用东财历史涨停池回放简化选股规则
-  (环境门槛 + 主线题材 + 连板高度),统计胜率/盈亏比/最大回撤,支持参数网格对比。
+- **回测框架**(`backtest/cli.py`,走新版 `prism.backtest.Backtester`:36 因子 + 板块分 +
+  市场上下文):用东财历史涨停池回放选股规则,统计胜率/盈亏比/最大回撤。
   无需 QMT,仅依赖东财公开接口(注意:历史涨停池约保留最近 20 个交易日):
 
   ```bash
-  python backtest_cli.py --start 20260727 --end 20260813 --min-limit 30 --picks 3 --hold 3
-  python backtest_cli.py --start 20260727 --end 20260813 --compare    # 参数网格对比
+  python -m backtest.cli --start 20260727 --end 20260813 --hold 3
+  python -m backtest.cli --start 20260727 --end 20260813 --oos    # 样本外验证
+  python -m backtest.cli --help                                   # 全部 11 个参数
   ```
 
 - **工程整理**:公共配置收敛到 `common.py`(路径/行业池/后缀规则/涨跌停幅度),
   统一日志 `setup_logging`(按天滚动, `log/` 目录);
   `watchdog.py` 进程守护(监控 5000/8899/5899, 挂了自动拉起),
   `install_watchdog.bat`(管理员运行一次)注册开机自启。
-- **卖出策略**(`exit_rules.py` + `strategy_close_pick.py exit`):买入发单后自动记账到
-  `positions.json`;`exit` 命令拉持仓最新价,按 **止盈(+8%)/止损(-5%)/持有 N 天强制平仓**
-  三规则判定,触发则发 **SELL** 信号走同一信号通道(桥已支持卖出):
+- **卖出策略**(`shared/exit_rules.py`,由实盘守护 `prism/live_daemon.py` 盘中巡检调用):
+  买入发单后自动记账到 `positions.json`;按 **止盈/止损/持有 N 天强制平仓** 三规则判定
+  (阈值取策略 `sell_rules`,实盘缺省 止盈 +15% / 止损 -5% / 持有 5 天),触发则发 **SELL**
+  信号走同一信号通道(桥已支持卖出);另含 **T+1**(当日买入不卖)与跌停顺延。
 
-  ```bash
-  python strategy_close_pick.py exit                    # 默认规则巡检
-  python strategy_close_pick.py exit --take-profit 0.10 --stop-loss 0.06 --hold-days 3
-  python strategy_close_pick.py exit --price 12.50      # 指定 SELL 委托价(默认市价)
-  ```
-
-- **仓位/资金管理**:`send` 时查询账户可用资金,单只按 `POSITION_RATIO`(默认 30%)
-  预算计算股数(向下取整 100 股倍数);资金通道不可用时回退固定 `VOLUME`。
+- **仓位/资金管理**(`prism/live_daemon.py`):下单前查询账户可用资金,总预算取
+  `min(总资产, 可用现金)` 并逐笔递减,单只按 `position_ratio` 预算计算股数
+  (向下取整 100 股倍数);资金通道不可用时跳过当日选股(`cash_unavailable`)。
 
 ## 测试
 
-全部离线(无真实网络、无需 QMT)**808 个测试全绿**(2026-09-15 结构归位时的口径: datasource 的
-123 个失联测试已纳入, 当时的 `tt/tests` 与根级测试一并跑)。做T 自 2026-09-16 起是自包含包
-`tt_solo/`(另有 223 例, 含面板测试), **单独跑**; 旧 `tt/` 删除后下面第一条命令去掉
-`tt/tests`、数字随之下调。注意 `prism/tests/` 与根 `tests/` 各有一个
-`test_backtest.py`(同名、不同对象), 同命令跑时由 importlib 模式按路径区分:
+全部离线(无真实网络、无需 QMT)。标准口径是**七路径一次跑完** —— 做T 自 2026-09-16 起是
+自包含包 `tt_solo/`,与其余路径并列(不再有旧 `tt/`);根 `tests/` 覆盖 `shared/` 与
+`ops/smoke_check`:
 
 ```bash
-python -m pytest prism/tests prism_web/tests datasource/tests tt/tests tests -q   # 808: 全仓一次跑完
-python -m pytest tt_solo -q --import-mode=importlib --basetemp=D:/cc-joesph/pt_btNNN  # 做T 223
-python -m prism.factor_check                         # 因子体检: 26 因子全 PASS
+python -m pytest prism/tests prism_web/tests datasource/tests tt_solo/tests tt_solo/dashboard/tests qmt_sync/tests tests -q --import-mode=importlib --basetemp=D:/cc-joesph/pt_del
+python -m prism.factor_check                         # 因子体检
 ```
-
-合计 151 + 17 + 160 = **328 tests**。
 
 ## 说明
 
@@ -265,6 +257,5 @@ python -m prism.factor_check                         # 因子体检: 26 因子�
 - **真实盘桥安全闸门**(`qmt_signal_bridge_real.py`):
   - **授权文件**:只有 `D:/QMT_SIGNALS/real/armed.txt` 存在且内容含当天日期(`YYYYMMDD`)时,pending 信号才会被消费下单,防止误触;
   - **当日去重**:同一股票代码每个自然日最多下单一次(记录在 `D:/QMT_SIGNALS/real/placed_today.json`),防止重复发单;
-  - `strategy_close_pick.py send` 会校验候选清单生成日期(默认 3 天内,覆盖周末;过期需 `--force` 强制发送)。
 - 数据源:个股K线 / 全市场盘口 / 行业板块来自 xtquant(miniQMT);N1/N3/N4 来自东方财富公开涨停池接口。
 - 手动因子存于 `runtime/state/manual_factors.json`;损坏的 JSON 会被保留为 `manual_factors.json.corrupt-<时间戳>` 并告警,不静默覆盖。

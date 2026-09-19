@@ -18,13 +18,12 @@
 | `datasource/` | **现役数据模块**（v04 网页被删后留下的数据层：DataSource/EastMoney/Fundamental/ManualStore/PerfStore；由 prism 与 prism_web 复用） | 项目 |
 | `qmt/` | **miniQMT 桥接与工具**（桥脚本 + 只读自检） | 桥接 |
 | `shared/` | **跨项目共享底座**（路径常量、日志、原子写、日期与代码工具、卖出规则） | 底座 |
-| `backtest/` | 离线回测：旧版引擎 + 命令行入口 | 工具 |
-| `legacy/` | v04 时代的独立脚本（收盘选股等） | 归档代码 |
+| `backtest/` | 离线回测：命令行入口（接 prism 新版引擎） | 工具 |
 | `ops/` | 运维：启动器、进程看门狗、**交付冒烟自检 `smoke_check.py`、总结 PDF 生成器 `make_summary_pdf.py`** | 运维 |
 | `runtime/` | **运行期数据**：`cache/` 采集缓存 · `state/` 账本/绩效/状态 · `log/` 日志（不入库） | 数据 |
 | `docs/` | 报告与设计文档（含 `reports/` 体检与审计报告、`superpowers/` spec 与 plan） | 文档 |
 | `archive/` | 历史产物、一次性探针脚本、无关文件 | 归档 |
-| `tests/` | 根级测试（覆盖 `backtest/` 与 `shared/exit_rules`） | 测试 |
+| `tests/` | 根级测试（覆盖 `shared/` 与 `ops/smoke_check`） | 测试 |
 
 > 2026-09-15 变更：`strategy_web/` → `datasource/`（只剩现役数据模块，v04 网页外壳已删）；
 > 绩效存档 `perf/` 与 `manual_factors.json` 迁入 `runtime/state/`；依赖清单提到根 `requirements.txt`；
@@ -117,7 +116,6 @@
 | `ttcore/arm_today.py` | 人工闸门工具（放行/急停/看状态） |
 | `ttcore/sample_data/` | 离线样本 K 线 |
 | `dashboard/` | 做 T 监控台（Flask，`:5011`，只监听本机；能急停，**不能下单**） |
-| `tools/compare_legacy.py` | 与旧 `tt/` 的对照取证（证明搬家零回归；旧树删除后失去意义） |
 | `MEMORY.md` | **本项目记忆**（状态 / 路线演进 / 风控档案 / 账户快照 / 待办；做T的活才读） |
 | `tests/` `dashboard/tests/` | 223 例 pytest（2026-09-16） |
 
@@ -131,10 +129,7 @@
 |---|---|---|
 | `bridge/signal_bridge_real.py` | **实盘信号桥**：唯一会真下单的脚本 | QMT 终端内 |
 | `bridge/signal_bridge_demo.py` | 模拟通道桥（⚠️ 不校验账户，下单用 QMT 当前登录账号） | QMT 终端内 |
-| `bridge/connection.py` | `XtQuantTrader` 连接/回调薄封装示例 | QMT 终端内 |
 | `tools/live_check.py` | **实盘接入前必跑的只读就绪自检**（30+ 项，绝不下单） | 本项目 |
-| `tools/diag.py` | 打印 xtquant 关键接口签名，排查版本差异 | 本项目 |
-| `tools/order_probe.py` | 探测下单方法是否可用 | 本项目 |
 
 ### `shared/` — 跨项目共享底座 ★本次新建
 
@@ -151,24 +146,12 @@
 
 | 文件 | 作用 |
 |---|---|
-| `engine.py` | 旧版轻量回测引擎 `BacktestEngine`（原根目录 `backtest.py`） |
 | `cli.py` | 命令行入口，接**新版** `prism.backtest.Backtester`（原 `backtest_cli.py`） |
 
 ```bash
 python -m backtest.cli --start 20260701 --end 20260731
-python -m backtest.cli --start 20260701 --end 20260731 --compare
-```
-
-### `legacy/` — v04 时代脚本 ★本次新建
-
-| 文件 | 作用 |
-|---|---|
-| `strategy_close_pick.py` | 收盘选股 + 次日发单（独立于 36 因子引擎，v04 时代入口） |
-| `demo_screen_and_send.py` | 选股并发送信号的演示脚本 |
-
-```bash
-python legacy/strategy_close_pick.py screen
-python legacy/strategy_close_pick.py send
+python -m backtest.cli --start 20260701 --end 20260731 --oos
+python -m backtest.cli --help          # 全部 11 个参数
 ```
 
 ### `ops/` — 运维 ★本次新建
@@ -232,9 +215,6 @@ python -m pytest prism/tests prism_web/tests strategy_web/tests tests -q \
 # 做T（自包含包，含面板测试）
 python -m pytest tt_solo -q --import-mode=importlib --basetemp=D:\cc-joesph\pt_btNNN
 
-# 做T 与旧 tt/ 的行为对照（退出码 0 = 只差那一处已批准例外）
-python tt_solo\tools\compare_legacy.py
-
 # 模拟盘
 python -m prism.paper_daemon          # 守护
 python -m prism.paper --once          # 只跑一轮
@@ -249,7 +229,8 @@ python -m qmt.tools.live_check
 python -m qmt.tools.live_check --quiet
 
 # 回测
-python -m backtest.cli --start 20260701 --end 20260731 --compare
+python -m backtest.cli --start 20260701 --end 20260731
+python -m backtest.cli --start 20260701 --end 20260731 --oos
 
 # 因子体检
 python -m prism.factor_check
@@ -271,7 +252,5 @@ python -m prism.factor_check
    - `strategy_web/manual_factors.json`（手工因子，**是数据，别误删**）、`strategy_web/perf/`（绩效存档）
    > 现行生效的基本面缓存是 `runtime/cache/fundamental_cache.json`，
    > 上面两个 `fundamental_cache.json` 是**过期重复副本**。
-4. **两套回测并存**：`backtest/engine.py`（旧，简化版）与 `prism/backtest.py`（新，36 因子）。
-   回测当前策略请用 `python -m backtest.cli`。
-5. **`strategy_web/` 已属 legacy**，但 `ops/watchdog.py` 里仍配着它的拉起项（端口 5000 实际
+4. **`strategy_web/` 已属 legacy**，但 `ops/watchdog.py` 里仍配着它的拉起项（端口 5000 实际
    已被 `prism_web` 占用）。要彻底理清，建议下次单独处理 `ops/watchdog.py` 的服务清单。
