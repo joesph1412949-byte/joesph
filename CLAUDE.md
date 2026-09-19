@@ -2,7 +2,18 @@
 
 You have superpowers.
 
-**Read [MEMORY.md](MEMORY.md) first** — 用户合作偏好与项目现状（会话开头必读；完成里程碑后主动更新该文件）。
+**Read [MEMORY.md](MEMORY.md) first** — 共享记忆：用户合作偏好、环境与机器坑、部署/网关、账户读取、决策史（会话开头必读）。
+
+**Then read the project memory only if the task touches that project**（2026-09-18 拆分，别全读）:
+
+| 任务涉及 | 再读 |
+|---|---|
+| prism / prism_web / datasource / backtest / qmt 桥 / 因子 / 回测 / 模拟盘 / 实盘守护 | [prism/MEMORY.md](prism/MEMORY.md) |
+| tt_solo / 做T / :5011 面板 / 直连下单 / 每日放行条 | [tt_solo/MEMORY.md](tt_solo/MEMORY.md) |
+| 目录与职责索引 | [STRUCTURE.md](STRUCTURE.md) |
+| 任务细节与遗留 Minor | `.superpowers/sdd/progress.md` |
+
+完成里程碑后：更新**对应项目自己的**记忆文件；跨项目内容（偏好/环境/部署）才更新根 `MEMORY.md`。
 
 ## Skill System
 

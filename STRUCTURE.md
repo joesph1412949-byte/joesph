@@ -2,7 +2,8 @@
 
 > 最后一次重组：**2026-09-14**。目标：**根目录只留「入口 + 文档」，代码按项目分家，同一职责的文件放同一个文件夹。**
 >
-> 配套阅读：`MEMORY.md`（项目现状与协作偏好）、`README.md`（功能说明）。
+> 配套阅读：`MEMORY.md`（共享记忆：协作偏好/环境坑/部署/账户读取/决策史）、`README.md`（功能说明）。
+> **项目记忆（2026-09-18 起按项目拆分，做哪个项目才读哪个）**：`prism/MEMORY.md`（prism / prism_web / datasource / backtest / qmt 桥）、`tt_solo/MEMORY.md`（做T）。
 
 ---
 
@@ -85,6 +86,7 @@
 | `backtest.py` | 回测引擎（**新版**，36 因子全链路） |
 | `factor_check.py` | 因子体检 CLI（`python -m prism.factor_check`） |
 | `_utils.py` | 因子库共享小工具（迁移自 `strategy_web/factors.py`） |
+| `MEMORY.md` | **本项目记忆**（状态 / 坑 / 待办 / 测试速查；做 prism 的活才读） |
 | `tests/` | 该项目的测试 |
 
 ### `prism_web/` — 网页控制台（:5000）
@@ -116,6 +118,7 @@
 | `ttcore/sample_data/` | 离线样本 K 线 |
 | `dashboard/` | 做 T 监控台（Flask，`:5011`，只监听本机；能急停，**不能下单**） |
 | `tools/compare_legacy.py` | 与旧 `tt/` 的对照取证（证明搬家零回归；旧树删除后失去意义） |
+| `MEMORY.md` | **本项目记忆**（状态 / 路线演进 / 风控档案 / 账户快照 / 待办；做T的活才读） |
 | `tests/` `dashboard/tests/` | 223 例 pytest（2026-09-16） |
 
 ### `qmt_sync/` — QMT 成交/持仓同步
@@ -209,7 +212,9 @@ python legacy/strategy_close_pick.py send
 | 文件 | 作用 |
 |---|---|
 | `STRUCTURE.md` | 本文件——目录与职责索引 |
-| `MEMORY.md` | 项目现状、测试基线、已知坑、协作偏好（**会话开头必读**） |
+| `MEMORY.md` | **共享记忆**：协作偏好、环境与机器坑、部署/网关、账户读取、决策史（**会话开头必读**） |
+| `prism/MEMORY.md` | **prism 项目记忆**：prism/prism_web/datasource/backtest/qmt 桥的状态、坑、待办、测试速查（做 prism 的活才读） |
+| `tt_solo/MEMORY.md` | **做T项目记忆**：tt_solo 状态、路线演进、风控档案、账户快照、待办（做T的活才读） |
 | `README.md` | 项目功能总览 |
 | `AGENTS.md` / `CLAUDE.md` | 给 AI 编码助手的工作约定（技能系统、红线清单） |
 | `.env` | 环境变量（不入库） |
