@@ -303,3 +303,29 @@ python -m prism.tdx_source      # 6 项：连接/个股日K/大盘指数/板块�
 ### `paused` 急停开关已删除（2026-09-19，用户拍板"不留"）
 
 `D:/QMT_SIGNALS/paused` 已删。全仓消费点（`prism/trader.py:26`、`qmt/bridge/signal_bridge_real.py:128`、`tt_solo/ttcore/daemon.py:57`）统一是"**文件存在 = 急停**"，缺文件 = 未暂停，删除安全、无代码依赖它预存。**当前唯一剩余闸门是 `armed.txt`（值仍是陈旧的 `20260914`，桥/守护照旧拒单）**；急停可随时由面板 `/api/automation`、`/api/pause` 或 `arm_today.py` 重新按下。
+
+### 盘后刷新**实跑证据**（2026-09-19 17:48 完成，一次真实全量）
+
+**结论：降级链在生产路径上确实成立，且真把数据追上来了。** 全程 **61.8 分钟**，退出码 **1**（真有失败段，诚实上报）。
+
+```
+[1/7] sectors  OK(降级)   尝试1 eastmoney 退出码 None(30min 超时被杀) → 尝试2 --source sw 退出码 0
+                          耗时 1920.6s；kline 31项 末 2026-09-11 → 2026-09-18 ✅ 真推进
+                          "本次仍拿不到: flow(该源无此段, 旧缓存原样保留)" ✅ 如实点名
+[2/7] sector-map OK       耗时 1655.9s（27.6 分钟！BK0420/BK0421 等 496 个 BK 孤儿对申万发
+                          注定失败的请求，legulegu.com DNS 解析失败刷屏 —— 这就是混源的真实代价）
+[3/7] global-eastmoney    退出码 3(未推进)：东财 push2his 全 RemoteDisconnected
+[4/7] global-fred OK      VIX 2026-09-10 → 2026-09-17 ✅ 推进；US10Y 仍失败(FRED 读超时)
+[5/7] flow-rank 失败      退出码 1（仅东财、无降级源）
+[6/7] benchmark OK        上证走上证 QMT 本地降级通道 174 日
+[7/7] futures    退出码 3(未推进) 17项 末 2026-09-18
+汇总 成功 6 / 失败 1 → 退出码 1；缓存 5952901 → 5957968 字节，mtime 17:48:25
+旗标: data_refresh_DEGRADED.txt + data_refresh_FAILED.txt 都落下（按设计）
+```
+
+**由此确认的三个真问题（均未修）**
+1. **`flow-rank` 段无任何降级源** ⇒ 东财一封就永久 `exit 1` + 天天落告警旗。这是当前告警旗常亮的唯一原因，也是最该补降级源的段（akshare 有资金流数据可评估）。
+2. **主源失败要等满 `SEG_TIMEOUT`(1800s) 才降级**，加上 496 个 BK 孤儿请求，单日刷新实测 **61.8 分钟**。**建议加"主源预检"**：正式遍历前先打一次探测请求，失败立刻换源。
+3. **`rc=3` 在 `data_refresh` 汇总里被计成"成功"**（`[3/7] global-eastmoney OK` + `空数据 0 段`）。与"3 绝不与 0 同码"的对外语义有观感落差，口径需设计者确认（批次说明：rc=3 且缓存未推进只作注记，故不判严）。
+
+**`--build-sectors --source sw` 的产出边界（实测）**：产出 `sectors` + `kline`；**拿不到 `flow`**（`market_data.py:605` `flow_enabled=False`，连请求都不发）。降级重跑**不带 `--rebuild`**（带它会清掉现有 801 的 kline/flow，属未授权的数据破坏）。
