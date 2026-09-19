@@ -33,6 +33,7 @@ import os
 import json as _json
 import datetime as _dt
 import logging
+import socket
 import threading as _threading
 
 from flask import Flask, jsonify, render_template, request
@@ -42,7 +43,6 @@ from shared.common import atomic_write, setup_logging
 # 旧数据源模块(单源: datasource, 经上方路径注入解析; prism.data.DataProvider
 # 内部同名导入复用同一份类定义, 见 prism/data.py)
 from data_source import DataSource, DataSourceError
-from manual_store import ManualStore
 from perf_store import PerfStore
 
 from prism import registry as reg
@@ -84,11 +84,14 @@ def _kline_close_source(code, kdays):
 
 # 全局单例（测试时可用 monkeypatch 替换）
 ds_obj = DataSource()
-manual_store_obj = ManualStore()
 perf_store_obj = PerfStore(kline_source=_kline_close_source)
 
 # 选股单飞锁: /api/screen 同时只允许一个选股流程(耗时 1~2 分钟)
 _screen_lock = _threading.Lock()
+
+# 新建策略锁(A3 2026-09-19): "分配 id ∧ 落盘"必须同锁 —— 两个并发 create 都先
+# 看到 base id 不存在, 于是写同一个文件名, 后者静默覆盖前者而两边都回 ok:true。
+_strategy_create_lock = _threading.Lock()
 
 # 选股结果快照路径(供 /api/screen/latest 秒读; 测试可 monkeypatch)
 SNAPSHOT_PATH = Path(__file__).parent / "screen_result.json"
@@ -287,7 +290,7 @@ def _ensure_qmt():
 # 那个函数。白名单方向: 默认全放行, 仅下列函数名收本机(新增写路由默认可用)。
 from shared.common import is_local_request  # noqa: E402
 
-_LOCAL_ONLY = frozenset({"api_strategy_activate", "manual",
+_LOCAL_ONLY = frozenset({"api_strategy_activate",
                          "api_automation", "perf_backfill"})
 
 
@@ -295,15 +298,29 @@ _LOCAL_ONLY = frozenset({"api_strategy_activate", "manual",
 def _local_only_guard():
     if request.method not in ("POST", "PUT", "DELETE", "PATCH"):
         return None
+    if request.endpoint not in _LOCAL_ONLY:
+        return None
     if is_local_request(request.headers.get("CF-Connecting-IP"),
                         request.remote_addr):
+        # A1(2026-09-19): 本机档再加一道跨站否决。只看 remote_addr 时, 浏览器
+        # 发起的**跨站简单表单 POST**(form-urlencoded, 无需 CORS 预检)也满足
+        # "本机" → 任意本机页面(另一个本机 web 应用/file:// /被 XSS 的本机页)
+        # 一条表单就能改掉 paper_daemon 每轮热读的默认策略 —— 实测
+        # api_strategy_activate 连请求体都不读, 表单里什么都不用带。
+        # Sec-Fetch-Site 由浏览器强制写入、页面无法伪造: 同源前端=same-origin,
+        # 地址栏直跳=none, 其余(cross-site / same-site 跨端口 / file://)一律否决。
+        # 非浏览器(curl/守护/测试)不带该头 → 不受影响。
+        site = request.headers.get("Sec-Fetch-Site")
+        if site and site not in ("same-origin", "none"):
+            logger.warning("跨站拦截本机档写: %s %s (Sec-Fetch-Site=%s)",
+                           request.method, request.path, site)
+            return jsonify({"ok": False,
+                            "error": "此操作仅限本机同源页面执行"}), 403
         return None
-    if request.endpoint in _LOCAL_ONLY:
-        logger.warning("远程拦截敏感写: %s %s (CF-IP=%s)", request.method,
-                       request.path, request.headers.get("CF-Connecting-IP"))
-        return jsonify({"ok": False,
-                        "error": "此操作仅限本机执行(交易闸门类)"}), 403
-    return None
+    logger.warning("远程拦截敏感写: %s %s (CF-IP=%s)", request.method,
+                   request.path, request.headers.get("CF-Connecting-IP"))
+    return jsonify({"ok": False,
+                    "error": "此操作仅限本机执行(交易闸门类)"}), 403
 
 
 @app.route("/")
@@ -337,7 +354,7 @@ def screen():
         except Exception as e:
             return jsonify({"ok": False,
                             "error": "策略加载失败: %s (%s)" % (sid, e)}), 400
-        provider = DataProvider(ds=ds_obj, manual=manual_store_obj)
+        provider = DataProvider(ds=ds_obj)
         result = _run_prism_screen(strategy, provider)
         _save_snapshot(result)
         # 绩效追踪: 候选清单自动存档(按日期), 供后续回填涨跌/统计胜率
@@ -359,7 +376,7 @@ def screen():
         return jsonify({"error": str(e)}), 500
     except Exception as e:
         logger.error("选股失败: %r", e, exc_info=True)
-        return jsonify({"error": "选股失败: %r" % e}), 500
+        return jsonify({"error": "选股失败"}), 500
     finally:
         _screen_lock.release()
 
@@ -373,7 +390,8 @@ def screen_latest():
         data["ok"] = True
         return jsonify(data)
     except Exception as e:
-        return jsonify({"ok": False, "error": "快照读取失败: %r" % e}), 500
+        logger.warning("快照读取失败(%s): %r", SNAPSHOT_PATH, e)
+        return jsonify({"ok": False, "error": "快照读取失败"}), 500
 
 
 @app.route("/api/perf", methods=["GET"])
@@ -392,7 +410,13 @@ def perf_backfill():
         days = int(request.args.get("days", 5))
     except (TypeError, ValueError):
         return jsonify({"ok": False, "error": "days 参数非法"}), 400
-    result = perf_store_obj.backfill(days=days)
+    # A4(2026-09-19): 旧代码没有 try —— 落盘 OSError 逃逸 → 500 + text/html,
+    # 前端 res.json() 直接抛。这里收敛成 JSON, 文案不带 %r(不泄露内部路径)。
+    try:
+        result = perf_store_obj.backfill(days=days)
+    except Exception as e:
+        logger.error("绩效回填失败: %r", e, exc_info=True)
+        return jsonify({"ok": False, "error": "绩效回填失败"}), 500
     return jsonify({"ok": True, "result": result,
                     "summary": perf_store_obj.summary()})
 
@@ -451,7 +475,8 @@ def market_limitup():
         data["ok"] = True
         return jsonify(data)
     except Exception as e:
-        return jsonify({"ok": False, "error": "快照读取失败: %r" % e}), 500
+        logger.warning("快照读取失败(%s): %r", LIMITUP_SNAPSHOT_PATH, e)
+        return jsonify({"ok": False, "error": "快照读取失败"}), 500
 
 
 @app.route("/api/market/tick", methods=["GET"])
@@ -513,20 +538,8 @@ def stock_kline(code):
             "ma60": [None if x != x else round(x, 2) for x in ma60],  # NaN→None
             "up_stop": up_stop,
         })
-    except Exception as e:
-        return jsonify({"error": "K线获取失败: %r" % e}), 500
-
-
-@app.route("/api/stock/<code>/manual", methods=["GET", "POST"])
-def manual(code):
-    if request.method == "GET":
-        return jsonify(manual_store_obj.get_manual(code))
-    try:
-        payload = request.get_json() or {}
-        manual_store_obj.set_manual(code, payload)
-        return jsonify({"factors": manual_store_obj.get_manual(code)})
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
+    except Exception:
+        return jsonify({"error": "K线获取失败"}), 500
 
 
 # ================= 新路由: 因子库/策略/回测/自动化 =================
@@ -750,7 +763,15 @@ def api_strategy(sid):
     p = _strategy_path(sid)
     if p is None:
         return jsonify({"ok": False, "error": "策略不存在: %s" % sid}), 404
-    return jsonify({"ok": True, "strategy": _json.loads(p.read_text(encoding="utf-8"))})
+    # A4(2026-09-19): 旧代码无 try → 文件损坏时抛 JSONDecodeError → 500 + text/html
+    # (同文件 /api/strategies 是 except: continue, 两条读路径口径不一致)。
+    try:
+        data = _json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.error("策略文件读取失败(%s): %r", sid, e)
+        return jsonify({"ok": False,
+                        "error": "策略文件损坏或不可读: %s" % sid}), 500
+    return jsonify({"ok": True, "strategy": data})
 
 
 @app.route("/api/strategies/create", methods=["POST"])
@@ -762,22 +783,24 @@ def api_strategy_create():
     ok, errors, strat = validate_strategy_payload(payload)
     if not ok:
         return jsonify({"ok": False, "errors": errors}), 400
-    base = "custom_" + _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    sid = base
-    n = 2
-    while (STRATEGIES_DIR / ("%s.json" % sid)).exists():
-        sid = "%s_%d" % (base, n)
-        n += 1
-    strat["id"] = sid
-    strat["description"] = ("网页编辑器生成 %s"
-                            % _dt.datetime.now().isoformat(timespec="seconds"))
-    try:
-        load_strategy(strat)            # 终极校验: 试载(spec §4-7, Task3 复审硬条件)
-    except Exception as e:
-        return jsonify({"ok": False,
-                        "errors": ["引擎试载失败: %r" % e]}), 400
-    p = STRATEGIES_DIR / ("%s.json" % sid)
-    atomic_write(p, _json.dumps(strat, ensure_ascii=False, indent=1))
+    # A3: id 分配 + 试载 + 落盘 整段同锁(并发时后到者拿到 _2 而不是覆盖同一个文件)
+    with _strategy_create_lock:
+        base = "custom_" + _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        sid = base
+        n = 2
+        while (STRATEGIES_DIR / ("%s.json" % sid)).exists():
+            sid = "%s_%d" % (base, n)
+            n += 1
+        strat["id"] = sid
+        strat["description"] = ("网页编辑器生成 %s"
+                                % _dt.datetime.now().isoformat(timespec="seconds"))
+        try:
+            load_strategy(strat)        # 终极校验: 试载(spec §4-7, Task3 复审硬条件)
+        except Exception as e:
+            return jsonify({"ok": False,
+                            "errors": ["引擎试载失败: %r" % e]}), 400
+        p = STRATEGIES_DIR / ("%s.json" % sid)
+        atomic_write(p, _json.dumps(strat, ensure_ascii=False, indent=1))
     return jsonify({"ok": True, "id": sid})
 
 
@@ -856,7 +879,7 @@ def api_backtest():
             rep.setdefault("gate_notes", []).append(feed_note)
     except Exception as e:
         logger.error("回测失败: %r", e, exc_info=True)
-        return jsonify({"ok": False, "error": "回测失败: %r" % e}), 500
+        return jsonify({"ok": False, "error": "回测失败"}), 500
     return jsonify({"ok": True, "report": rep})
 
 
@@ -868,8 +891,8 @@ def api_paper_summary():
     try:
         return jsonify(PaperAccount().summary())
     except Exception as e:
-        return jsonify({"exists": False,
-                        "error": "读取模拟盘账本失败: %r" % e})
+        logger.error("读取模拟盘账本失败: %r", e)
+        return jsonify({"exists": False, "error": "读取模拟盘账本失败"})
 
 
 @app.route("/api/paper/detail")
@@ -878,15 +901,20 @@ def api_paper_detail():
     try:
         return jsonify(PaperAccount().detail())
     except Exception as e:
-        return jsonify({"exists": False,
-                        "error": "读取模拟盘账本失败: %r" % e})
+        logger.error("读取模拟盘账本失败: %r", e)
+        return jsonify({"exists": False, "error": "读取模拟盘账本失败"})
 
 
 @app.route("/api/automation", methods=["GET", "POST"])
 def api_automation():
     if request.method == "GET":
         return jsonify({"ok": True, "paused": trader.check_paused()})
-    payload = request.get_json() or {}
+    # A4(2026-09-19): 旧代码用不带 silent 的 get_json() → 表单体/坏 JSON 抛 415,
+    # 响应是 text/html, 前端 res.json() 直接崩。这里 fail-closed 成 400 + JSON,
+    # 且绝不据此去动暂停开关。
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "请求体必须是 JSON 对象"}), 400
     pf = Path(trader.PAUSE_FILE)  # 兼容 str / Path 两种配置
     if payload.get("paused") is True:  # 严格布尔判断: 字符串 "false" 不再误建(审查 Minor 2)
         pf.parent.mkdir(parents=True, exist_ok=True)
@@ -899,7 +927,66 @@ def api_automation():
     return jsonify({"ok": True, "paused": trader.check_paused()})
 
 
+# ================= 启动自检(2026-09-19) =================
+
+def _port_owned_by_other(host="127.0.0.1", port=5000):
+    """端口是否已被**别的进程**监听(且能区分 TIME_WAIT 误判)。
+
+    为什么不能指望 werkzeug 报错: BaseWSGIServer.allow_reuse_address = True
+    (werkzeug 3.1.8) → Windows 上 SO_REUSEADDR 等价 SO_REUSEPORT, 第二个实例
+    bind 照样成功并 LISTENING(实测 127.0.0.1:5000 同时两行 LISTENING, PID 不同)。
+    判据: 先**不带 SO_REUSEADDR**抢绑一次 —— 成功 = 没人监听; 失败可能是真有
+    监听者, 也可能只是 TIME_WAIT/已绑定未监听。所以失败后再 connect 一次确认:
+    连得上才算"真有监听者"(loopback 上要么立刻成功, 要么立刻被拒)。
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind((host, port))
+    except OSError:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.5)
+            try:
+                probe.connect((host, port))
+            except OSError:
+                return False
+            return True
+    finally:
+        s.close()
+    return False
+
+
+def _port_guard_or_exit(host="127.0.0.1", port=5000):
+    """服务端 fail-closed 端口自检: 已有监听者 → 打印原因并 sys.exit(1)。
+
+    放在服务端是唯一能兜住所有入口的一层 —— start_all / prism_launcher /
+    watchdog 都只问"端口开着吗", 谁都不会发现双开。
+    reloader 子进程必须放行: werkzeug 3.1.8 的 run_simple 里**父进程**建 server
+    并占住端口(把 fd 经 WERKZEUG_SERVER_FD 交给子进程), 子进程若也自检会被自己
+    的父进程挡死 → debug 模式正常启动直接失败。
+    """
+    if os.environ.get("WERKZEUG_RUN_MAIN"):
+        return
+    if not _port_owned_by_other(host, port):
+        return
+    print("端口 %d 已被占用(检测有效): 本机已有 prism_web 在监听, "
+          "拒绝启动以免静默双开" % port)
+    sys.exit(1)
+
+
+def _debug_enabled():
+    """debug 默认**关**(2026-09-19 翻转): 只有显式 APP_DEBUG=1 才开。
+
+    旧默认(os.environ.get("APP_DEBUG","1") != "0")意味着直接
+    `python prism_web\\app.py` 就开 debug, 后果(均实测): reloader 父+子两个
+    进程(每实例多占一条 QMT 连接)、GET /console 暴露交互式调试器(200)、
+    任一被 import 的 .py 保存就把生产面板热重启。
+    """
+    return os.environ.get("APP_DEBUG", "0") == "1"
+
+
 if __name__ == "__main__":
+    # 端口自检放最前(C1): 一旦要退出就不该再去连 QMT(每实例多占一条 QMT 连接)
+    _port_guard_or_exit("127.0.0.1", 5000)
     print("=" * 50)
     print("连接 QMT miniQMT...")
     try:
@@ -909,9 +996,7 @@ if __name__ == "__main__":
         print("警告: %s" % e)
         print("请先打开 QMT 并开启 miniQMT 模式")
     print("浏览器访问: http://localhost:5000")
-    # debug 模式(带 reloader)后台运行不稳定, 生产/常驻用 APP_DEBUG=0 关闭
-    debug = os.environ.get("APP_DEBUG", "1") != "0"
+    debug = _debug_enabled()
     # 本机主机名含非 UTF-8 字节(GBK), socket.getfqdn 会 UnicodeDecodeError 崩掉 werkzeug 绑定端口
-    import socket as _socket
-    _socket.getfqdn = lambda name: name
+    socket.getfqdn = lambda name: name
     app.run(host="127.0.0.1", port=5000, debug=debug)

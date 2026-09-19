@@ -92,8 +92,19 @@ def test_screen_default_strategy_is_v04(client, tmp_path, monkeypatch):
 
 
 def test_screen_default_follows_pointer(client, tmp_path, monkeypatch):
-    """指针指向 v03 → 无参数选股用 v03。"""
+    """指针指向 v03 → 无参数选股用 v03。
+
+    ⚠️ 2026-09-19 安全修复: 旧版直接改**真实** `.active.json`(再在 finally 里
+    写回原内容), 而正在跑的 `prism.paper_daemon` 每轮**热读**这份指针 —— 测试
+    窗口内守护真会拿到 v03(实测指纹: 内容 hash 不变、mtime 被刷新 = 真实文件
+    被重写过)。现全部隔离到 tmp_path: 真实指针一个字都不动。
+    """
     import prism.engine as engine
+    (tmp_path / "first_board_v03.json").write_text(
+        (engine.STRATEGIES_DIR / "first_board_v03.json").read_text(encoding="utf-8"),
+        encoding="utf-8")
+    monkeypatch.setattr(engine, "STRATEGIES_DIR", tmp_path)
+    monkeypatch.setattr(app_module, "STRATEGIES_DIR", tmp_path)
     monkeypatch.setattr(app_module.ds_obj, "_connected", True)
     monkeypatch.setattr(app_module, "SNAPSHOT_PATH", tmp_path / "s.json")
     monkeypatch.setattr(app_module, "perf_store_obj",
@@ -106,18 +117,9 @@ def test_screen_default_follows_pointer(client, tmp_path, monkeypatch):
     monkeypatch.setattr(app_module, "run_screen", fake_screen)
     monkeypatch.setattr(app_module, "DataProvider",
                         lambda ds=None, manual=None: _stub_provider())
-    # 把真实指针临时指向 v03(测试后恢复)
-    real_ptr = engine.STRATEGIES_DIR / engine.ACTIVE_FILENAME
-    old = real_ptr.read_text(encoding="utf-8") if real_ptr.exists() else None
-    try:
-        engine.set_active_strategy("first_board_v03")
-        r = client.post("/api/screen")
-        assert r.status_code == 200 and seen["id"] == "first_board_v03"
-    finally:
-        if old is not None:
-            real_ptr.write_text(old, encoding="utf-8")
-        else:
-            real_ptr.unlink(missing_ok=True)
+    engine.set_active_strategy("first_board_v03")   # 指针写 tmp, 真实文件不动
+    r = client.post("/api/screen")
+    assert r.status_code == 200 and seen["id"] == "first_board_v03"
 
 
 def test_strategy_detail_unknown_404(client):
@@ -427,18 +429,17 @@ def test_screen_runs_prism_engine(client, tmp_path, monkeypatch):
     assert snap["candidates"][0]["code"] == "002859.SZ"
 
 
-def test_manual_roundtrip(client, tmp_path, monkeypatch):
-    """旧路由 /api/stock/<code>/manual 保留冒烟(临时文件避免污染)。
+def test_manual_route_removed(client):
+    """A5(2026-09-19): 手填因子链路两端全死, 旧路由 /api/stock/<code>/manual
+    已从 app.py 摘除 —— 这里锁定"路由确实不存在"(404), 而不是只删掉旧用例。
 
-    手填因子已全部被 K线自动因子取代(2026-08; 原 S1/S5/S7 因子已于
-    09-03 删除) → 写入任何非手填因子都被拒(400), 读取返回空 {}。"""
-    from manual_store import ManualStore
-    s = ManualStore(str(tmp_path / "m.json"))
-    monkeypatch.setattr(app_module, "manual_store_obj", s)
-    r = client.post("/api/stock/002859.SZ/manual", json={"F1": 1})
-    assert r.status_code == 400          # F1 非手填因子 → 拒
-    r2 = client.get("/api/stock/002859.SZ/manual")
-    assert r2.get_json() == {}           # 无手填因子 → 空
+    死因(只读审计两条独立证据): `datasource/manual_store.py` 的
+    MANUAL_FACTORS 恒空 → set_manual 写任何因子必抛 ValueError; 前端
+    app.js 的 MANUAL_ALL 也是空数组 → UI 段永不渲染。故整链无生产用途。"""
+    assert client.get("/api/stock/002859.SZ/manual").status_code == 404
+    assert client.post("/api/stock/002859.SZ/manual",
+                       json={"F1": 1}).status_code == 404
+    assert not any("manual" in str(r) for r in app_module.app.url_map.iter_rules())
 
 
 # ---------------- C1: /api/screen market 载荷前端契约(stage/node_score/factors/...) ----------------
@@ -1176,7 +1177,6 @@ def test_guard_unit_matrix():
     endpoint 不执行路由): 敏感四路径×远程→403; 放行清单/GET/本机/局域网→None。"""
     sensitive = {  # 真实路径 → 函数名(endpoint)
         "/api/strategies/full_factor_v1/activate": "api_strategy_activate",
-        "/api/stock/600519/manual": "manual",
         "/api/automation": "api_automation",
         "/api/perf/backfill": "perf_backfill",
     }

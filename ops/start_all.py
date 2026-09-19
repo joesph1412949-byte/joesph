@@ -7,6 +7,15 @@ import subprocess
 import sys
 import webbrowser
 
+# 复用 watchdog 的端口探测(同一份服务表口径), 不新造:
+# 端口已监听 → 跳过拉起。旧行为是无条件 Popen 4 个服务, 而 werkzeug
+# allow_reuse_address=True 让第二个 prism_web 也能 bind 成功并 LISTENING
+# (2026-09-19 实测 5000 上两行 LISTENING) → 静默双开。
+try:
+    from ops.watchdog import port_open            # python -m ops.start_all
+except ImportError:                               # python ops\start_all.py
+    from watchdog import port_open
+
 PY37 = r"C:\Users\28037\AppData\Local\Programs\Python\Python37\python.exe"
 PY312 = r"C:\Users\28037\AppData\Local\Programs\Python\Python312\python.exe"
 QMT_LIB = r"D:\QMT\bin.x64\Lib\site-packages"
@@ -19,9 +28,11 @@ PROCS = [
         "cmd": [PY37, "-m", "qmt_sync", "--account-id", ACCOUNT_ID],
         "cwd": r"d:\cc-joesph",
         "env": {"PYTHONPATH": QMT_LIB},
+        # 无端口可探(不是 HTTP 服务) → 照旧无条件拉起
     },
     {
         "name": "prism_web",
+        "port": 5000,
         "cmd": [PY312, r"prism_web\app.py"],
         "cwd": r"d:\cc-joesph",
         # 2026-09-15 修正: 旧条目是 Py3.7 + cwd=prism_web(已被 prism 接管前的老形态),
@@ -32,12 +43,14 @@ PROCS = [
     },
     {
         "name": "vibe_backend",
+        "port": 8899,
         "cmd": [r"D:\Vibe-Trading\.venv\Scripts\vibe-trading.exe", "serve", "--port", "8899"],
         "cwd": r"D:\Vibe-Trading",
         "env": {},
     },
     {
         "name": "vibe_frontend",
+        "port": 5899,
         # 必须用 npm.cmd: Windows 上 Popen 裸 "npm"(无扩展名) 找不到可执行文件,
         # CreateProcess 抛 FileNotFoundError → start_all 崩在第 4 步, 浏览器不打开。
         "cmd": ["npm.cmd", "run", "dev"],
@@ -55,6 +68,12 @@ _DETACH = getattr(subprocess, "DETACHED_PROCESS", 0)
 def main() -> int:
     os.makedirs(LOGS, exist_ok=True)
     for p in PROCS:
+        port = p.get("port")
+        if port and port_open(port):
+            # 已监听就跳过: 再 Popen 一个同样的服务会静默双开(werkzeug 允许
+            # 重复 bind), 双开后两个实例抢同一份 QMT/缓存/账本。
+            print("[start_all] %s 已在监听 %d, 跳过拉起" % (p["name"], port))
+            continue
         env = dict(os.environ)
         env.update(p["env"])
         log = open(os.path.join(LOGS, p["name"] + ".log"), "ab")

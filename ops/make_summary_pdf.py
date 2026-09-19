@@ -27,6 +27,11 @@ OUT_DIR = ROOT / "docs" / "reports"
 FONT = r"C:\Windows\Fonts\msyh.ttc"
 FONT_BOLD = r"C:\Windows\Fonts\msyhbd.ttc"
 
+# 计入"生产代码行数"的目录(全部核实过存在; `strategy_web` 已随 v04 网页删除,
+# 2026-09-19 清理。`docs`/`tests`/`archive`/`legacy`/`pt_*` 不计入生产代码)。
+PROD_DIRS = ["prism", "prism_web", "tt_solo", "qmt", "qmt_sync",
+             "shared", "backtest", "ops", "datasource"]
+
 # ------------------------------------------------------------ 实时统计
 
 
@@ -53,9 +58,7 @@ def _py_lines(dirs):
 
 
 def collect_stats():
-    prod_dirs = ["prism", "prism_web", "tt_solo", "qmt", "qmt_sync",
-                 "shared", "backtest", "ops", "datasource", "strategy_web"]
-    n_files, n_lines = _py_lines(prod_dirs)
+    n_files, n_lines = _py_lines(PROD_DIRS)
     test_files = [f for f in ROOT.rglob("test_*.py")
                   if "__pycache__" not in str(f)]
     commits = _git("rev-list", "--count", "HEAD")
@@ -322,6 +325,12 @@ def build():
 
 
 if __name__ == "__main__":
+    # 2026-09-19: 旧版不解析 argv, 于是 `--help` 会**真的生成 PDF**(带写副作用
+    # 的"自检")。现在任何参数都只打印用法、绝不写 docs/reports/。
+    if sys.argv[1:]:
+        print("用法: python ops/make_summary_pdf.py  (无参数运行, 输出到 %s)"
+              % OUT_DIR)
+        sys.exit(0 if sys.argv[1] in ("-h", "--help") else 2)
     path, stats = build()
     print("PDF:", path)
     print("stats:", stats)
