@@ -237,9 +237,9 @@ python -m prism.tdx_source      # 6 项：连接/个股日K/大盘指数/板块�
 
 ---
 
-## 2026-09-19 收尾批次（6 批 / 8 提交）：三条开着缺口全关 + 两个新发现
+## 2026-09-19 收尾批次：三条开着缺口全关 + market_data / ops 收口
 
-**已完成**（最终全量 **1577 passed / 0 failed**，基线 1523；净增 54 条全为本次新增防线）
+**已完成**（当日最终全量 **1601 passed / 0 failed**，起点基线 1523）
 
 | 项 | 提交 | 结果 |
 |---|---|---|
@@ -262,10 +262,37 @@ python -m prism.tdx_source      # 6 项：连接/个股日K/大盘指数/板块�
 
 **`live_daemon._down_stop_price` 的真实存在理由（不是为 ST）**：自算分板幅度只是按代码前缀推的**近似**，覆盖不了 新股上市首日/退市整理期首日无涨跌幅限制、除权除息、交易所临时调整幅度 ⇒ 优先用**交易所权威跌停价**（tick `downStopPrice` → `ds.get_instrument` 的 `DownStopPrice` → 才回落自算）。
 
-### 两个新发现（未修，待拍板）
+### `market_data` 两个"疑似缺陷"的最终判定（已收口，`30a50e1` + `5076b11`）
 
-1. **`sectors` 是混源缓存**：31 个申万 `801xxx` + **496 个东财 `BKxxxx` = 527**，而 `kline`(31)/`flow`(16) **全是申万**。`market_data.py:597` 明写切源时三段"一起清，避免 801xxx 与 BKxxxx 混"—— 实盘缓存**违反该不变量**。496 个 BK 板块**无 K 线**，却被 `market_data.py:803/832/1095`、`prism_web/app.py:572` 当正常板块遍历；全仓只有 `live_check.py:311`（手写 `startswith("80")`）与 `first_board_review.py:356` 各自打补丁绕开。**未断定成因**（"清源漏清 sectors" vs "后来东财跑只回填 sectors"），需再读 `build_sector_cache` 清源分支。（附带澄清：`kline` 只有 31 个键**不是缺陷** —— 申万一级行业本就 31 个，`sector_map` 5220 只股票**全部**映射到 `801xxx`，因子路径数据是齐的。）
-2. **`market_data.py` 前四个 `--build-*` flag 恒 exit 0**（裸 `return`），且会**短路后续 flag**：`--build-sectors --build-flow-rank` 里 flow-rank 被**静默忽略**。全仓只有 `--build-flow-rank`/`--build-benchmark` 有退出码语义。`data_refresh.py` 因此用"跑前/跑后只读缓存日期"补证据；东财封禁时 `--build-sectors` 会 exit 0 且日期不推进（退出码无信号）。
+> **本节是对我 09-19 早先那条错误结论的更正。** 我当时写"混源缓存违反不变量、未断定成因"，**方向错了**。
+
+1. **`sectors` 混源（31 个申万 `801xxx` + 496 个东财 `BKxxxx` = 527）是"甲：有意共存"，不是缺陷 —— 不删任何数据。**
+   - `market_data.py:597` 的"三段一起清"**是准确的 rebuild 语义，不是"缓存必须单源"的不变量**（临时缓存实测 `rebuild=True`：sectors 3→1、kline 2→1、flow 1→0，`sector_map`/`benchmark` 原样保留）。
+   - **没有任何消费者需要 BK**：`flow_rank` 段自带 `code/name` 不读 `sectors`；F8 走 `futs.get(ctx.sector_map[code])` 而 `sector_map` 5220 只**目标全 801** ⇒ `futures_snapshot` 产出的 9 个 BK 键**永远取不到**（死重，非错误）；三处消费按前缀**显式过滤**它：`prism_web/app.py:614`（注释明写"801 与东财 BK 同名行并存…免重复命中"）、`first_board_review.py:365`、`qmt/tools/live_check.py:311`。
+   - **决定性一票**：BK 是**默认源 eastmoney 的正常产物**，删了下次成功的 `--build-sectors` 还会写回来 ⇒ "清理"不持久。
+   - 已加守卫 `_assert_source_invariants`（kline/flow 同源族；`kline/flow ⊆ sectors ⊆ sector_map 目标集合` —— 这才是因子路径真正依赖的不变量）+ 4 条用例。唯一真实代价：`build_sector_map:1095` 会把 496 个 BK 码发注定失败的申万请求。
+2. **`--build-*` 退出码已统一**（`30a50e1`）：`0`=点名段真取到/推进；`1`=有段真失败；**`3`=无失败但有段未推进（空数据，旧缓存保留）—— 绝不与 0 同码**。模块 docstring + `--help` epilog 双写。`build_sector_cache` 新增 `attempted/failed` 自报计数以区分"全失败"与"未推进"。
+   - **组合 flag 不再静默短路**：选"依次执行全部点名段"（理由：`--build-flow-rank --build-benchmark` 是既有行为且有回归锁，文档也已按多段组合写）。
+   - **裁决**：`global`/`sector_map`/`futures` "全失败但有旧缓存"判 **3** 而非 1 —— 它们的返回值层面**无法区分**"全失败"与"非交易日无新数据"，硬判 1 会让**每个周末都成告警**。**有依据才判严，没依据就不猜。**
+   - `--build-benchmark` 的"三路全灭保留旧缓存 + exit 1"fail-open **一字未动**。
+
+### 盘后刷新：降级链 + 计划任务（`0872b1c` + `5076b11` + `5c518d5`）
+
+- **入口**：`prism/data_refresh.py`（`--dry-run` 恒 0 且零执行零落盘），薄包装 `ops/prism_data_refresh.ps1`，计划任务入口 `ops/prism_data_refresh_task.ps1` 落日志到 `runtime/log/`（滚动 60 份）。
+- **已注册计划任务 `QMT_Quant_DataRefresh`**（对齐既有 `QMT_Quant_Watchdog` 命名）：周一至周五 **15:45**，interactive only。`install_watchdog.bat` 里的 `QMT_Quant_Watchdog` **当前并未注册**（首次安装需管理员）。
+- **两个旗标**：`data_refresh_FAILED.txt`＝真失败（exit 1）；`data_refresh_DEGRADED.txt`＝**走了降级源**（exit 0 但主源不可用）。分开的理由：**降级必须被看见，但绝不能练成"喊狼来了"**。
+- **降级链（sectors 段）**：主源（东财）真失败才换 `--source sw` **重试恰好一次**；降级成功判 **OK 并标注 degraded**、聚合码仍 0（源降级是有意容错，判 EMPTY 会把"数据其实刷到了"报成告警）；两次皆失败仍判 FAIL。**`--source sw` 拿不到 `flow`**（`market_data.py:605` `flow_enabled=False`，连请求都不发）⇒ 输出**逐段点名"本次仍拿不到: flow"**。
+- `_run_cmd` 原本**没有超时**，现加 `SEG_TIMEOUT=1800s`（估値，未实测，最坏 2×1800s 有界）。
+- **`--source` 是单个全局参数**：sectors 吃 `eastmoney|sw`、global 吃 `eastmoney|sina|fred`，而 `build_global_cache` 对其余值落 else＝**东财口径** ⇒ `--build-sectors --build-global --source sw` 里 **global 静默跑东财**（与"flag 静默短路"同类病）。已修成**逐段回显实际生效源 + 不兼容组合显式 WARNING**，并修掉两处照抄 `args.source` 的**撒谎回显**。未新增 per-segment source 配置层。
+
+### Windows 脚本坑（`.ps1` / `.bat`，均为实测）
+
+- **`.ps1` 含中文必须存为 UTF-8 带 BOM**：PowerShell 5.1 读取无 BOM 的 `.ps1` 时按 GBK 解码，中文字符串字面量一旦**字节对齐吞掉引号**就是直接语法错误（本次新脚本实测踩到）。既有 `ops/prism_launcher.ps1`/`prism_data_refresh.ps1` 未复现故障（解析器检查通过），属**潜在**风险，已一并补 BOM。
+- **PS 5.1 的 `Tee-Object` 没有 `-Encoding` 参数**（那是 PS 6+）⇒ 日志改用 .NET 显式写 UTF-8。
+- **PS 5.1 没有 `Set-Content -Encoding utf8NoBOM`** ⇒ 提交消息文件用 write 工具落无 BOM。
+- **新文件要先 `git add` 才能进路径限定提交**（`git commit -- <未跟踪路径>` 报 pathspec 不匹配）。
+- **"LF 行尾会让 cmd 的 .bat 并行走"在本机不可复现**：受控实验里 LF-only 与 CRLF 的 `if/else` 块、`goto`、标签**行为完全一致** ⇒ `install_watchdog.bat`（LF）是**行尾不一致的卫生问题，不是缺陷**。（我看到的"REM 行粘连"是 `Get-Content` 按 GBK 解码吃掉 `0x0A` 的**假象**。）
+- **`core.autocrlf=true` 但没有 `.gitattributes`** ⇒ 4 个 `.bat` 里 2 个 LF / 2 个 CRLF，每次 `git add` 都刷 "LF will be replaced by CRLF" 警告（MEMORY 里"CRLF/LF 混杂害得批量替换静默失败"即此根因）。加 `.gitattributes` 可根治，但会触发全仓重新规范化，**未做，待拍板**。
 
 ### 环境 / 工具（新增，踩过）
 
