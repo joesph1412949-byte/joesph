@@ -162,10 +162,10 @@ class TTEngine:
             if self.grid_cfg.get("ref_mode") == "open":
                 ref, src = tick.get("open"), "open"
             else:
-                # 前收口径: 优先最后一根已完成日K的收盘。盘前 tick 快照还停在上一
-                # 交易日, 直接采信其 lastClose 会把中枢钉错一个交易日。
-                ref, src = market.prev_close(tick, snap.get("daily"),
-                                             last_close)
+                # 前收口径: 以"今天"为参照系取最后一根已完成日K(不信 tick 时间戳)
+                ref, src = market.prev_close(
+                    tick, snap.get("daily"), snap.get("daily_prev"),
+                    self.now_fn().strftime("%Y%m%d"), last_close)
             if ref and ref > 0:
                 self.ledger.set_ref(code, ref)
                 ref_src = src

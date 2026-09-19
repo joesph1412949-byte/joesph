@@ -53,43 +53,35 @@ def now_hhmm(now=None):
     return (now or datetime.now()).strftime("%H:%M")
 
 
-def prev_close(tick, daily, fallback=None):
-    """做T中枢 ref 的"前收": 优先**最后一根已完成日K的收盘**。
+def prev_close(tick, daily, daily_prev=None, today=None, fallback=None):
+    """做T中枢 ref 的"前收"口径: 以**今天**为参照系取最后一根已完成日K的收盘。
 
-    tick 只在其交易日**新于**日K末根时才采信 —— 盘前 QMT 的 tick 快照还停在上一
-    交易日盘中那一份, 其 lastClose 指向更早一天, 直接采信会把 ref 钉错一个交易日
-    (账本当轮就缓存 ref → 全天档位全错)。日K拿不到 → 回落 tick(旧行为, 不抛)。
+    **不采信 tick 的时间戳** —— 实测 QMT 每轮都把 `tick.time/timetag` 重打成当前
+    墙钟, 而 `lastClose` 仍是陈旧值(2026-09-19 周六实测长电 tick.lastClose=28.46
+    = 09-17 收盘, 当日正确前收是 09-18 的 28.27)。曾用"tick 交易日新于日K末根就
+    采信 tick"当判据, 在真实环境下几乎恒判为真 → 又退回陈旧值, ref 仍错一天。
+    tick 只在**没有日K**时兜底(fail-safe: 拿不到行情就不做T, 而不是不干活)。
 
-    返回 (价格, 来源): 'daily' 日K末根 | 'tick_newer' tick 更新于日K |
-    'tick_fallback' 日K缺失回落 tick。
+    日K末根若就是"今天"(盘中/盘后今日K线已在) → 前收取上一根;
+    否则(盘前/周末/节假日) → 最后一根已完成K线本身就是前收。
+    返回 (价格, 来源): 'daily' | 'daily_prev' | 'tick_fallback'。
     """
-    t, d = tick or {}, daily or {}
+    t = tick or {}
     tclose = _num(t.get("last_close")) or _num(fallback)
-    dclose = _num(d.get("close"))
+    dclose = _num((daily or {}).get("close"))
     if dclose > 0:
-        tdate, ddate = t.get("date"), d.get("date")
-        if tclose > 0 and tdate and ddate and tdate > ddate:
-            return tclose, "tick_newer"
-        return dclose, "daily"
+        if today and str((daily or {}).get("date")) == str(today):
+            # 今日K线已在(收盘价还在动) → 前收 = 上一根
+            pclose = _num((daily_prev or {}).get("close"))
+            if pclose > 0:
+                return pclose, "daily_prev"
+            # 只有今日一根 → 没有上一根可用, 落到下面回落 tick
+        else:
+            # 盘前/周末/节假日: 末根就是最后一根已完成K线, 即前收
+            return dclose, "daily"
     if tclose > 0:
         return tclose, "tick_fallback"
     return None, ""
-
-
-def _tick_date(t):
-    """tick 所属交易日(YYYYMMDD, 本地时区); 取不到 → None。
-
-    xtdata.get_full_tick 实测只给 'time'(毫秒时间戳), 没有 'timetag'。
-    """
-    ts = _num(t.get("time"))
-    if ts > 1e11:                       # 13 位毫秒 → 秒
-        ts /= 1000.0
-    if ts <= 1e8:
-        return None
-    try:
-        return datetime.fromtimestamp(ts).strftime("%Y%m%d")
-    except (OSError, OverflowError, ValueError):
-        return None
 
 
 # ---------------------------------------------------------------- 后端
@@ -124,23 +116,23 @@ class XtdataBackend:
                 "high": _num(t.get("high")),
                 "low": _num(t.get("low")),
                 "last_close": _num(t.get("lastClose")),
-                "date": _tick_date(t),          # 该 tick 所属交易日(定 ref 比新旧用)
                 "volume": _num(t.get("volume")),
                 "amount": _num(t.get("amount")),
             }
         return out
 
-    def daily_last(self, code):
-        """最后一根日K → {"date": "YYYYMMDD", "close": float}; 取不到 → None。
+    def daily_bars(self, code, count=2):
+        """日K末 count 根(升序) → [{"date","close"}, ...]; 取不到 → []。
 
-        定 ref 用(count=1 只取末根, 不多拉历史)。
+        定 ref 用(贴近末根, 不拉长历史)。占位行在 _df_bars 里丢弃。
         """
         try:
+            # 多取两根: 当日占位行/异常行被丢弃后仍凑得齐 count 根
             data = self._mod().get_market_data_ex(
-                ["close"], [code], period="1d", count=1)
+                ["close"], [code], period="1d", count=int(count) + 2)
         except Exception:
-            return None
-        return _df_last_bar((data or {}).get(code))
+            return []
+        return _df_bars((data or {}).get(code), count)
 
     def closes(self, code, count=80):
         xtdata = None
@@ -215,13 +207,13 @@ class SampleBackend:
             }
         return out
 
-    def daily_last(self, code):
-        """样本模式不提供日K末根 → None(上层回落 tick, 维持原行为)。
+    def daily_bars(self, code, count=2):
+        """样本模式不提供日K末根 → [](上层回落 tick, 维持原行为)。
 
-        样本的 tick 已经把 CSV 末根当"当日"用, 再暴露末根会与它同一天 → 两个口径
-        打架, 样本/离线演示的 ref 会从"前收"漂成"末根收盘"。
+        样本的 tick 已经把 CSV 末根当"当日"用, 再暴露日K末根会与它同一天 → 两个
+        口径打架, 样本/离线演示的 ref 会从"前收"漂成"末根收盘"。
         """
-        return None
+        return []
 
 
 def _num(v, default=0.0):
@@ -244,20 +236,25 @@ def _df_closes(df):
     return [float(x) for x in col if x is not None and x == x]
 
 
-def _df_last_bar(df):
-    """日K末根 → {"date": "YYYYMMDD", "close": float}; 空/垃圾 → None(fail-open)。"""
+def _df_bars(df, count=2):
+    """日K末 count 根(升序) → [{"date","close"}, ...]。
+
+    丢掉 close<=0 / NaN 的占位行(当日K线在盘前常是 0 价占位)后再取末 count 根;
+    空表/垃圾/全无效 → [](fail-open, 上层回落 tick)。
+    """
     try:
         if df is None or len(df) == 0:
-            return None
-        close = float(df["close"].iloc[-1])
+            return []
+        closes = [float(c) for c in df["close"].tolist()]
         # period='1d' 的 index 实测是 'YYYYMMDD'; DatetimeIndex 也归一化到同一形状
-        date = str(df.index[-1]).replace("-", "").split(" ")[0][:8]
+        dates = [str(d).replace("-", "").split(" ")[0][:8] for d in df.index]
     except Exception:
-        return None
-    # NaN / 0 价 / 日期不成形 → 这根不可用
-    if close != close or close <= 0 or not date.isdigit():
-        return None
-    return {"date": date, "close": close}
+        return []
+    out = []
+    for date, close in zip(dates, closes):
+        if close > 0 and close == close and date.isdigit():
+            out.append({"date": date, "close": close})
+    return out[-int(count):] if count and int(count) > 0 else out
 
 
 # ---------------------------------------------------------------- 门面
@@ -294,28 +291,30 @@ class MarketFeed:
             return self.fallback.closes(code, count)
         return None
 
-    def daily_last(self, code):
-        """最后一根已完成日K的 {"date","close"}; backend 没这能力/取不到 → None。"""
-        f = getattr(self.backend, "daily_last", None)
+    def daily_bars(self, code, count=2):
+        """日K末 count 根(升序); backend 没这能力/取不到 → []。"""
+        f = getattr(self.backend, "daily_bars", None)
         if f is None:
-            return None
+            return []
         try:
-            return f(code)
+            return f(code, count) or []
         except Exception:
-            return None
+            return []
 
     def snapshot(self, code, count=80, sigma_window=60):
-        """单标的完整上下文: tick + 指标 + 日K末根。行情缺失 → None。"""
+        """单标的完整上下文: tick + 指标 + 日K末两根。行情缺失 → None。"""
         t = (self.ticks([code]) or {}).get(code)
         closes = self.closes(code, count)       # 先取日K: 本地不够时会补下载一次
         if not t and not closes:
             return None
-        daily = self.daily_last(code)           # 定 ref 的权威前收(拿不到 → None)
+        bars = self.daily_bars(code, 2)         # 定 ref 用(拿不到 → [])
         ind = indicators(closes, sigma_window) if closes else indicators([])
         if t:
             # 用真实 tick 的现价/最高/最低覆盖样本推出来的值
             ind["last"] = t.get("last") or ind["last"]
-        return {"code": code, "tick": t or {}, "ind": ind, "daily": daily,
+        return {"code": code, "tick": t or {}, "ind": ind,
+                "daily": bars[-1] if bars else None,
+                "daily_prev": bars[-2] if len(bars) > 1 else None,
                 "source": self.last_source or "unknown"}
 
     def hhmm(self):
