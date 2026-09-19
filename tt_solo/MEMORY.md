@@ -15,11 +15,11 @@
 | 测试基线 | **tt_solo 294 绿**（09-19 审计批次后；四路径 `tt_solo/tests + dashboard/tests + qmt_sync/tests + tests` = **400 passed / 0 failed** 实测）。原 224 → +65（C1/C2/I1~I6）+5（T7） |
 
 - **tt_solo 批次：做T策略抽成自包含项目 + 仪表盘重建**（09-16，spec/plan 见 `docs/superpowers/{specs,plans}/2026-09-16-tt-solo-extract*`）：`tt/`（24 文件/4362 行）+ `tt_web/` → **`tt_solo/`（唯一实现，旧目录已删）**。
-  · **结构**：`tt_solo/ttcore/`（11 模块：`_vendor`/grid/risk/state/broker/market/config/engine/executor/daemon/arm_today）+ `tt_solo/dashboard/`（Flask + 前端，**:5011**）+ `tests/`（**221 绿**）+ `tools/compare_legacy.py`。
+  · **结构**：`tt_solo/ttcore/`（11 模块：`_vendor`/grid/risk/state/broker/market/config/engine/executor/daemon/arm_today）+ `tt_solo/dashboard/`（Flask + 前端，**:5011**）+ `tests/`（**09-19 起 294 绿**）+ `tools/compare_legacy.py`（**已于 `c50162d` 删除**，见下"搬家零回归"）。
   · **依赖剥离（自包含的硬定义）**：只把 5 个符号内联进 `ttcore/_vendor.py`（`atomic_write`/`limit_ratio_for_code`/`is_local_request` + 路径根），把 `prism.live_account` 吸收为 `ttcore/broker.py` → **零 prism/shared import**（AST 扫描护栏常驻，恶意注入实测会红）。
   · **路径归属**：运行数据自带 `tt_solo/runtime/`（`TT_RUNTIME_DIR` 可覆盖）；`TT_SIGNAL_ROOT`（默认 `D:/QMT_SIGNALS`）**是与外部 QMT 桥的契约，刻意不改**。
   · **两个新增功能**（非纯搬家，均经评审）：①**日终归档** `tt_history.jsonl` —— 原 `load()` 遇跨日直接覆盖、前一日永久丢失；现重置前 append（fsync），且 `Ledger(writable=False)` 只读模式让面板能读盘而不写盘。②仪表盘两新接口 `/api/rejections`（按原因码聚合被拦）+ `/api/ledger/history`（收益曲线）。
-  · **搬家零回归的证据**：`python tt_solo\tools\compare_legacy.py` exit 0 —— 新旧引擎同输入下 plan 518 字段 / snapshot 92 / state 100 / history 10 全等，且账本非空（6 笔成交、往返 2、盈亏 630.00）。**唯一例外且已钉为断言**：北交所 `920xxx` 涨跌停比例 0.10 → **0.30**（旧代码经 `shared.common` 少了 `"92"` 段会误拒合法单，属修 bug；当前标的池无 920xxx，故潜伏）。
+  · **搬家零回归的证据（⚠️ 对照工具 `tools/compare_legacy.py` 已随 `c50162d` 删除，下述结论留存）**：当时 `python tt_solo\tools\compare_legacy.py` exit 0 —— 新旧引擎同输入下 plan 518 字段 / snapshot 92 / state 100 / history 10 全等，且账本非空（6 笔成交、往返 2、盈亏 630.00）。**唯一例外且已钉为断言**：北交所 `920xxx` 涨跌停比例 0.10 → **0.30**（旧代码经 `shared.common` 少了 `"92"` 段会误拒合法单，属修 bug；当前标的池无 920xxx，故潜伏）。
   · **仪表盘**：五区块一屏决策面板（状态条三道闸门 `dry_run→paused→armed` / 账户卡 / 档位阶梯含 ▶现价 / 今日战果 / 被拦原因排行）+ 收益曲线；ECharts **走本地**（无 CDN）；急停/放行双重确认；只监听 `127.0.0.1`；**只能关闸不能下单**。
   · **`.bat` 入口**：6 个做T启动器已改指 tt_solo（daemon 必须以 `tt_solo` 为工作目录，否则 `python -m ttcore.daemon` 找不到模块）。
   · **踩坑（重要）**：①**判断文件编码只看原始字节或 `read` 工具，别信 pwsh 的 stdout** —— 它会把正常 UTF-8 中文显示成乱码；本次曾据此误判「`.bat` 与 `tt_config.json` 是 GBK 需重写」，用字节核验后推翻（`做T` = `e5 81 9a 54`），差点把好文件改坏。②**本机没有 `rg`** → 用 `Select-String` 或 grep 工具。③**测试会改写真实运行数据**：`test_env_sim` 5 处构造 `TTDaemon` 未传 `runtime_path` → 用假快照覆盖面向运维的 `tt_runtime.json`（仪表盘正是读它）；已修（两侧都补 `runtime_path=tmp_path`）。④**护栏最容易空转**：负控只测 `import prism` 而不测 `from prism.x import y` 时，把整个 `ImportFrom` 分支删掉 190 个测试仍全绿 —— 已补正向断言（本仓原有违规全是 ImportFrom 形态）。

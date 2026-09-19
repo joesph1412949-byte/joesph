@@ -35,7 +35,7 @@
 | `43731ae` | **交易日闸门**：`schedule.in_session` 加周末闸门（`prism/zt_history.py` 亦被其改动，见下"方案被推翻"） |
 | `4a44bc8` | **`prism/strategy_lint.py`**（新）：策略 JSON 声明键消费自检（AST 扫"哪些键从没被生产代码读过"），未消费即 exit 1 |
 | `b3781c9` | ops/测试诚实性：`ops/smoke_check.py:150` **恒假条件**修活（此前交付自检**无条件**打印"CLI --help 可用"，且引用了不存在的 `scripts/` 路径）+ 新增 `pyproject.toml`（`--import-mode=importlib` 此前只活在命令行）+ `.gitignore` 补 `*.tmp`/`*.pem`/`/_*.py`/`/_*.txt`/`.workbuddy/` |
-| `c50162d` | 删已证实死代码（旧 `backtest/engine.py` + `legacy/` + `tt_solo/tools/compare_legacy.py` + `qmt` 三个零引用工具，**含会向真实账号打 8 笔 `passorder` 的 `order_probe.py`**） |
+| `c50162d` | 删已证实死代码（旧 `backtest/engine.py` + `legacy/` + `tt_solo/tools/compare_legacy.py` + `qmt` 三个零引用工具，**含会向真实账号打 8 笔 `passorder` 的 `order_probe.py`**）。14 文件 / **+28 −1744**；**删除净贡献 = −7 例**（根 `tests/test_backtest.py` 的 7 个 node id），**引入 0 个新失败**（用 `git show HEAD:` 取回被删代码做 A/B 对照）。⚠️ **生死线**：`backtest/__init__.py` 必须同批去掉 `from .engine import BacktestEngine`，否则 `prism_web/app.py:68` 的 `from backtest.cli import ...` 会连带 import 已删模块、**把 5000 打挂**（已实测 `python -c "import prism_web.app"` exit 0）。级联：`legacy/` 一删，`shared/common.SECTORS` 与 `runtime/state/close_pick_state.json` 都**再无消费者**（数据文件未删） |
 
 **实测口径更正（重要，别再用旧说法）**：
 - **"涨跌停缺 92 档让回测算错"** → `92` 段**零影响**（池子 5224 只里北交所 **0 只**）；`400/420` 拆分也**零影响**；**只有 `689` 段有影响（1 只股 × 1 天）**。

@@ -41,7 +41,6 @@
 | `qmt/` | **miniQMT 桥接与工具**（桥脚本 + 只读自检） | `python -m qmt.tools.live_check` | 桥已就位 |
 | `shared/` | **跨项目共享底座**（路径常量 / 日志 / 卖出规则） | — | 被 14 处 import |
 | `backtest/` | 离线回测（旧引擎 + CLI） | `python -m backtest.cli` | 可用 |
-| `legacy/` | v04 时代独立脚本（收盘选股） | `python legacy/strategy_close_pick.py` | 归档 |
 | `ops/` | 运维：一键启动 / 看门狗 / 桌面启动器 | `start_all.bat` | 可用 |
 | `runtime/` | **运行期数据**：cache / state / log（已 gitignore） | — | ⚠️ `state/` 不可重建 |
 | `docs/` | 报告与设计文档（specs / plans / reports） | — | — |
