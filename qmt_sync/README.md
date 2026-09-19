@@ -34,8 +34,11 @@ account_id=<资金账号>
 ```
 告警写入 alerts 表, 在 Vibe-Trading 对话里问 qmt_account 即可查看。
 `data_gap` = 超过 max_silence_s 没有有效数据(默认 60s ≈ 12 个轮询周期)即告警, 覆盖 QMT 断线 /
-qmt_sync 停摆 / 写库持续失败。盘后 QMT 未登录若嫌吵, 置 `"enabled": false`。
+qmt_sync 停摆 / 写库持续失败。**盘后 QMT 未登录或被关掉时它也会报一条** —— 那时"没有数据"是事实,
+不是误报; 报一条后由 60 分钟同规则去重窗压住。不想看就在 alert_rules.json 里置 `"data_gap": {"enabled": false}`。
 `order_error` / `cancel_error` / `disconnected` 无需配置, 废单、撤单失败与断线总会上报。
+`position_change` 的"清仓"在持仓全空时会在文案里注明判据来源(资产侧 market_value≈0 且持仓为空),
+便于事后分辨真假清仓。
 
 ## 查询(在 Vibe-Trading 对话中)
 "我现在账户什么情况" / "查我的持仓明细" / "最近有什么告警"

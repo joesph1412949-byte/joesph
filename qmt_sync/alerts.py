@@ -38,8 +38,13 @@ def evaluate_asset_alerts(asset, prev_day_asset, rules: dict) -> Iterator[tuple[
         yield ("daily_loss", "", "当日资产跌幅 {:.1%} 超过阈值 {:.1%}".format(chg, -float(r["max_loss_pct"])))
 
 
-def evaluate_position_alerts(asset, positions, prev_codes, rules: dict) -> Iterator[tuple[str, str, str]]:
-    """持仓级告警: 单票占比 / 止损线 / 持仓变化。"""
+def evaluate_position_alerts(asset, positions, prev_codes, rules: dict,
+                             basis: str = "") -> Iterator[tuple[str, str, str]]:
+    """持仓级告警: 单票占比 / 止损线 / 持仓变化。
+
+    basis: 持仓**全空**时"清仓"的判据来源说明(由 sync 层传入 —— 只有那里知道资产侧市值)。
+    只在 positions 为空时拼进文案: 将来真出现假告警, 用户一眼看得出判据在哪。
+    """
     total = asset.total_asset or 0.0
 
     rr = _rule(rules, "position_ratio")
@@ -69,7 +74,10 @@ def evaluate_position_alerts(asset, positions, prev_codes, rules: dict) -> Itera
         for c in sorted(cur_codes - prev_codes):
             yield ("position_change", c, "新开仓 {}".format(c))
         for c in sorted(prev_codes - cur_codes):
-            yield ("position_change", c, "清仓 {}".format(c))
+            msg = "清仓 {}".format(c)
+            if basis and not positions:  # 全空轮: 注明判据来源
+                msg += "(依据: {})".format(basis)
+            yield ("position_change", c, msg)
 
 
 def evaluate_gap_alert(last_ok_ts, now_ts, rules: dict) -> Iterator[tuple[str, str, str]]:

@@ -153,7 +153,7 @@ def test_glitch_round_does_not_poison_dedup_window(tmp_path):
     eng.poll_once()
     # 必须是 10:00:05 这条真告警; 旧行为只有 10:00:00 那条抖动轮伪造的(且真告警被去重吞掉)
     assert [(a["message"], a["triggered_at"]) for a in db.query_alerts()] == [
-        ("清仓 600000.SH", "2026-08-12 10:00:05")]
+        ("清仓 600000.SH(依据: 券商资产侧 market_value≈0 且持仓为空)", "2026-08-12 10:00:05")]
 
 
 def test_real_liquidation_still_alerts(tmp_path):
@@ -167,7 +167,9 @@ def test_real_liquidation_still_alerts(tmp_path):
     client.asset.market_value = 0.0      # 资产侧证实没有市值 -> 真空仓
     client.asset.cash = 100000.0
     eng.poll_once()
-    assert [a["message"] for a in db.query_alerts()] == ["清仓 600000.SH"]
+    # 清仓文案必须写明判据来源: 将来真出现假告警, 用户一眼看得出判据在哪
+    assert [a["message"] for a in db.query_alerts()] == [
+        "清仓 600000.SH(依据: 券商资产侧 market_value≈0 且持仓为空)"]
 
 
 # ---------- I2: 数据缺口 + 委托/撤单失败 ----------

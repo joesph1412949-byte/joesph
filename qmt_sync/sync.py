@@ -12,6 +12,8 @@ logger = logging.getLogger("qmt_sync")
 # I1: 持仓查询返回空 list 时用资产侧市值分辨"查询抖动"与"真空仓"。
 # 残值 <= 1 元(零股/退市残值)视为没有市值, 与用户真的清空等价。
 _EMPTY_MV_TOLERANCE = 1.0
+# 走到"全空"分支才可能发的清仓告警, 写明判据来源, 便于事后判断真假。
+_LIQUIDATION_BASIS = "券商资产侧 market_value≈0 且持仓为空"
 
 
 class SyncEngine:
@@ -73,7 +75,8 @@ class SyncEngine:
         pos_rows = [PositionSnapshot.from_xt(p) for p in xt_positions]
         self.db.upsert_positions(self._poll_seq, [r.to_row() for r in pos_rows])
         for rule, code, msg in evaluate_position_alerts(a, pos_rows, self._prev_codes,
-                                                        self.cfg.alert_rules):
+                                                        self.cfg.alert_rules,
+                                                        basis=_LIQUIDATION_BASIS):
             self.db.insert_alert(rule, code, msg, ts)
         self._prev_codes = {p.stock_code for p in pos_rows}
 

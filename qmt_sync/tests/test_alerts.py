@@ -38,6 +38,24 @@ def test_position_change():
     assert any("清仓" in m for m in msgs)
 
 
+def test_liquidation_basis_only_when_fully_empty():
+    """I1 文案判据: "全空轮"才注明依据来源。
+
+    部分清仓(还剩别的票)时资产市值不为 0, 若也拼上"market_value≈0"就是**假判据**,
+    会误导事后判断 —— 该 guard 是文案正确性的一部分。
+    """
+    asset = A(total=100000.0)
+    rules = {"position_change": {"enabled": True}}
+    basis = "券商资产侧 market_value≈0 且持仓为空"
+    # 全空 -> 带依据
+    full = [h[2] for h in evaluate_position_alerts(asset, [], {"600000.SH"}, rules, basis)]
+    assert full == ["清仓 600000.SH(依据: {})".format(basis)]
+    # 部分(还剩 600000.SH) -> 不带依据
+    part = [h[2] for h in evaluate_position_alerts(asset, [P(code="600000.SH")],
+                                                   {"600000.SH", "000001.SZ"}, rules, basis)]
+    assert [m for m in part if "清仓" in m] == ["清仓 000001.SZ"]
+
+
 def test_gap_alert_threshold():
     """I2: 默认阈值 60s(≈12 个默认轮询周期)。未超不报, 超过报一条 data_gap。"""
     rules = {}
