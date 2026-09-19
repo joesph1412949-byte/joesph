@@ -14,6 +14,7 @@ from shared.common import (STATE_DIR, atomic_write, limit_ratio_for_code,
                            next_weekday)
 from prism import engine
 
+LOG = logging.getLogger("prism.paper")
 STATE_FILENAME = ".paper_account.json"
 _DEFAULT_STRATEGY = Path(__file__).parent / "strategies" / "first_board_v04.json"
 _REQUIRED_KEYS = ("version", "created", "initial_capital", "cash", "holdings",
@@ -655,18 +656,49 @@ class PaperAccount:
         rules = self.strategy.get("sell_rules") or {}
         return int(float(rules.get("max_hold_days") or 5))
 
+    @staticmethod
+    def _close_px(close_fn, code, d):
+        """取收盘价: close_fn 抛异常与返回 None 一律归"缺价"(None)。
+
+        生产 close_fn(PaperDaemon.close_fn)自己把取数异常吞成 None, 异常形态
+        只会出现在注入的取价函数上; 两种形态统一成"缺", 才能用同一条判据区分
+        "全缺"(不占当日结算键)与"个别缺"(成本价兜底、照常结算)。"""
+        try:
+            return close_fn(code, d)
+        except Exception:
+            return None
+
     def _nav_at(self, close_fn, d):
-        """收盘盯市净值(结算/补算共用): 现金 + Σ持仓×(收盘价, 缺价回退成本)。"""
-        return self.state["cash"] + sum(
-            h["shares"] * float(close_fn(h["code"], d) or h["cost"])
-            for h in self.state["holdings"])
+        """收盘盯市净值(结算/补算共用): 现金 + Σ持仓×(收盘价, 缺价回退成本)。
+
+        返回 (nav, 缺价只数)。兜底是**逐只**的: 拿到价的逐只用收盘价, 没拿到
+        的才回退成本 —— 所以"全缺"只能按"本次要盯市的持仓无一只有价"判定,
+        不能按"有任一缺失"判失败(否则个别票缺价会让整天结算反复重跑)。
+
+        缺 = close_fn 返回 None/抛异常; **返回 0 是有效值**, 不算缺 —— 不能用
+        `or h["cost"]` 的真值判断当缺价判据(那会把合法的 0 价一并当缺, 且无从
+        分辨全缺/个别缺)。盯市口径本身不变: 仍 `px or cost`。"""
+        nav = self.state["cash"]
+        missing = 0
+        for h in self.state["holdings"]:
+            px = self._close_px(close_fn, h["code"], d)
+            if px is None:
+                missing += 1
+            nav += h["shares"] * float(px or h["cost"])
+        return nav, missing
 
     def settle_day(self, close_fn, due_fn, now=None):
         """盘后结算: 到期持仓按收盘价卖出 + 当日净值盯市定格 + 幂等。
 
         close_fn(code, day=None) -> float|None; due_fn(code, buy_date) -> bool
         (生产调用点恒传自然日口径闭包, 见 PaperDaemon._due_natural);
-        拿不到收盘价的到期持仓保留(下个交易日再结)。"""
+        拿不到收盘价的到期持仓保留(下个交易日再结)。
+
+        F5 失败语义: 行情**全缺**(要盯市的持仓无一只有价)时既不写平点也不占
+        settled_dates —— 旧行为用成本价兜底盯市却照样 append 幂等键, 一次瞬时
+        故障(行情/取价全挂)就把当天净值永久定格在成本价口径, 且 paper_daemon
+        的 `d not in settled_dates` 门让此后永不重算。个别票缺价不算失败: 照常
+        结算(成本价兜底), 但日志与返回点名兜底只数。"""
         now = now or datetime.now()
         d = now.strftime("%Y-%m-%d")
         if self.state is None and not self.load():
@@ -674,17 +706,32 @@ class PaperAccount:
         if d in self.state["settled_dates"]:
             return {"already_done": True}
         closed = []
+        # 判"全缺"的分母取**结算前**持仓数: 结算会卖掉有价的到期仓, 用卖后
+        # 的剩余数当分母会把"个别票缺价"误判成"全缺"(只剩缺价那只 ⇒ 相等),
+        # 整天结算反复重跑。
+        held_n = len(self.state["holdings"])
         for h in list(self.state["holdings"]):
             if not due_fn(h["code"], h["buy_date"]):
                 continue
-            px = close_fn(h["code"], d)
+            px = self._close_px(close_fn, h["code"], d)
             if not px or px <= 0:
                 continue
             done = self._execute_sell(h["code"], px, "hold_expire", now=now)
             if done:
                 closed.append(done)
         snap = self._snapshot_state()
-        nav = self._nav_at(close_fn, d)
+        nav, missing = self._nav_at(close_fn, d)
+        if missing and missing == held_n:
+            # 一只有效价都没拿到(否则不可能 missing==held_n) ⇒ 净值会整日退回
+            # 成本价口径。不写不占, 下一轮/次日重算。closed 此时必为 []。
+            LOG.warning("结算日 %s 的 %d 只持仓全部拿不到收盘价(行情/取价故障)"
+                        " → 不写平点、不占当日 settled_dates, 下一轮重算",
+                        d, missing)
+            return {"error": "全部持仓无收盘价", "missing": missing,
+                    "closed": closed}
+        if missing:
+            LOG.warning("结算日 %s 有 %d/%d 只持仓无收盘价 → 按成本价兜底盯市, "
+                        "照常结算(不重跑)", d, missing, held_n)
         self.state["live_nav"] = round(nav, 2)
         self.state["nav_history"].append({"date": d, "nav": round(nav, 2)})
         self.state["settled_dates"].append(d)
@@ -693,13 +740,20 @@ class PaperAccount:
         except Exception:
             self._restore_state(snap)
             return {"error": "状态保存失败"}
-        return {"closed": closed, "nav": round(nav, 2)}
+        result = {"closed": closed, "nav": round(nav, 2)}
+        if missing:
+            result["cost_fallback"] = missing      # 几只用了成本价兜底
+        return result
 
     def backfill_nav(self, close_fn, trade_days, now=None):
         """缺口日补算: nav_history 末日后、<=今日的交易日逐日盯市。
 
         close_fn(code, day) -> float|None(该日该股收盘价); 未来日跳过;
-        今日补算时同时记入 settled_dates(幂等防重复结算)。"""
+        今日补算时同时记入 settled_dates(幂等防重复结算)。
+
+        F5 同上: 今日行情全缺 → 平点与 settled_dates 都留给 settle_day 重算
+        (旧行为: 收盘后重启一次补算就把当天烧掉, 当日到期仓也不会被卖);
+        往日缺口仍是"有价用价、无价回退成本"的补洞口径, 不涉幂等键。"""
         now = now or datetime.now()
         if self.state is None and not self.load():
             return 0
@@ -716,7 +770,13 @@ class PaperAccount:
                     continue
                 if d > today:
                     continue
-                nav = self._nav_at(close_fn, d)
+                nav, missing = self._nav_at(close_fn, d)
+                if missing and d == today \
+                        and missing == len(self.state["holdings"]):
+                    LOG.warning("补算 %s(今日)要盯市的 %d 只持仓全部拿不到收盘价"
+                                " → 不占当日 settled_dates, 留给 settle_day 重算",
+                                d, missing)
+                    continue
                 self.state["nav_history"].append(
                     {"date": d, "nav": round(nav, 2)})
                 if d == today and d not in self.state["settled_dates"]:

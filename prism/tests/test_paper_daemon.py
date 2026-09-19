@@ -114,6 +114,38 @@ def test_tick_settle_after_close(tmp_path, monkeypatch):
     assert out2["settle"] is None
 
 
+def test_settle_all_prices_missing_retries_next_tick(tmp_path, monkeypatch):
+    """行情全缺 → **不占当日结算键**: 同一 tick 循环的下一轮真的重算并结算。
+
+    旧行为: settle_day 用成本价兜底盯市却登记 settled_dates ⇒ 一次瞬时取价
+    故障 = 当天净值永久定格在成本价口径, 且这里的 `d not in settled_dates`
+    门让此后每一轮都直接跳过(净值/到期卖出双双永久丢失)。"""
+    d, acc = _daemon(tmp_path, monkeypatch)
+    acc.state["screens_done"].append("pickT2026-09-08T15:05")  # 屏蔽 15:05 选股
+    acc.state["holdings"].append({
+        "code": "600000.SH", "shares": 1000, "cost": 9.5,
+        "buy_date": "2026-09-01", "buy_price": 9.5, "entry_nav": 1e6})
+
+    class _DeadDS:                    # 取不到任何K线 → close_fn 恒 None
+        @staticmethod
+        def get_kline(code, days=5):
+            return None
+
+    orig = d.provider.ds
+    d.provider.ds = _DeadDS
+    out = d.tick_once(now=datetime(2026, 9, 8, 15, 5))
+    assert out["action"] == "settle" and out["settle"].get("error")
+    assert acc.state["settled_dates"] == []          # 未占键
+    assert acc.state["nav_history"] == []            # 无成本价平点
+    assert len(acc.state["holdings"]) == 1           # 到期未卖(缺价保留)
+    # 下一轮行情恢复 → 真的重算 + 结算(旧行为下这里恒 already_done)
+    d.provider.ds = orig
+    out2 = d.tick_once(now=datetime(2026, 9, 8, 15, 5, 5))
+    assert acc.state["settled_dates"] == ["2026-09-08"]
+    assert len(acc.state["holdings"]) == 0
+    assert out2["settle"]["nav"] == 1009780.21       # 同 test_tick_settle_after_close
+
+
 # ---------- 上游硬性要求: K线日期提取(time列新schema, Task4审查#1) ----------
 def _ms_dates(days, hour=15):
     """指定日期 → epoch毫秒(本地时区往返自洽, 测试不依赖机器时区)。"""
