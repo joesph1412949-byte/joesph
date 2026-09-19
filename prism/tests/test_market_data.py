@@ -1482,6 +1482,113 @@ def test_cli_combo_failure_does_not_block_and_names_segment(_ws_tmp, monkeypatch
     assert "sectors" in str(ei.value)
 
 
+# ---------------- B: --source 是**单个全局参数** ⇒ 静默口径污染
+#
+# 复读代码确认(09-19): `--source` 只有一个参数(第 1248 行), 但两个段读它:
+#   * sectors → build_sector_cache(source=...), 接受 eastmoney|sw (第 1268-1274 行)
+#   * global  → build_global_cache(source=...), 接受 eastmoney|sina|fred
+#     (第 1275-1280 行); 其余值落到 else 分支 = **按东财口径跑**(第 723-725 行)。
+# 于是 `--build-sectors --build-global --source sw` 里 global **静默按东财口径**跑 ——
+# 与刚修掉的"flag 静默短路"同类病: 用户以为指定了源, 实际只有部分段生效。
+#
+# 最小且诚实的修法(选这个而不是"不兼容组合直接报错"): 不改参数模型, 执行前
+# **逐段打印实际生效源**, 请求源不被某段接受时显式 WARNING。
+# 理由: ① 报错会打断既有可用组合(sectors 想吃 sw、global 想吃 fred 是两条独立
+# 诉求, 现在只能分两次命令, 报错只会把它们判成用法错误); ② 逐段打印比拒绝对
+# "到底哪段吃到了源"更有信息量, 且不新增配置层。
+
+def test_cli_source_global_param_warns_per_segment(_ws_tmp, monkeypatch, capsys):
+    """`--build-sectors --build-global --source sw` → 逐段显示实际源 + WARNING。
+
+    判别力(变异取证): 去掉 WARNING ⇒ 红; 去掉逐段"实际源="⇒ 红;
+    把回显改成 args.source(撒谎)⇒ 红。
+    """
+    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
+    monkeypatch.setattr("sys.argv", ["market_data.py", "--build-sectors",
+                                     "--build-global", "--source", "sw"])
+    got = {}
+
+    def fake_sectors(**k):
+        got["sectors"] = k.get("source")
+        md._save_cache({"sectors": {"801010": {"name": "农林牧渔"}},
+                        "kline": {"801010": {"dates": ["2026-09-18"],
+                                             "close": [1.0]}}})
+        return {"sectors": 1, "kline_codes": 1, "flow_codes": 0,
+                "attempted": 0, "failed": 0}
+
+    def fake_global(**k):
+        got["global"] = k.get("source")
+        md._save_cache({"global": {"NDX": {"name": "纳指",
+                                           "dates": ["2026-09-18"],
+                                           "close": [1.0]}}})
+        return {"NDX": {}}
+
+    monkeypatch.setattr(md, "build_sector_cache", fake_sectors)
+    monkeypatch.setattr(md, "build_global_cache", fake_global)
+    assert _cli_rc() == 0
+    out = capsys.readouterr().out
+    assert got == {"sectors": "sw", "global": "sw"}, \
+        "污染机制: 同一个全局值被原样塞给两个段"
+    assert "WARNING" in out, "该组合必须显式告警(不许继续静默)"
+    assert "段 sectors: 实际源=sw" in out
+    assert "段 global: 实际源=eastmoney" in out, "逐段实际生效源必须打出来"
+    assert "全球指数采集完成(source=eastmoney)" in out, \
+        "回显的源不许撒谎(不许照抄 args.source)"
+
+
+def test_build_global_cache_treats_unknown_source_as_eastmoney(_ws_tmp,
+                                                              monkeypatch):
+    """污染**根源**(生产代码, 不是构造的): build_global_cache 只认 sina/fred,
+    其余任何值(包括 sectors 用的 'sw')落 else 分支 ⇒ 按东财口径跑。
+
+    判别力: 哪天 global 真加了 sw 分支, 本用例红 ⇒ 提醒同步 _SOURCE_OK 的口径表。
+    """
+    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
+    used = []
+
+    class _Probe:
+        def fetch_global_kline(self, secid, beg, end):
+            return []
+
+    def _mk(tag):
+        def f(*a, **k):
+            used.append(tag)
+            return _Probe()
+        return f
+
+    monkeypatch.setattr(md, "EastMoneyProbe", _mk("eastmoney"))
+    monkeypatch.setattr(md, "SinaUSIndexFeed", _mk("sina"))
+    monkeypatch.setattr(md, "FREDFeed", _mk("fred"))
+    md.build_global_cache(source="sw", beg="20260101", end="20260918")
+    assert used == ["eastmoney"], \
+        "source='sw' 在 global 段被静默当成东财口径(这正是要告警的组合)"
+
+
+def test_cli_source_no_warning_when_every_named_segment_accepts_it(_ws_tmp,
+                                                                  monkeypatch,
+                                                                  capsys):
+    """全段都吃这个源 → 只逐段回显, **不**喊狼来了(免得告警被练成噪声)。"""
+    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
+    monkeypatch.setattr("sys.argv", ["market_data.py", "--build-global",
+                                     "--source", "fred"])
+    got = {}
+
+    def fake_global(**k):
+        got["global"] = k.get("source")
+        md._save_cache({"global": {"US10Y": {"name": "10年美债收益率",
+                                             "dates": ["2026-09-18"],
+                                             "close": [1.0]}}})
+        return {"US10Y": {}}
+
+    monkeypatch.setattr(md, "build_global_cache", fake_global)
+    assert _cli_rc() == 0
+    out = capsys.readouterr().out
+    assert got == {"global": "fred"}
+    assert "段 global: 实际源=fred" in out
+    assert "WARNING" not in out
+
+
+
 # ---------------- B(甲): sectors 可以并存 申万801 与 东财BK, 但真正的不变量必须守
 #
 # 09-19 复核结论(证据见报告 §B): BK 码不是"无意残留" —— 它是**默认源(eastmoney)

@@ -45,26 +45,56 @@ def _line(out, prefix):
     return [x for x in out.splitlines() if x.startswith(prefix)][0]
 
 
+def _seg_of(cmd):
+    """命令 → 段表项(尾部参数与 SEGMENTS 的 args(+降级后缀)精确匹配)。
+
+    **不能用"第几次调用"推断段**: sectors 有了降级重试后, 调用序号与段表不再
+    一一对应(sectors 失败会多出一次 --source sw 的调用)。
+    """
+    tail = list(cmd[3:])
+    for s in dr.SEGMENTS:
+        if tail in (list(s["args"]),
+                    list(s["args"]) + list(s.get("fallback") or ())):
+            return s
+    raise AssertionError("未知命令: %r" % (cmd,))
+
+
+def _is_fallback(cmd):
+    """这条命令是不是降级重跑(尾部参数 = 段 args + 段 fallback)。"""
+    s = _seg_of(cmd)
+    return bool(s.get("fallback")) and \
+        list(cmd[3:]) == list(s["args"]) + list(s["fallback"])
+
+
 def _install(monkeypatch, fail_name=None, empty_name=None, rc_map=None,
-             grown_keys=()):
+             grown_keys=(), sw_rc=None):
     """装假执行层。
 
     除点名段外都返回 rc=0(即使点名段失败, 后面的段照跑 —— 与 market_data
     自己的"一段被封不连累另一段"同口径)。empty_name 段复刻真实假成功路径:
     **执行 rc=0 但缓存里那段确实为空**; grown_keys 里的缓存键在"跑完后"变长
     (复现"退出码说失败/未推进, 缓存却推进了"的矛盾场景)。
+    sw_rc: **仅**覆盖降级重跑(--source sw)那次的退出码; None ⇒ 降级重跑沿用
+    与主源相同的规则(fail_name/rc_map 照样命中) —— 这样"两次都失败"用例不必
+    额外声明, 而"降级成功"用例显式给 0。
     """
     calls = []
     scans = []          # _load_cache 被调次数: 每段 = 跑前(before) + 跑后(after)
 
+    def _rc_for(cmd):
+        name = _seg_of(cmd)["name"]
+        if _is_fallback(cmd) and sw_rc is not None:
+            return sw_rc, "[%s/sw] 采集完成" % name, ""
+        if rc_map and name in rc_map:
+            return rc_map[name], "", "market_data: %s" % name
+        if name == fail_name:
+            return 1, "", "market_data: %s 采集失败(东财可能封禁)" % name
+        return 0, "[%s] 采集完成" % name, ""
+
     def fake_run(cmd):
         calls.append(list(cmd))
-        name = dr.SEGMENTS[len(calls) - 1]["name"]
-        if rc_map and name in rc_map:
-            return _CP(rc_map[name], "", "market_data: %s" % name)
-        if name == fail_name:
-            return _CP(1, "", "market_data: %s 采集失败(东财可能封禁)" % name)
-        return _CP(0, "[%s] 采集完成" % name)
+        rc, out, err = _rc_for(cmd)
+        return _CP(rc, out, err)
 
     def fake_cache():
         # 第 1 次读 = 第 1 段的 before, 第 2 次 = 第 1 段的 after, ...
@@ -72,11 +102,10 @@ def _install(monkeypatch, fail_name=None, empty_name=None, rc_map=None,
         scans.append(nth)
         is_after = nth % 2 == 1
         snap = dict(CACHE_FULL)
-        if empty_name:
+        if empty_name and any(_seg_of(c)["name"] == empty_name for c in calls):
             idx = [s["name"] for s in dr.SEGMENTS].index(empty_name)
-            if len(calls) > idx:               # 该段跑完之后, 它的段是空的
-                for k in dr.SEGMENTS[idx]["keys"]:
-                    snap.pop(k, None)
+            for k in dr.SEGMENTS[idx]["keys"]:
+                snap.pop(k, None)
         if grown_keys and is_after:
             for k in grown_keys:
                 snap[k] = {"XX": {"dates": ["2026-01-01", "2026-12-31"]}}
@@ -219,3 +248,82 @@ def test_rc0_without_progress_is_reported_as_note_not_mismatch(monkeypatch,
     assert code == 0, "未推进不得被自动判死(那需要交易日历)"
     assert "末日未推进" in out
     assert "矛盾" not in out
+
+
+# ---------------- 09-19: sectors 段的 东财 → 申万 降级链 ----------------
+#
+# 为什么需要(问题): sectors 段用默认源(eastmoney)。本机东财 push2/push2his 连接
+# 被 reset, 该段**每个交易日**必判 rc=1 ⇒ 计划任务天天落 data_refresh_FAILED.txt
+# 告警旗, 而缓存其实本可以用 --source sw 刷新(kline/flow 本来就是申万 801)。
+# 这就是"功能名义存在、实际不通"。
+#
+# 判定边界(有意选择, 不是默认值): 降级成功 ⇒ 该段判 **OK 并标注降级**, 聚合里
+# 只作"注记"(成功行里带 (降级→--source sw)), **不**升级为 EMPTY/FAIL ——
+# 源降级是有意设计的容错, 不是故障; 判 EMPTY(2) 会让计划任务把"数据其实刷到了"
+# 报成告警。但"降级后拿不到的段"必须逐段如实列出, 绝不冒充全绿。
+# 两次都失败 ⇒ 老实判 FAIL(降级不是洗白)。
+
+def test_sectors_primary_fail_falls_back_to_sw(monkeypatch, capsys):
+    """① 主源(东财)失败 → 用 --source sw 重试一次; 成功则判成功且**标注降级**。
+
+    判别力(变异取证): 去掉降级重试 ⇒ 该段判 FAIL、调用数少一条 ⇒ 本用例红。
+    """
+    calls = _install(monkeypatch, fail_name="sectors", sw_rc=0)
+    code = dr.main([])
+    out = capsys.readouterr().out
+    assert code == 0, "降级成功不该判失败(源降级是有意的容错, 不是故障)"
+    assert len(calls) == len(dr.SEGMENTS) + 1, "sectors 必须被重试恰好一次"
+    assert calls[1][3:] == ["--build-sectors", "--source", "sw"], \
+        "重试必须换成申万源(不是原样再跑一次东财)"
+    assert "sectors" in _line(out, "  成功:")
+    assert "失败: (无)" in out
+    assert "降级" in _line(out, "  成功:"), "降级不许被冒充成全绿"
+
+
+def test_sectors_both_sources_fail_is_still_fail(monkeypatch, capsys):
+    """② 主源与降级源都失败 → 仍判 FAIL(降级不许把失败洗白)。"""
+    calls = _install(monkeypatch, fail_name="sectors")
+    code = dr.main([])
+    out = capsys.readouterr().out
+    assert code == 1, "两次都失败必须非零退出"
+    assert len(calls) == len(dr.SEGMENTS) + 1, "失败也要走完降级重试再判死"
+    assert "sectors" in _line(out, "  失败:")
+    assert "sectors" not in _line(out, "  成功:")
+    assert "--source sw" in _line(out, "  降级:"), \
+        "两路皆败也要说清试过哪个降级源"
+
+
+def test_degraded_run_names_segments_still_unavailable(monkeypatch, capsys):
+    """③ 降级后**拿不到**的段必须如实列出(申万无 flow 段)。
+
+    注意 flow 在缓存里**有数据**(CACHE_FULL): 这里要报的是"本次拿不到",
+    与"缓存为空"是两回事 —— 少了这句等于把降级说成"全都刷到了"。
+    判别力(变异取证): 抹掉"仍拿不到"这一句 ⇒ 本用例红。
+    """
+    _install(monkeypatch, fail_name="sectors", sw_rc=0)
+    dr.main([])
+    out = capsys.readouterr().out
+    ln = _line(out, "  降级:")
+    assert "拿不到" in ln and "flow" in ln, \
+        "降级后拿不到的段必须逐段点名: %r" % ln
+    assert "--source sw" in ln
+
+
+def test_child_process_has_timeout(monkeypatch):
+    """不许长时间阻塞: 单段子进程必须带超时(降级 = 至多 2 次 × 超时)。
+
+    判别力(变异取证): 去掉 timeout 参数 ⇒ 东财连接挂死会挂住整个计划任务 ⇒ 红。
+    """
+    seen = {}
+
+    class _P:
+        returncode, stdout, stderr = 0, "", ""
+
+    def fake_run(cmd, **kw):
+        seen.update(kw)
+        return _P()
+
+    monkeypatch.setattr(dr.subprocess, "run", fake_run)
+    dr._run_cmd(["python", "-c", "pass"])
+    assert seen.get("timeout"), "子进程必须带有限超时, 否则会无限阻塞"
+

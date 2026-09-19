@@ -1220,6 +1220,38 @@ def _produced(name, r):
     return False
 
 
+# ------------------------------------------------- --source 是**单个**全局参数
+#
+# 复读代码确认(09-19): `--source` 只有一个参数(choices=eastmoney|sw|sina|fred,
+# 见 build_cli 的 add_argument), 但只有两个段读它, 且两者接受的值域**不同**:
+#   * sectors → build_sector_cache(source=...): eastmoney | sw
+#     (sw ⇒ SWIndexFeed + flow_enabled=False, 见 build_sector_cache 开头)
+#   * global  → build_global_cache(source=...): eastmoney | sina | fred
+#     (sina/fred 各有专门分支; **其余任何值落 else = 东财口径**, 见其开头)
+# 于是 `--build-sectors --build-global --source sw` 里 **global 静默按东财口径跑** ——
+# 与刚修掉的"组合 flag 静默短路"是同一类病: 用户以为指定了源, 实际只有部分段生效。
+#
+# 修法选择(最小且诚实): **不改参数模型**, 执行前逐段打印本次**实际生效**的源, 请求源
+# 不被某段接受时显式 WARNING。没选"不兼容组合直接报错"的理由: ① 报错会打断既有
+# 可用组合(sectors 吃 sw、global 吃 fred 是两条独立诉求, 现在分两次命令即可, 报错
+# 只会把它们判成用法错误); ② 逐段回显比拒绝更有信息量("哪段没吃到"一目了然);
+# ③ 不新增 per-segment source 配置层(改动面)。
+# 也不选"让 global 也吃 sw": sw 在 global 里就是没人实现的 else 分支, 那是**新增源**,
+# 不是修口径污染 —— 只会冒出一个沉默的错源。
+_SOURCE_OK = {"sectors": ("eastmoney", "sw"),
+              "global": ("eastmoney", "sina", "fred")}
+
+
+def _effective_source(name, source):
+    """该段**实际**会用哪个源 —— 请求源不被该段接受时回落到该段默认(eastmoney)。
+
+    不接受 --source 的段返回 None(它们与源无关, 不该出现在口径回显里)。
+    """
+    if name not in _SOURCE_OK:
+        return None
+    return source if source in _SOURCE_OK[name] else "eastmoney"
+
+
 def build_cli():
     import argparse
     ap = argparse.ArgumentParser(
@@ -1271,13 +1303,16 @@ def build_cli():
                                                 source=args.source,
                                                 rebuild=args.rebuild),
                      lambda r: print("\n板块采集完成(source=%s):"
-                                     % args.source, r)))
+                                     % _effective_source("sectors",
+                                                         args.source), r)))
     if args.build_global:
         jobs.append(("global",
                      lambda: build_global_cache(beg=args.beg,
                                                 source=args.source),
                      lambda r: print("全球指数采集完成(source=%s): %d 个"
-                                     % (args.source, len(r)))))
+                                     % (_effective_source("global",
+                                                          args.source),
+                                        len(r)))))
     if args.build_sector_map:
         jobs.append(("sector_map",
                      lambda: build_sector_map(progress=prog),
@@ -1305,6 +1340,24 @@ def build_cli():
         print("上证基准:", len(bench.get("dates") or []), "日")
         print("资金惯性:", len(fr.get("dates") or []), "日快照")
         return EXIT_OK
+
+    # --source 口径回显(见上面 _SOURCE_OK 的注释): 逐段打印**实际生效**的源;
+    # 请求源不被某段接受时显式 WARNING —— 不许再静默。
+    affected = [(n, _effective_source(n, args.source)) for n, _f, _e in jobs]
+    affected = [(n, s) for n, s in affected if s]
+    if affected:
+        print("--source %s 的逐段实际生效源(该参数是全局的, 两段接受的值域不同):"
+              % args.source)
+        for n, s in affected:
+            print("  段 %s: 实际源=%s%s"
+                  % (n, s, "" if s == args.source
+                     else "  ← 不接受 --source=%s, 按该段默认 eastmoney 跑"
+                          % args.source))
+        bad = [n for n, s in affected if s != args.source]
+        if bad:
+            print("WARNING: --source 是全局参数, 段 %s 不吃 --source=%s, 本次实际按 "
+                  "eastmoney 跑(与你指定的源不同); 要换源请把该段**单独跑一条命令**"
+                  % ("/".join(bad), args.source))
 
     fails, empties, oks = [], [], []
     for name, fn, emit in jobs:
