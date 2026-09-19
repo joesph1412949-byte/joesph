@@ -1,10 +1,17 @@
-﻿# prism_launcher.ps1 — PRISM 桌面启动器实际逻辑(守护+网页, 双防重复)。
+# prism_launcher.ps1 — PRISM 桌面启动器实际逻辑(守护+网页, 双防重复)。
 # 桌面 PRISM.bat 只是 4 行 ASCII 薄壳, 指到本文件; 解析健壮性由 PowerShell 保证
 # (2026-09-04: 纯 bat 版因 if 块内引号含括号导致 cmd 解析闪退, 弃用)。
 $ErrorActionPreference = "Continue"
 $repo = "D:\cc-joesph"
 Set-Location $repo
 $env:PYTHONIOENCODING = "utf-8"
+# 2026-09-19: 必须关掉 Flask debug。prism_web/app.py 的 debug 默认 True
+# (os.environ.get("APP_DEBUG","1") != "0"), 后果三个:
+#   1) werkzeug reloader → 一个服务变"父+子两个 python 进程", 每实例多占一条 QMT 连接;
+#   2) 任一被 import 的 .py 变更就热重启服务(实测 40 秒重建 4 个子进程);
+#   3) 暴露交互式调试器 /console(实测 200), 而 5000 还挂着公网隧道 → 面朝公网。
+# ops/start_all.py 与 ops/watchdog.py 本来就设了 APP_DEBUG=0, 只有这里漏了。
+$env:APP_DEBUG = "0"
 
 Write-Host "=== PRISM 模拟盘启动器 ==="
 
