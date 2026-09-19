@@ -34,12 +34,19 @@ pytest_tmp/
 fundamental_cache.json
 manual_factors.json
 screen_result.json
-screen_result.json.tmp
 limitup_result.json
-limitup_result.json.tmp
 strategy_web/perf/
 backtest_compare_result.json
 backtest_compare_err.log
+
+# 原子写中转文件: shared/common.py::atomic_write 用 `<path>.<pid>.<tid>.tmp`;
+# 旧规则写死的是无 pid/tid 的旧名(screen_result.json.tmp 等), git check-ignore
+# 实测一个真实 tmp 都不命中。*.tmp 覆盖所有 atomic_write 目标(账本/选股结果/
+# 涨停池/月度缓存), 仓库当前零个已跟踪 *.tmp 文件 → 不会误伤。
+*.tmp
+
+# 私钥/证书: 绝不入库(Joesph_key.pem 是工作区里的真实私钥)
+*.pem
 
 # OS
 .DS_Store
@@ -81,7 +88,9 @@ superpowers-main/
 
 # 模拟盘账本(本地运行数据, 绝不提交)
 .paper_account.json
-.paper_account.json.tmp
+
+# prism_web 前端 UI 手工备份快照(不入库)
+prism_web/_ui_backup_*/
 
 # 运行期数据统一收纳目录(2026-09-14 目录重组):
 #   runtime/cache/  采集缓存(可重建)   runtime/state/  账本与状态(不可重建)
@@ -96,10 +105,14 @@ runtime/log/*
 
 # 一次性采集/探测脚本/临时文档(不进 git)
 pt_*
+# 根目录一次性脚本/输出: 必须锚定 `/`, 否则会误伤 prism/_utils.py 这类子目录文件
+/_*.py
+/_*.txt
 *.sw_backup.pkl
 
 # Agent / tooling directories
 .agents/
+.workbuddy/
 .codex/
 deepseek-harness*/
 scripts/

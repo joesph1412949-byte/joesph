@@ -1,0 +1,8 @@
+# 仓库根最小 pytest 配置。
+#
+# addopts: prism/tests/test_backtest.py 与 tests/test_backtest.py 同名(全仓共
+# 2 组重名), 默认 prepend 导入模式下 pytest 按 basename 缓存模块 →
+# "import file mismatch" + Interrupted: 1 error during collection。
+# 此前只靠命令行手带 --import-mode=importlib, IDE / CI / 裸 pytest 必炸。
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """交付级冒烟自检 — 以「用户拿到这个系统」的视角逐项验证。
 
-用法: python scripts/smoke_check.py [--with-cli]
+用法: python ops/smoke_check.py [--with-cli]
 
 覆盖:
   1. 关键模块可导入(无语法/循环依赖)
@@ -139,17 +139,35 @@ def _state():
 
 # ---------------------------------------------------------------- 6. CLI
 
+# 交付 CLI 入口, --help 必须 rc=0。
+# 历史缺陷(2026-09-19): 第二项写的是 `scripts/make_prism_summary_pdf.py`,
+# 该路径**不存在**(真身是 ops/make_summary_pdf.py), 但守卫条件
+# `"--help" not in args[-1]` 对 `--help` 恒为 False ⇒ 任何 rc 都被吞掉,
+# 本项**无条件**打印"CLI --help 可用"(实测: 子进程 rc=2 时依旧返回通过)。
+# 现: 真入口 + 失败即 raise(返回一句话不算失败, 判别力在 raise 上)。
+# 不列 ops/make_summary_pdf.py: 它不解析 argv, 传 --help 会真的去生成 PDF
+# (实测 rc=0 + 写出 docs/reports/*.pdf), 与"只读自检"冲突。
+CLI_HELP_CMDS = (
+    ["-m", "prism.market_data", "--help"],
+    ["ops/watchdog.py", "--help"],
+)
+
+
 def _cli():
     import subprocess
     outs = []
-    for args in (["-m", "prism.market_data", "--help"],
-                 ["scripts/make_prism_summary_pdf.py", "--help"]):
+    for args in CLI_HELP_CMDS:
+        if args[0] != "-m" and not (ROOT / args[0]).is_file():
+            outs.append("%s 不存在" % args[0])
+            continue
         r = subprocess.run([sys.executable] + args, cwd=str(ROOT),
                            capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=90)
-        if r.returncode != 0 and "--help" not in args[-1]:
+        if r.returncode != 0:
             outs.append("%s rc=%d" % (args[1], r.returncode))
-    return "CLI --help 可用" if not outs else "; ".join(outs)
+    if outs:
+        raise AssertionError("CLI --help 失败: %s" % "; ".join(outs))
+    return "CLI --help 可用 (%d 个入口)" % len(CLI_HELP_CMDS)
 
 
 def _guard():

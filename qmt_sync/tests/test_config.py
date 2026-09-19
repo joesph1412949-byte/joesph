@@ -1,8 +1,11 @@
-import os, tempfile
 from qmt_sync.config import Config
 
-def test_defaults():
-    cfg = Config.load()  # 无配置文件 -> 默认值
+def test_defaults(tmp_path):
+    # 显式指向不存在的路径。旧写法 Config.load() 读机器绝对路径
+    # D:\QMT_SYNC\qmt_sync.conf, 靠「该文件恰好不存在」为绿 —— 实测在部署目录
+    # 放一个 poll_interval_s=7 的配置, 旧写法立刻变红。
+    cfg = Config.load(conf_path=str(tmp_path / "no.conf"),
+                      alert_path=str(tmp_path / "no.json"))
     assert cfg.db_path == r"D:\QMT_SYNC\qmt_sync.db"
     assert cfg.poll_interval_s == 5.0
 

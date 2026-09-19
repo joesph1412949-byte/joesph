@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from qmt_sync.models import AssetSnapshot, PositionSnapshot, TradeRecord, OrderRecord
+from qmt_sync.models import AssetSnapshot, PositionSnapshot, TradeRecord
 
 def test_asset_from_xt():
     xt = SimpleNamespace(account_id="8888", total_asset=123456.0, cash=20000.0,

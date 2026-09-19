@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 """网格引擎纯逻辑测试。"""
-import math
 import pytest
 
 from ttcore import grid

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """模拟盘 CLI + gitignore 测试 — 全离线。"""
+import subprocess
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -48,6 +49,31 @@ def test_cli_once_tick_error_wrapped(tmp_path, capsys, monkeypatch):
 
 
 def test_gitignore_covers_paper_state():
-    txt = (ROOT / ".gitignore").read_text(encoding="utf-8")
-    assert ".paper_account.json" in txt
-    assert ".paper_account.json.tmp" in txt
+    """真名必须被忽略 —— 账本 + shared/common.py atomic_write 的
+    `<path>.<pid>.<tid>.tmp`(实测名 .paper_account.json.40120.51234.tmp)。
+
+    旧断言查的是 .gitignore 的**文本**里有没有 ".paper_account.json.tmp" 这个
+    子串(恒真形态): 规则写死旧 tmp 名、真实文件一个都不匹配, 也照样绿。
+    """
+    for name in (".paper_account.json",
+                 ".paper_account.json.40120.51234.tmp",
+                 "screen_result.json.40120.51234.tmp",
+                 "limitup_result.json.40120.51234.tmp",
+                 "Joesph_key.pem",
+                 ".workbuddy/x.json",
+                 "prism_web/_ui_backup_20260917/index.html",
+                 "_scratch.py", "_scratch.txt"):
+        r = subprocess.run(["git", "check-ignore", "-q", name],
+                           cwd=str(ROOT), capture_output=True, text=True)
+        assert r.returncode == 0, "未被忽略: %s" % name
+
+
+def test_gitignore_does_not_overreach():
+    """--no-index: 只判规则本身, 不让「已被 git 跟踪」掩盖误伤。
+
+    `/` 锚定的 /_*.py 若漏掉前导 `/`, prism/_utils.py 这类子目录文件会被误伤。
+    """
+    for name in ("prism/_utils.py", "prism/paper.py", "docs/reports/x.md"):
+        r = subprocess.run(["git", "check-ignore", "-q", "--no-index", name],
+                           cwd=str(ROOT), capture_output=True, text=True)
+        assert r.returncode == 1, "被误伤: %s" % name
