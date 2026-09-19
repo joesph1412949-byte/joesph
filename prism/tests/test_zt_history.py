@@ -412,3 +412,78 @@ def test_atomic_pickle_survives_concurrent_reader(zt_tmp_paths, monkeypatch):
                             % (rnd, errs))
         assert pickle.loads(p.read_bytes()) == {"i": rnd}
     assert [q for q in zt_tmp_paths.iterdir() if q != p] == [], "不留任何残留"
+
+
+# ---------------- 交易日判据(R1, 2026-09-19): trading_days / is_trading_day ----------------
+
+def test_trading_days_reuses_index_readonly(zt_tmp_paths):
+    """R1: 复用**既有**按日索引(_load_index), 不另造一份解析, 不重建/刷新缓存。
+
+    判别力: 守护每 5 秒调一次判据 —— 若判据顺手 build_index()/refresh_cache(),
+    这里会看到索引字节被改写或留下 tmp 残留; 索引缺失时更不许凭空创建一个
+    "空索引"文件(那会被 _load_index 当成有索引)。
+    """
+    assert zt.trading_days() is None                    # 无索引 → 未知
+    assert not zt.INDEX_PATH.exists()                   # 不许创建文件
+    _write_index({"2026-09-17": [{"code": "600000.SH", "boards": 1}],
+                  "2026-09-18": [{"code": "000001.SZ", "boards": 2}]})
+    before = zt.INDEX_PATH.read_bytes()
+    assert zt.trading_days() == {date(2026, 9, 17), date(2026, 9, 18)}
+    assert zt.INDEX_PATH.read_bytes() == before         # 只读: 字节不变
+    assert [q for q in zt_tmp_paths.iterdir() if q != zt.INDEX_PATH] == []
+
+
+def test_trading_days_unknown_on_empty_or_bad_keys(zt_tmp_paths):
+    """R1 边界: 索引缺失/为空/键全非法 → None(**未知**): 不抛异常, 也**不**返回
+    "不是交易日"。
+
+    判别力: 失败方向必须是"未知"(调用方回落 weekday); 若返回空集合/False,
+    冷缓存机器整个交易时段被锁死 —— R3 明令禁止。
+    """
+    assert zt.trading_days() is None                    # 索引文件不存在
+    zt.INDEX_PATH.write_bytes(pickle.dumps({}, protocol=4))
+    assert zt.trading_days() is None                    # 空索引
+    assert zt.is_trading_day(date(2026, 9, 18)) is None
+    _write_index({"不是日期": [], "2026/09/18": []})       # 键全非法
+    assert zt.trading_days() is None
+    assert zt.is_trading_day(date(2026, 9, 18)) is None
+    _write_index({"2026-09-18": [{"code": "600000.SH", "boards": 1}],
+                  "不是日期": []})                       # 混入坏键 → 跳过坏键, 不作废整体
+    assert zt.trading_days() == {date(2026, 9, 18)}
+
+
+def test_is_trading_day_three_tiers(zt_tmp_paths):
+    """R3 判据层三档: ①在册 → True ②索引覆盖到更晚日期而缺席 → False
+    ③索引还没覆盖该日 → None(未知)。"""
+    _write_index({"2026-02-13": [{"code": "600000.SH", "boards": 1}],
+                  "2026-02-24": [{"code": "000001.SZ", "boards": 1}]})
+    assert zt.is_trading_day("2026-02-13") is True             # ①在册
+    assert zt.is_trading_day("2026-02-17") is False            # ②春节工作日
+    assert zt.is_trading_day(date(2026, 2, 17)) is False       # 接 date
+    assert zt.is_trading_day(datetime(2026, 2, 17, 10)) is False   # 接 datetime
+    assert zt.is_trading_day("2026-02-24") is True             # 末根自身在册
+    assert zt.is_trading_day("2026-03-01") is None             # ③晚于末根 → 未知
+    assert zt.is_trading_day(date(2026, 2, 17), index={}) is None
+    zt.INDEX_PATH.unlink()
+    assert zt.is_trading_day("2026-02-17") is None             # 索引缺失 → 未知
+
+
+def test_is_trading_day_bad_input_is_unknown_never_raises(zt_tmp_paths):
+    """判别力: 判据在守护 tick 里被调用 —— 坏输入(None/空串/垃圾/非法日期)必须
+    返回 None, 绝不抛(抛了就是 tick 崩溃, 比判错更糟)。"""
+    _write_index({"2026-02-13": [{"code": "600000.SH", "boards": 1}]})
+    for bad in (None, "", "   ", "abc", "2026-13-45", object()):
+        assert zt.is_trading_day(bad) is None
+
+
+def test_trading_days_reads_real_local_index_when_present():
+    """真实数据对照(无本机索引则 skip): 索引键就是交易日 —— 本机实测 413 天,
+    2026 春节 02-16~02-20 五个工作日缺席而 02-13/02-24 在册。"""
+    idx = zt.trading_days()
+    if not idx or date(2026, 2, 24) not in idx:
+        pytest.skip("本机 zt 索引缺失或未覆盖 2026-02 → 跳过真实数据对照")
+    assert date(2026, 2, 13) in idx
+    assert date(2026, 2, 17) not in idx
+    assert zt.is_trading_day("2026-02-17") is False
+    assert zt.is_trading_day("2026-02-24") is True
+    assert zt.is_trading_day("2026-09-18") is True
