@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """F1 首板确认: 近20日无涨停且今日首次涨停。"""
 from prism.registry import factor
+from shared.common import limit_ratio_for_code
 
 
 @factor(id="F1", name="首板确认", category="first_board",
@@ -12,9 +13,7 @@ def compute(ctx):
     if kline is None or not up_price:
         return {"score": 0, "note": "K线或涨停价缺失"}
     closes = kline["close"].tolist()
-    code = ctx.code or ""
-    ratio = (0.30 if code.startswith(("8", "4")) else
-             0.20 if code.startswith(("300", "301", "688")) else 0.10)
+    ratio = limit_ratio_for_code(ctx.code or "")
     start = max(1, len(closes) - 20)
     prev_limit = False
     for i in range(start, len(closes) - 1):

@@ -126,6 +126,24 @@ def test_f1_prior_limitup_within_20d_matches_old():
     assert "已有涨停" in res["note"]
 
 
+def test_f1_bj_10pct_day_is_not_prior_limitup():
+    """北交所 30% 档: 窗口内 10% 的上涨不是涨停, 不能据此排除候选。
+
+    判别逻辑: 窗口内唯一可疑 K 线是 10.0 → 11.0(+10%)。
+      * 用 10% 档(改前的 F1 自带实现, 北交所缺 30% 档) → 11.0 >= 10.0*1.1 - 0.01
+        → prev_limit=True → score 0(误排除)。
+      * 用 30% 档(与 shared/exit_rules 同口径) → 11.0 < 10.0*1.3 - 0.01
+        → prev_limit=False; 今日 13.0 = 10.0*1.3 是真涨停 → score 1。
+    旧实现(datasource.factors)同为 10% 档, 故此例对旧实现的差异是预期的, 不比对。
+    """
+    code = "920001.BJ"
+    closes = [10.0] * 20 + [11.0, 10.0] + [13.0]
+    kline = make_kline(closes, [100000] * len(closes))
+    tick, detail = _hit_tick(13.0, 10.0), _hit_detail(13.0)
+    res = reg.get_factor("F1")["func"](_stock_ctx(code, tick, detail, kline=kline))
+    assert res["score"] == 1
+
+
 # ---------- F2 早封板 ----------
 
 def test_f2_epoch_ms_early_matches_old():

@@ -104,9 +104,14 @@ def em_code_to_tick_key(code):
 
 
 def limit_ratio_for_code(code):
-    """Price-limit ratio by board: BJ 30%, ChiNext/STAR 20%, main 10%."""
+    """Price-limit ratio by board: BJ 30%, ChiNext/STAR 20%, main 10%.
+
+    Authority: shared/exit_rules.limit_ratio. The two copies MUST stay in
+    sync (guarded by datasource/tests/test_common.py::
+    test_limit_ratio_consistent_with_exit_rules); each stays inline so
+    neither module depends on the other's import path."""
     c = str(code).strip()
-    if c.startswith(("8", "4")):
+    if c.startswith(("92", "8", "4")):
         return 0.30
     if c.startswith(("300", "301", "688")):
         return 0.20
