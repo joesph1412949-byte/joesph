@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """因子库共享工具函数(从 datasource/factors.py 迁移, 与旧实现逐行一致)。
 
-Task 5 迁移: F2 用 _parse_timetag_hhmm; Y4/S4 用 ma; F4/S6 用 sector_count。
+Task 5 迁移: F2 用 _parse_timetag_hhmm; Y4/S4 用 ma; F4/F9 用 sector_count(S6 自
+2026-09-19 起改用板块指数当日涨幅, 不再用 sector_count)。
 全部保持旧逻辑不变。东财裸代码 → QMT 键统一走 shared.common.with_market_suffix。
 """
 import re

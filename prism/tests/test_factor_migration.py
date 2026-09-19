@@ -415,9 +415,15 @@ def test_s4_flat_matches_old():
     assert res["score"] == old["score"] == 0
 
 
-# ---------- S6 板块共振强度 ----------
+# ---------- S6 板块当日走强(2026-09-19 起**刻意**与旧实现分道) ----------
+# 旧 S6 与 F4 表达式逐字相同(板块涨停≥3家), 同一信号被首板层与势能层各记一分。
+# 用户拍板"给 S6 自由度" → 新 S6 改用板块指数当日涨幅≥1%(数据走 ctx.mkt, 本文件
+# 其余用例不注入 mkt), 故此处**不再比对旧实现**, 只锁定新行为并记录差异 ——
+# 与 test_f1_bj_10pct_day_is_not_prior_limitup 同一处理约定(旧口径差异是预期的,
+# 不比对)。S6×F4 列联表/重叠率与双向反判别用例见 test_sector_factors.py。
 
-def test_s6_matches_old():
+def test_s6_no_longer_mirrors_old_sector_count():
+    """板块内 3 只涨停: 旧 S6 得 1(与 F4 同式), 新 S6 无板块K线数据 → fail-closed 0。"""
     code = "000001.SZ"
     sector_map = {"000001.SZ": "SW2半导体", "000002.SZ": "SW2半导体",
                   "000003.SZ": "SW2半导体"}
@@ -427,10 +433,12 @@ def test_s6_matches_old():
                      limit_ups=limit_ups)["S6"]
     res = reg.get_factor("S6")["func"](_stock_ctx(
         code, tick, detail, sector_map=sector_map, limit_ups=limit_ups))
-    assert res["score"] == old["score"] == 1
+    assert old["score"] == 1        # 旧实现: 板块涨停≥3家(与 F4 逐字同式)
+    assert res["score"] == 0        # 新实现: 无 mkt → 0, 不退回 sector_count
 
 
-def test_s6_insufficient_matches_old():
+def test_s6_insufficient_still_zero():
+    """板块内仅 2 只涨停: 新旧都 0(此处无分歧, 保留以防新实现误命中)。"""
     code = "000001.SZ"
     sector_map = {"000001.SZ": "SW2半导体", "000002.SZ": "SW2半导体"}
     limit_ups = [{"code": c} for c in ["000001.SZ", "000002.SZ"]]

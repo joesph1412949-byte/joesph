@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""板块因子(SEC1/SEC2)测试 — 直接构造 ctx, 验证连阳/10日涨幅逻辑。全离线。"""
+"""板块因子(SEC1/SEC2/SEC3/SEC4/SEC6 + S6)测试 — 直接构造 ctx, 验证逻辑。全离线。"""
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -218,3 +218,92 @@ def test_sec6_stock_weak():
 def test_sec6_insufficient():
     res = get_factor("SEC6")["func"](_ctx_joint([10, 11]))
     assert res["score"] == 0
+
+
+# ---------------- S6 板块当日走强(与 F4 判别性独立) ----------------
+# 2026-09-19 用户拍板: S6 不再做 F4 的复制品。改前 S6 与 F4 表达式逐字相同
+# (同为 _utils.sector_count(板块涨停≥3家)), 而 F4 属首板层、S6 属势能层 →
+# 同一信号给两层各加一分(双重计数)。改后 S6 改用**已在上下文里的板块指数K线**
+# (ctx._extra["mkt"]["sector"], 与 SEC1/SEC2/SEC6 同源, 无新增取数/依赖):
+#   所属板块指数当日涨幅 ≥ 1% → 板块整体当日走强。
+# 1% 量级与同层已有阈值同档(SEC6 板块5日>2%, SEC2 板块10日>5% ≈ 1%/日),
+# 且必须带量级门槛: 仅"当日>0"会完全包含 SEC1(3连阳 ⇒ 今日收阳), 变成同层冗余。
+
+def _ctx_s6(closes, sector="801110", pool=("600000.SH",), code="600000.SH"):
+    """S6 上下文: 板块指数K线 close(升序, 最新在最后) + 涨停池(供 F4 对照)。"""
+    from prism.context import FactorContext
+    mkt = {"sector": {sector: {
+        "dates": ["2026-07-%02d" % i for i in range(1, len(closes) + 1)],
+        "close": list(closes)}}}
+    smap = {code: sector}
+    for c in pool:
+        smap[c] = sector
+    return FactorContext(code=code, sector_map=smap, mkt=mkt,
+                         limit_ups=[{"code": c} for c in pool])
+
+
+def test_s6_sector_up_1pct_hit():
+    res = get_factor("S6")["func"](_ctx_s6([100.0, 101.0]))
+    assert res["score"] == 1, res["note"]
+
+
+def test_s6_sector_up_below_1pct_miss():
+    res = get_factor("S6")["func"](_ctx_s6([100.0, 100.99]))
+    assert res["score"] == 0
+
+
+def test_s6_sector_down_with_three_limitups_is_not_f4_copy():
+    """反向判别①: 板块内 3 只涨停(F4=1) 但板块指数当日收跌 → S6=0。
+
+    改前的 S6 在此恒为 1(与 F4 逐字同式) → 本用例就是"别再复制 F4"的守门人。
+    """
+    ctx = _ctx_s6([100.0, 99.5],
+                  pool=("600000.SH", "600001.SH", "600002.SH"))
+    assert get_factor("F4")["func"](ctx)["score"] == 1
+    assert get_factor("S6")["func"](ctx)["score"] == 0
+
+
+def test_s6_sector_up_without_three_limitups_is_not_f4_copy():
+    """反向判别②: 板块指数当日 +2% 但板块内仅 1 只涨停 → S6=1, F4=0。
+
+    两向都不同才叫"给了自由度": ①证 S6 不恒等于 F4, ②证 S6 不是 F4 的子集。
+    """
+    ctx = _ctx_s6([100.0, 102.0], pool=("600000.SH",))
+    assert get_factor("F4")["func"](ctx)["score"] == 0
+    assert get_factor("S6")["func"](ctx)["score"] == 1
+
+
+def test_s6_no_mkt():
+    """数据缺失 → 归 0(fail-closed), 不静默退化成旧的 sector_count。"""
+    from prism.context import FactorContext
+    res = get_factor("S6")["func"](
+        FactorContext(code="600000.SH", sector_map={"600000.SH": "801110"},
+                      limit_ups=[{"code": "600000.SH"}]))
+    assert res["score"] == 0
+
+
+def test_s6_no_sector_map():
+    from prism.context import FactorContext
+    res = get_factor("S6")["func"](FactorContext(code="600000.SH"))
+    assert res["score"] == 0
+    assert "无板块归属" in res["note"]
+
+
+def test_s6_sector_kline_insufficient():
+    res = get_factor("S6")["func"](_ctx_s6([100.0]))
+    assert res["score"] == 0
+
+
+def test_s6_base_close_zero():
+    res = get_factor("S6")["func"](_ctx_s6([0.0, 101.0]))
+    assert res["score"] == 0
+
+
+def test_s6_non_dict_mkt_does_not_raise():
+    """回归(本仓踩过的坑): ctx.get() 拿到 DataFrame 时真值测试会抛 ValueError,
+    异常被上层吞成恒 0。此处必须显式判类型 → 不抛且归 0。"""
+    import pandas as pd
+    from prism.context import FactorContext
+    ctx = FactorContext(code="600000.SH", sector_map={"600000.SH": "801110"},
+                        mkt=pd.DataFrame({"close": [1.0, 2.0]}))
+    assert get_factor("S6")["func"](ctx)["score"] == 0
