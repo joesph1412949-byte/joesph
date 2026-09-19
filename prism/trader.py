@@ -90,6 +90,23 @@ def write_signals(signals, env="sim", root=None):
     return n
 
 
+def _check_gate_model(strat):
+    """大盘闸门模型白名单: engine.run_screen 只实现了"按 node 类因子计数"。
+
+    market_gate.model 改前是**零读取点**的键: 手改成别的取值不生效、也不报错
+    (配置看着被尊重, 实际被忽略)。未知取值 → fail-closed 抛错, 由调用方的
+    tick 循环捕获(本轮不选股/不落信号), 绝不按 node 语义静默跑一个声明了
+    别的模型的策略。缺键 / "node" 一律放行(缺键 = 写盘侧的唯一取值)。
+
+    ponytail: 覆盖范围只有本入口(run_daily: 实盘守护 + CLI)。模拟盘收盘选股走
+    prism/paper.py、网页选股走 engine.run_screen, 都绕开这里 —— 要全路径覆盖,
+    正解是把这三行搬进 engine.load_strategy(所有读取方共用; 该文件非本批可改)。
+    """
+    model = (strat.get("market_gate") or {}).get("model", "node")
+    if model != "node":
+        raise ValueError("未知大盘闸门模型: %r (只实现了 node)" % (model,))
+
+
 def run_daily(strategy, provider, env="sim", volume=100, write=True):
     """盘后完整流程: 选股 → 生成并(可选)写入信号。
 
@@ -110,6 +127,7 @@ def run_daily(strategy, provider, env="sim", volume=100, write=True):
                 "signals_written": 0, "paused": True}
     from prism.engine import gate_evaluate, resolve_strategy, run_screen
     strat = resolve_strategy(strategy)
+    _check_gate_model(strat)        # 未知闸门模型 → fail-closed, 不进选股
     market_ctx = provider.build_market_context()
     gate_fids = (strat.get("market_gate") or {}).get("factors", [])
     limit_ups = provider.get_limit_ups()

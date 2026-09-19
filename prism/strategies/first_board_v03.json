@@ -8,6 +8,6 @@
      "factors": ["F1", "F2", "F3", "F4", "F5", "F6", "F7"]}
   ],
   "composite": {"mode": "top3_weighted", "weights": [1.0], "cap": 7.0},
-  "filters": {"candidate_min_model": 3, "environment_threshold": 1},
+  "filters": {"candidate_min_model": 3},
   "sell_rules": {"take_profit_pct": 0.08, "stop_loss_pct": 0.05, "max_hold_days": 5}
 }

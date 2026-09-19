@@ -794,6 +794,12 @@ def api_strategy_create():
         strat["id"] = sid
         strat["description"] = ("网页编辑器生成 %s"
                                 % _dt.datetime.now().isoformat(timespec="seconds"))
+        # (2026-09-19 决策 (b)) filters.environment_threshold 与 market_gate.threshold
+        # 是同一个数(engine.validate_strategy_payload 由同一个 gt 写出两份), 而全仓
+        # **只有** market_gate.threshold 有读取点 ⇒ 它是纯重复别名, 停止声明。
+        # 落盘前摘掉, 否则下次保存又长回来; 旧策略文件仍带该键 → 读到时忽略(无读取点,
+        # 天然兼容)。正解是 engine.py:442 不再产出这半行(该文件非本批可改)。
+        (strat.get("filters") or {}).pop("environment_threshold", None)
         try:
             load_strategy(strat)        # 终极校验: 试载(spec §4-7, Task3 复审硬条件)
         except Exception as e:

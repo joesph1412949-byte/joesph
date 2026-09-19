@@ -28,7 +28,7 @@
 import json
 import logging
 import time
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 LOG = logging.getLogger("prism.schedule")
@@ -36,8 +36,75 @@ LOG = logging.getLogger("prism.schedule")
 # 本地休市日清单(随仓发布; 测试/部署可整份替换或改指别处)
 CALENDAR_PATH = Path(__file__).with_name("trading_calendar.json")
 
-PICK_SLOT = "15:05"               # 收盘选股时点(策略 execution.pick_slot)
-OPEN_WINDOW = ("09:26", "09:35")  # 次日开盘买入窗口(execution.open_window)
+# 时点默认值 = 接线前的硬编码值, 现在只作**解析失败兜底**(见 execution_slots)。
+# 为什么保持"模块级常量"而不是改成显式注入: paper_daemon/live_daemon 都在 import
+# 时各自快照 schedule.PICK_SLOT / schedule.OPEN_WINDOW, 且两个守护文件本批不可改
+# —— 常量语义是**一次覆盖全部调用点**的唯一形式, 不会留下"某个守护还读旧值"的暗坑。
+# 代价(如实记录): 进程启动时定值, 运行中改 JSON 不生效(与改前的硬编码同款语义);
+# 显式 --strategy 注入的实例策略不改本进程时点(改前也不会 —— 时点从来不是按实例的,
+# 时点跟随**默认策略指针**)。
+_DEFAULT_PICK_SLOT = "15:05"
+_DEFAULT_OPEN_WINDOW = ("09:26", "09:35")
+
+
+def _hhmm(s):
+    """严格 "HH:MM" → 原串; "9:05"/"25:00"/非字符串 → None。
+
+    严格是有意的: 交给守护的是**字符串比较**(hm >= PICK_SLOT),
+    "9:05" 这种写法会让比较结果全错, 必须挡在解析层。
+    """
+    try:
+        t = datetime.strptime(s, "%H:%M")
+    except (TypeError, ValueError):
+        return None
+    return s if t.strftime("%H:%M") == s else None
+
+
+def _open_window(s):
+    """"09:26-09:35" → ("09:26", "09:35"); 缺 "-"/任一端非法/逆序 → None。
+
+    逆序(如 "10:00-09:00")会让守护的 a <= hm <= b 恒 False(窗口静默失效),
+    与缺键一样归为非法。多段("a-b-c")经末段非法自然挡下。
+    """
+    if not isinstance(s, str):
+        return None
+    a, _, b = s.partition("-")
+    a, b = _hhmm(a), _hhmm(b)
+    return (a, b) if a and b and a <= b else None
+
+
+def execution_slots():
+    """默认策略声明的 (收盘选股时点, 次日开盘买入窗口)。
+
+    读取走**同一个 loader**(engine.resolve_strategy: 默认指针 → load_strategy,
+    与守护/引擎/模拟盘同一份 JSON), 不另造 json.load 的第二真相源。
+
+    失败方向(fail-closed, 硬要求): 策略不可读/缺键/格式不符 → **各键独立**回落
+    硬编码默认值 + WARNING(绝不静默), 绝不解析出一个比声明更宽的窗口。
+    """
+    try:
+        from prism import engine
+        ex = (engine.resolve_strategy() or {}).get("execution") or {}
+    except Exception as e:
+        LOG.warning("策略 execution 块不可读(%r) → 时点用硬编码默认值 %s / %s-%s",
+                    e, _DEFAULT_PICK_SLOT, *_DEFAULT_OPEN_WINDOW)
+        ex = {}
+    slot = _hhmm(ex.get("pick_slot"))
+    if slot is None:
+        LOG.warning("execution.pick_slot=%r 缺失/非法(需 HH:MM) → 用默认 %s",
+                    ex.get("pick_slot"), _DEFAULT_PICK_SLOT)
+        slot = _DEFAULT_PICK_SLOT
+    win = _open_window(ex.get("open_window"))
+    if win is None:
+        LOG.warning("execution.open_window=%r 缺失/非法(需 HH:MM-HH:MM 且不逆序) "
+                    "→ 用默认 %s-%s", ex.get("open_window"), *_DEFAULT_OPEN_WINDOW)
+        win = _DEFAULT_OPEN_WINDOW
+    return slot, win
+
+
+# 模块常量在 import 时定值: live_daemon/paper_daemon 的 `PICK_SLOT = schedule.PICK_SLOT`
+# 快照因此自动拿到策略声明值(改 JSON 生效), 兜底值与前完全一致。
+PICK_SLOT, OPEN_WINDOW = execution_slots()
 SETTLE_AFTER = "15:00"
 
 # "一天一次"告警备忘: (日期, 判据) → 已说过就不再落日志。守护 POLL_SECONDS=5

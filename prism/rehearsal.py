@@ -45,9 +45,10 @@ from prism import trader
 from prism.live_daemon import LiveDaemon
 
 # 一天的时间线。day=0 → --date 当天; day=1 → 次一工作日。
-# 时点取自 prism/schedule.py 的**硬编码**常量(PICK_SLOT=15:05 /
-# OPEN_WINDOW=09:26-09:35 / SETTLE_AFTER=15:00) —— 策略 JSON 里的
-# execution.pick_slot / execution.open_window 值不生效(见 strategy_lint)。
+# 时点取自 prism/schedule.py 的调度常量(PICK_SLOT=15:05 /
+# OPEN_WINDOW=09:26-09:35 / SETTLE_AFTER=15:00)。前两个自 2026-09-19 起由
+# 策略 execution.pick_slot / execution.open_window 声明驱动(schedule 在 import 时
+# 解析), 缺失/格式不符才回落上面这两个默认值; 本回放的时间线按现值写死。
 DAY_PLAN = (
     ("15:05", 0, "live", "收盘选股 → 落次日计划"),
     ("15:06", 0, "live", "同日重跑(幂等: 不重复选股)"),
@@ -307,9 +308,9 @@ class Rehearsal:
                 return {c: dict(self._cur[c]) for c in codes if c in self._cur}
             self._ticks_fn = ticks_fn
         self.notes.append(
-            "PICK_SLOT/OPEN_WINDOW/SETTLE_AFTER 取自 prism/schedule.py 的硬编码"
-            "(15:05 / 09:26-09:35 / 15:00); 策略 JSON 的 execution.pick_slot / "
-            "execution.open_window 值**不生效**(strategy_lint 已证实)")
+            "PICK_SLOT/OPEN_WINDOW 取自 prism/schedule.py(自 2026-09-19 起由策略 "
+            "execution.pick_slot/open_window 解析, 现值 15:05 / 09:26-09:35), "
+            "SETTLE_AFTER=15:00 仍是 schedule 常量; 本回放时间线按现值写死")
         self.notes.append(
             "dry_run 的两处**重复**是回放形状而非生产形状: `_do_open_send` 的 "
             "dry_run 分支在 book.add **之前** return ⇒ 计划不被消费, 开盘窗口内"

@@ -39,12 +39,11 @@ _READ_ATTRS = ("get", "pop", "setdefault")
 
 # 手工白名单: 键名 → "理由; 证据: <file:line>"。只收静态搜不到的**动态**消费者
 # (如按结构遍历 payload)。加条目必须在理由里给出证据位置, 不许凭印象。
-DYNAMIC_CONSUMERS = {
-    "pick_slot": (
-        "理由: qmt/tools/live_check.py 用变量遍历键名元组后 ex.get(k), 字面量键"
-        "不在读取位置 → 静态搜不到; 但它只校验键存在, 取值未生效"
-        "(守护时点见 prism/schedule.py:10 硬编码); 证据: qmt/tools/live_check.py:272"),
-}
+# 当前为空: 原先唯一豁免的 execution.pick_slot 现在有**真读取点** ——
+# prism/schedule.py 的 execution_slots() 里 ex.get("pick_slot") 静态可搜, 且取值
+# 真的生效(守护时点由策略声明驱动; 2026-09-19 接线)。旧条目"取值未生效"的说法
+# 已成假话, 留着会掩盖这条接线, 故删除。
+DYNAMIC_CONSUMERS = {}
 
 
 # ---------------------------------------------------------------- 声明侧
