@@ -470,17 +470,30 @@ def _norm_day(s):
 
 # ---------------------------------------------------------------- 缓存
 
-def _load_cache():
-    if CACHE_PATH.exists():
-        try:
-            return pickle.loads(CACHE_PATH.read_bytes())
-        except Exception as e:
-            # 不静默: 损坏的缓存被当空, 调用方(含 _save_cache 的合并)会按空段走 ——
-            # 必须留下痕迹, 否则 5.9MB 缓存被无声清零也查不出(09-19 D2)
-            logger.warning("市场数据缓存读取失败, 按空缓存继续: %s: %r",
-                           CACHE_PATH, e)
-            return {}
-    return {}
+def _load_cache(strict=False):
+    """读盘缓存。`strict=True` → 读失败原样抛出, 让调用方自己决定。
+
+    "文件不存在/空" → 起点 {}, 覆盖无害(没有键可丢); 但**读失败**(坏 pkl / 外部
+    截断 / IO 错)不等于空 —— 盘上明明有内容却被当空的, `_save_cache` 的读-改-写
+    合并就退化成整文件覆盖, 磁盘上别的写者的段被整批抹掉。
+    非 strict 保持 fail-open(坏文件当空), 但**留痕**: 5.9MB 缓存曾被无声清零(D2)。
+    口径与 datasource/fundamental.py 的 I2b、prism/zt_history.py 一致。
+    """
+    if not CACHE_PATH.exists():
+        return {}
+    try:
+        data = CACHE_PATH.read_bytes()
+        if not data:
+            return {}                    # 空文件: 没有键可丢, 覆盖无害
+        return pickle.loads(data)
+    except FileNotFoundError:
+        return {}                        # 竞态: 刚判存在又被删 → 无键可丢
+    except Exception as e:
+        if strict:
+            raise
+        logger.warning("市场数据缓存读取失败, 按空缓存继续: %s: %r",
+                       CACHE_PATH, e)
+        return {}
 
 
 def _atomic_pickle(path, obj):
@@ -516,8 +529,18 @@ def _save_cache(cache):
     cache 只传本次真正拥有的段: 调用方启动时读到的整份快照里带着别的段的陈旧
     副本, 整份回写会把并发写者刚落的新值按旧快照盖回去(09-19 D3 实测:
     build_global_cache/fetch_futures 整份交 → 期间的 flow_rank 当日行 LOST)。
+
+    I2b 同口径(09-19, 与 datasource/fundamental.py / prism/zt_history.py 一致):
+    读盘失败 → **跳过本次落盘**(盘上原文件一动不动) + WARNING 点名, 绝不退化成
+    "只有本次新段"的整文件覆盖 —— 原子写只降低自发损坏概率, 挡不住外部截断,
+    而"读不出"不等于"空": 读不出的内容里可能有别的写者的段。
     """
-    merged = dict(_load_cache())
+    try:
+        merged = dict(_load_cache(strict=True))
+    except Exception as e:
+        logger.warning("缓存读盘失败(%r) → 跳过本次落盘, 不覆盖 %s "
+                       "(读不出的内容里可能有别的写者的段)", e, CACHE_PATH)
+        return
     merged.update(cache)
     _atomic_pickle(CACHE_PATH, merged)
 
@@ -1113,17 +1136,22 @@ def build_cli():
     import argparse
     ap = argparse.ArgumentParser(description="市场数据层采集(板块/K线/资金流/全球指数)")
     ap.add_argument("--build-sectors", action="store_true",
-                    help="采集行业板块K线+资金流(增量)")
+                    help="采集行业板块K线+资金流(增量; 东财封禁时 --source sw 换"
+                         "申万K线, 申万无资金流 ⇒ flow 段只能东财)")
     ap.add_argument("--build-global", action="store_true",
-                    help="采集全球指数历史K线(增量)")
+                    help="采集全球指数历史K线(增量; 东财封禁时 --source sina "
+                         "或 --source fred)")
     ap.add_argument("--build-sector-map", action="store_true",
-                    help="构建个股→申万行业映射(成分股采集)")
+                    help="构建个股→申万行业映射(成分股采集; 走 akshare 申万, "
+                         "不依赖东财)")
     ap.add_argument("--build-flow-rank", action="store_true",
-                    help="当日板块主力净流入快照(前向累积, 幂等)")
+                    help="当日板块主力净流入快照(前向累积, 幂等; 仅东财源, "
+                         "东财封禁时无降级源)")
     ap.add_argument("--build-futures", action="store_true",
-                    help="商品期货日线采集(尾部过期的品种重采)")
+                    help="商品期货日线采集(尾部过期的品种重采; akshare 新浪源)")
     ap.add_argument("--build-benchmark", action="store_true",
-                    help="上证指数日K基准(全量替换, 失败保留旧缓存)")
+                    help="上证指数日K基准(全量替换; 降级链 东财→通达信→QMT, "
+                         "三路都拿不到则保留旧缓存并非零退出)")
     ap.add_argument("--beg", default=BACKFILL_BEG,
                     help="回填起点 YYYYMMDD(默认 %s)" % BACKFILL_BEG)
     ap.add_argument("--source", default="eastmoney",

@@ -896,6 +896,46 @@ def test_save_cache_publish_failure_keeps_old_file(_ws_tmp, monkeypatch):
     assert list(_ws_tmp.glob("*.tmp")) == []
 
 
+def test_load_cache_strict_raises_on_corrupt(_ws_tmp, monkeypatch):
+    """strict=True: 读失败原样抛出(给 _save_cache 判定"读不出≠空"用)。"""
+    monkeypatch.setattr(md, "CACHE_PATH", _ws_tmp / "mkt.pkl")
+    md.CACHE_PATH.write_bytes(b"\x80\x04broken-pickle")
+    with pytest.raises(Exception) as ei:
+        md._load_cache(strict=True)
+    assert not isinstance(ei.value, TypeError)     # 不是"没这个参数"的假通过
+    assert md._load_cache() == {}                  # 非 strict 仍 fail-open
+
+
+def test_build_does_not_overwrite_corrupt_cache(_ws_tmp, monkeypatch, caplog):
+    """盘上有文件但读不出 → 任一个 build_* 落盘都必须"拒绝覆盖"(I2b 同口径)。
+
+    原子写只降低自发损坏概率, 挡不住外部截断; 读不出≠空, 若不拒绝, 一次
+    --build-flow-rank 就会把 5.9MB 里除 flow_rank 外的全部段抹掉。
+    """
+    p = _ws_tmp / "mkt.pkl"
+    monkeypatch.setattr(md, "CACHE_PATH", p)
+    p.write_bytes(b"\x80\x04truncated-not-a-pickle")
+    before = p.read_bytes()
+    d = _resp({"total": 1,
+               "diff": [{"f12": "BK0486", "f14": "传媒", "f62": 1e9}]})
+    probe = md.EastMoneyProbe(
+        http_get=FakeGetter({md.EastMoneyProbe.CLIST_URL: d}))
+    with caplog.at_level(logging.WARNING):
+        r = md.build_flow_rank(probe=probe)
+    assert r["sectors_today"] == 1                  # 采集本身照常成功
+    assert p.read_bytes() == before                 # 盘上原文件一动不动
+    assert str(p) in caplog.text and "跳过本次落盘" in caplog.text
+
+
+def test_save_cache_empty_file_is_overwritable(_ws_tmp, monkeypatch):
+    """回归锁: 0 字节空文件 ≠ 读不出(没有键可丢) → 照常落盘, 别把"空"也拒了。"""
+    p = _ws_tmp / "mkt.pkl"
+    monkeypatch.setattr(md, "CACHE_PATH", p)
+    p.write_bytes(b"")
+    md._save_cache({"a": 1})
+    assert md._load_cache() == {"a": 1}
+
+
 # ---------------- D3: 采集期间他人落的新段不得被陈旧快照写回
 
 def test_build_global_cache_keeps_concurrent_flow_rank(_ws_tmp, monkeypatch):
