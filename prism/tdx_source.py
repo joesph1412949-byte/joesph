@@ -82,8 +82,8 @@ def _split_code(code):
         return c, _MKT_SH
     if c.startswith(("0", "3")):
         return c, _MKT_SZ
-    if c.startswith(("8", "4")):          # 北交所
-        return c, _MKT_BJ
+    if c.startswith(("92", "8", "4")):    # 北交所(92 段必须先判, 否则落到下面的
+        return c, _MKT_BJ                # 沪市兜底 → 920xxx 行情取到空)
     return c, _MKT_SH
 
 

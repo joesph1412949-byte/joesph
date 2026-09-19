@@ -27,12 +27,18 @@ def _feed(date_str, cache):
 
 
 def test_limit_ratio_by_board():
+    # 权威规格 = shared/exit_rules.limit_ratio; 全副本逐码钉在
+    # datasource/tests/test_common.py::test_limit_ratio_consistent_with_exit_rules
     assert _limit_ratio("600000") == 0.10    # 主板
     assert _limit_ratio("000001") == 0.10
     assert _limit_ratio("300001") == 0.20    # 创业板
     assert _limit_ratio("688001") == 0.20    # 科创板
+    assert _limit_ratio("689009") == 0.20    # 科创CDR(689)
     assert _limit_ratio("830799") == 0.30    # 北交所
     assert _limit_ratio("430001") == 0.30
+    assert _limit_ratio("920001") == 0.30    # 北交所 92 段
+    assert _limit_ratio("400001") == 0.05    # 老三板(先于 "4" 判, 否则当北交所 30%)
+    assert _limit_ratio("420001") == 0.05
 
 
 def test_limit_up_price_rounds_to_cent():
@@ -108,6 +114,35 @@ def test_gem_20pct_limit():
     cache3 = {"600000.SH": {"dates": ["2026-07-01", "2026-07-02"],
                             "close": [10.0, 10.99], "pre": [10.0, 10.0]}}
     assert _feed("20260702", cache3) == []
+
+
+# ---------------- 689 / 400 / 420 档位判别(这份口径决定涨停池成员) ----------------
+
+def test_qmt_zt_feed_689_14pct_is_not_limit_up():
+    """实测回归: 689009.SH 2025-02-21 pre=54.05 → close=62.03(+14.76%)。
+
+    科创CDR(689)档位是 20% ⇒ +14.76% **不是**涨停, 不许进池。旧口径缺 689
+    (按 10%)把涨停价算成 59.46 ≤ 62.03 ⇒ 当真涨停收进了池子, 而
+    backtest/cli.py 已按 20% 算 up_price ⇒ 池子与回测两口径打对台。"""
+    cache = {"689009.SH": {"dates": ["2025-02-20", "2025-02-21"],
+                           "close": [54.05, 62.03], "pre": [54.05, 54.05]}}
+    assert _feed("20250221", cache) == []
+
+
+def test_qmt_zt_feed_689_20pct_is_limit_up():
+    """对称面: 同一个 20% 档位下走到涨停价(10.0 → 12.0)仍必须进池。"""
+    cache = {"689009.SH": {"dates": ["2025-02-20", "2025-02-21"],
+                           "close": [10.0, 12.0], "pre": [10.0, 10.0]}}
+    assert [it["code"] for it in _feed("20250221", cache)] == ["689009.SH"]
+
+
+def test_qmt_zt_feed_400_6pct_is_limit_up():
+    """老三板(400/420)档位 5%: +6% 已在涨停价之上 → 进池。
+
+    旧口径按"4 前缀 = 北交所 30%"算涨停价 13.0 ⇒ 反而误判为**不涨停**。"""
+    cache = {"400001": {"dates": ["2025-02-20", "2025-02-21"],
+                        "close": [10.0, 10.6], "pre": [10.0, 10.0]}}
+    assert [it["code"] for it in _feed("20250221", cache)] == ["400001"]
 
 
 # ---------------- 看门狗(QMT下载偶发永久挂起, 超时跳批) ----------------

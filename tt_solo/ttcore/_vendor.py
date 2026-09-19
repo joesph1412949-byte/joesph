@@ -5,9 +5,13 @@ ponytail: vendored from shared/common.py @2026-09-16 —— tt_solo 要能被整
 拷走独立运行, 故刻意不 import shared。5 个符号约 60 行, 为它们造一层包结构
 属于过度设计, 内联到单文件即可(每个函数标注来源保留回溯)。
 
-注意 limit_ratio_for_code 的口径: 与 shared/common.py **已一致** —— 两处都是
-("92", "8", "4") → 北交所 920xxx 按 30% 涨跌幅。此处 @2026-09-16 先补上 "92";
-shared 侧 @2026-09-19 补上(该段注释原写"shared 版本缺这条", 已过时)。
+注意 limit_ratio_for_code 的口径: 权威实现是 shared/exit_rules.py 的
+limit_ratio()(镜像 shared/common.limit_ratio_for_code)—— 北交所/新三板 92/8/4
+→ 30%, 科创(含 689 CDR)/创业板 300/301/688/689 → 20%, 老三板 400/420 → 5%,
+其余 10%(400/420 必须先判, 否则被 "4" 抢去当北交所 30%)。@2026-09-19 对齐:
+这份此前是 ("8","4","92") 且缺 689/400/420, 与规格脱钩; tt_solo 刻意自包含
+(不许 import shared), 故仍是就地实现, 等式改由 datasource/tests/test_common.py
+的守卫逐码钉死 —— 那边是按路径加载本文件比对返回值, 不是扫源码文本。
 """
 import os
 import threading
@@ -93,14 +97,18 @@ def atomic_write(path, text):
 # ---------------------------------------------------------------- 规则
 
 def limit_ratio_for_code(code):
-    """按板块返回涨跌停比例: 北交所 30%, 创业板/科创 20%, 主板 10%。
+    """按板块返回涨跌停比例: 北交所/新三板 30%, 科创(含 689)/创业板 20%,
+    老三板 400/420 5%, 主板 10%。
 
-    vendored from tt/risk.py 的兜底实现 @2026-09-16(含 "92" 段)。
+    就地实现(vendored from shared/exit_rules.limit_ratio @2026-09-16, 对齐 @2026-09-19):
+    tt_solo 要能整体拷走独立运行, 不许 import shared/prism。
     """
     c = str(code).strip()
-    if c.startswith(("8", "4", "92")):
+    if c.startswith(("400", "420")):       # 老三板必须先判, 否则被 "4" 当北交所
+        return 0.05
+    if c.startswith(("92", "8", "4")):     # 北交所/新三板
         return 0.30
-    if c.startswith(("300", "301", "688")):
+    if c.startswith(("300", "301", "688", "689")):
         return 0.20
     return 0.10
 

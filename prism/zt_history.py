@@ -6,7 +6,8 @@
 
 判断逻辑(与真实涨跌停规则一致):
   当日收盘 >= 前日收盘 × (1 + 涨停幅度) - 0.01 容差 → 当日涨停
-  涨停幅度: 北交所(8/4开头) 30% / 创业板科创(300/301/688) 20% / 主板 10%
+  涨停幅度唯一权威在 shared/exit_rules.limit_ratio: 北交所/新三板(92/8/4 前缀)
+  30% / 创业板科创含科创CDR(300/301/688/689) 20% / 老三板(400/420) 5% / 主板 10%
   ST股5%需名称判断, 本地K线无名称 → 主板ST会被误判为10%涨停(保守可接受:
   ST涨停本来就少, 且策略主要选科技主板)。
 
@@ -22,7 +23,8 @@ import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from shared.common import CACHE_DIR, replace_with_retry
+from shared.common import (CACHE_DIR, limit_ratio_for_code,
+                           replace_with_retry)
 
 logger = logging.getLogger(__name__)
 
@@ -67,14 +69,13 @@ def _run_with_timeout(fn, args=(), kwargs=None, timeout=DOWNLOAD_TIMEOUT):
     return box.get("ret")
 
 
-def _limit_ratio(code):
-    """涨停幅度: 北交所30% / 创业科创20% / 主板10%。"""
-    c = str(code).strip()
-    if c.startswith(("8", "4")):
-        return 0.30
-    if c.startswith(("300", "301", "688")):
-        return 0.20
-    return 0.10
+# 涨停幅度不另立一份口径: 直接用 authority(shared/common.limit_ratio_for_code,
+# 权威实现在 shared/exit_rules.limit_ratio)。这里原来自带一份前缀表, 缺
+# 689/400/420 —— 而**这份决定涨停池成员与连板数**: 实测 689009.SH 在 2025-02-21
+# (pre=54.05 → close=62.03 = +14.76%)被 10% 档误判成涨停、真进了池, 而
+# backtest/cli.py 已按 20% 算 up_price ⇒ 池子与回测打对台。
+# 保留 _limit_ratio 这个名字: 既有调用点(2 处)与测试都按它引用。
+_limit_ratio = limit_ratio_for_code
 
 
 def _with_suffix(code):

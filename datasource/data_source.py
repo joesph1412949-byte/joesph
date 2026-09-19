@@ -91,7 +91,15 @@ class DataSource:
             if up_price <= 0:
                 # 兜底：用板块涨幅粗算（几乎用不到）
                 if last_close > 0:
-                    r = 0.30 if code.startswith(("8","4")) else (0.20 if code.startswith(("300","301","688")) else 0.10)
+                    # 档位口径唯一权威在 shared/exit_rules.limit_ratio(镜像
+                    # common.limit_ratio_for_code)。此处**就地内联**是刻意的: 本模块
+                    # 会被当顶层模块 import(测试与 prism_web 只把 datasource/ 放进
+                    # sys.path), 不加一条 shared 的 import 边; 等式由
+                    # datasource/tests/test_common.py 的探针守卫逐码钉住。
+                    r = (0.05 if code.startswith(("400", "420")) else
+                         0.30 if code.startswith(("92", "8", "4")) else
+                         0.20 if code.startswith(("300", "301", "688", "689"))
+                         else 0.10)
                     if last < round(last_close * (1 + r), 2) - 0.01:
                         continue
             sealed = bool((t.get("askPrice") or [0])[0] == 0)

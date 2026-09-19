@@ -10,7 +10,8 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from shared.common import STATE_DIR, atomic_write, next_weekday
+from shared.common import (STATE_DIR, atomic_write, limit_ratio_for_code,
+                           next_weekday)
 from prism import engine
 
 STATE_FILENAME = ".paper_account.json"
@@ -20,17 +21,12 @@ _REQUIRED_KEYS = ("version", "created", "initial_capital", "cash", "holdings",
                   "settled_dates")
 
 
-def _limit_ratio(code):
-    """分板涨停系数回落: 北交所 92/8/4→30%, 688/300/301→20%, 其余→10%。
-
-    F4: 30% 档此前缺失 → 920xxx/8xxxxx 按 10% 算, 一只 -11% 的**非**跌停股
-    会被当成跌停而不卖(跌停顺延误判)。权威实现在 shared/exit_rules.py
-    limit_ratio(), 同口径; 此处就地内联不 import shared(F4 不扩大改动面)。
-    ponytail: 近似——tick 无股票名, 不含 ST(±5%)。
-    真实值以 daemon 注入的 upStopPrice/downStopPrice 为准, 此处仅兜底。"""
-    if code.startswith(("92", "8", "4")):
-        return 0.30
-    return 0.20 if code.startswith(("300", "301", "688")) else 0.10
+# 分板涨停系数不另立一份口径: 用 authority(shared/common.limit_ratio_for_code,
+# 权威实现在 shared/exit_rules.limit_ratio)。此处原为就地内联, 缺 689/400/420,
+# 且对 None 直接 AttributeError(F4 那次只补了 92/8/4)。
+# ponytail: 近似——tick 无股票名, 不含 ST(±5%); 真实值以 daemon 注入的
+# upStopPrice/downStopPrice 为准, 此处仅兜底。保留 _limit_ratio 名字给既有调用点/测试。
+_limit_ratio = limit_ratio_for_code
 
 
 def _tick_same_day(t, now):

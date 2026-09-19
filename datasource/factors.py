@@ -10,7 +10,8 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))  # 项目根(common.py)
-from shared.common import with_market_suffix as _with_market_suffix
+from shared.common import (limit_ratio_for_code,
+                           with_market_suffix as _with_market_suffix)
 
 
 class FactorComputeError(Exception):
@@ -84,8 +85,10 @@ class FactorEngine:
         f1 = 0
         if kline is not None and up_price > 0:
             closes = kline["close"].tolist()
-            ratio = (0.30 if code.startswith(("8", "4")) else
-                     0.20 if code.startswith(("300", "301", "688")) else 0.10)
+            # 档位复用 authority(shared/exit_rules.limit_ratio 的镜像 common
+            # limit_ratio_for_code): 这一份原缺 92/689/400/420, "近20日是否涨停过"
+            # 会跟着错(689009 的 +10% 会被当成涨停过 → F1 恒 0)。
+            ratio = limit_ratio_for_code(code)
             # 近历史每日是否涨停: 当日收盘 >= 基于"前一日收盘"算的涨停价。
             # 只扫 closes[:-1] 排除今日——被评分的股票今日封死涨停, 今日收盘==涨停价,
             # 若不排除会把每个首板都误判成"已有涨停"→ F1 恒 0。

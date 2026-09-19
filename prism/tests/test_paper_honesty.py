@@ -214,10 +214,15 @@ def test_cancel_expire_do_not_block_today_retrade(tmp_path):
 @pytest.mark.parametrize("code,expected", [
     ("600000", 0.10), ("000001", 0.10), ("600000.SH", 0.10),   # 主板
     ("300750", 0.20), ("301001", 0.20), ("688981", 0.20),      # 创业/科创
+    ("689009", 0.20),                                          # 科创CDR
     ("920001", 0.30), ("830799", 0.30), ("430001", 0.30),      # 北交所
+    ("400001", 0.05), ("420001", 0.05),                        # 老三板(非北交所 30%)
 ])
 def test_limit_ratio_by_board(code, expected):
-    """F4: 北交所 92/8/4 开头 30%(此前误按 10% → -11% 的非跌停股被当跌停不卖)。"""
+    """F4: 北交所 92/8/4 开头 30%(此前误按 10% → -11% 的非跌停股被当跌停不卖)。
+
+    权威规格 = shared/exit_rules.limit_ratio; 全副本逐码钉在
+    datasource/tests/test_common.py::test_limit_ratio_consistent_with_exit_rules。"""
     assert _limit_ratio(code) == expected
 
 

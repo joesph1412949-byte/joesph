@@ -93,12 +93,16 @@ def test_atomic_write_concurrent_same_path_keeps_own_tmp(tmp_path, monkeypatch):
 
 
 def test_limit_ratio_by_board():
+    # 权威规格 = shared/exit_rules.limit_ratio; tt_solo 刻意自包含(不许 import
+    # shared), 等式由 datasource/tests/test_common.py 的守卫逐码钉住。
     assert _vendor.limit_ratio_for_code("600900.SH") == 0.10
     assert _vendor.limit_ratio_for_code("300750.SZ") == 0.20
     assert _vendor.limit_ratio_for_code("688981.SH") == 0.20
+    assert _vendor.limit_ratio_for_code("689009.SH") == 0.20   # 科创CDR
     assert _vendor.limit_ratio_for_code("830799.BJ") == 0.30
-    # 北交所新代码段 920xxx —— shared/common.py 缺这条, 这里必须有
-    assert _vendor.limit_ratio_for_code("920001.BJ") == 0.30
+    assert _vendor.limit_ratio_for_code("920001.BJ") == 0.30   # 北交所 92 段
+    assert _vendor.limit_ratio_for_code("400001.BJ") == 0.05   # 老三板
+    assert _vendor.limit_ratio_for_code("420001.BJ") == 0.05
 
 
 def test_is_local_request_tiers():
