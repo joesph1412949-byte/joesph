@@ -234,3 +234,45 @@ python -m prism.tdx_source      # 6 项：连接/个股日K/大盘指数/板块�
 ```
 
 > 通用 pytest 两个坑（basetemp 正斜杠、沙箱假失败）见根 `MEMORY.md`。
+
+---
+
+## 2026-09-19 收尾批次（6 批 / 8 提交）：三条开着缺口全关 + 两个新发现
+
+**已完成**（最终全量 **1577 passed / 0 failed**，基线 1523；净增 54 条全为本次新增防线）
+
+| 项 | 提交 | 结果 |
+|---|---|---|
+| 实盘"跌停开盘跳过"闸门 | `1bb3262` | 开盘发单前判 `px=min(open,lastPrice) <= 权威跌停价+0.001` → 跳过 |
+| 行情缺失改 fail-closed | `6e1dfdf` | 原为 fail-open 照发，现跳过 + `no_quote:<code>`；同步修好 `rehearsal` 开盘步注入 tick |
+| 盘后刷新入口 | `0872b1c` | `prism/data_refresh.py` + `ops/prism_data_refresh.ps1`；退出码 0/1(有失败)/2(有空数据) |
+| `execution.pick_slot`/`open_window` 接线 | `0e76d80` | `schedule.execution_slots()` 走 `engine.resolve_strategy()`（同一 loader）；坏值/缺键/**逆序** fail-closed 回落原窗口 |
+| `market_gate.model` 守卫 | `0e76d80`→`df029ed` | 搬进 `engine.load_strategy`（**所有**读取方共用，覆盖 paper/网页/回测）；`trader._check_gate_model` 已删 |
+| `filters.environment_threshold` | `0e76d80`→`df029ed` | 纯重复别名（与 `market_gate.threshold` 同数写两份）→ 停止声明；validator 不再产出 |
+| `execution.one_word_fallback` | `d8d61ae` | 全仓零读取点、桥无撤单通道、实盘计划价是**前一日**涨停价 → 删死声明 |
+
+**`python -m prism.strategy_lint` 现 EXIT=0**（改前 EXIT=1 / 未消费 7）。新增仓库级守卫 `test_shipped_strategies_pass_the_declared_key_lint`：往后再"只声明不接线"会直接红。
+
+### ⚠️ 核心结论：ST 涨跌幅已与普通股同幅，本项目刻意不设 ST 档（勿再引入）
+
+- **主板风险警示股（ST/\*ST）涨跌幅限制已由 5% 调整为 10%，与主板其他股票一致**。依据：2025-06-27 沪深交易所《关于调整主板风险警示股票价格涨跌幅限制比例及有关事项的通知（征求意见稿）》，后续多家媒体（证券时报/中国证券网）报道"新规下周一实施""深交所交易新规落地"。
+- **QMT 2026-09-19 实测独立印证**：主板 ST `600735.SH` PreClose 6.57 → DownStop 5.91（ratio **0.8995**）与主板非 ST `600000.SH` 9.06 → 8.15（**0.8996**）**完全相同**；科创板 ST `688022.SH` 8.75 → 7.00（0.80，与同板普通股同）。科创/创业 ST 在更早的注册制改革中已统一为 ±20%。
+- ⇒ `shared/exit_rules.limit_ratio_for_code` **不加 ST 档是正确的**。**按股票名判 ST 会引入误判**：把已不是跌停的 −5% 当跌停 → **漏买**。`test_live_daemon.py::test_board_limit_ratio_has_no_st_tier` 已钉死。
+- **教训**：本会话曾据**过时规则**报出"ST −5% 漏判"缺口，据此派活，还加了条每日假 WARNING（`49bdf79` 引入、`03477d6` 删除）。**凡涉及涨跌幅/交易规则的事实，先查现行规则或直接问 QMT，再动手。**
+
+**`live_daemon._down_stop_price` 的真实存在理由（不是为 ST）**：自算分板幅度只是按代码前缀推的**近似**，覆盖不了 新股上市首日/退市整理期首日无涨跌幅限制、除权除息、交易所临时调整幅度 ⇒ 优先用**交易所权威跌停价**（tick `downStopPrice` → `ds.get_instrument` 的 `DownStopPrice` → 才回落自算）。
+
+### 两个新发现（未修，待拍板）
+
+1. **`sectors` 是混源缓存**：31 个申万 `801xxx` + **496 个东财 `BKxxxx` = 527**，而 `kline`(31)/`flow`(16) **全是申万**。`market_data.py:597` 明写切源时三段"一起清，避免 801xxx 与 BKxxxx 混"—— 实盘缓存**违反该不变量**。496 个 BK 板块**无 K 线**，却被 `market_data.py:803/832/1095`、`prism_web/app.py:572` 当正常板块遍历；全仓只有 `live_check.py:311`（手写 `startswith("80")`）与 `first_board_review.py:356` 各自打补丁绕开。**未断定成因**（"清源漏清 sectors" vs "后来东财跑只回填 sectors"），需再读 `build_sector_cache` 清源分支。（附带澄清：`kline` 只有 31 个键**不是缺陷** —— 申万一级行业本就 31 个，`sector_map` 5220 只股票**全部**映射到 `801xxx`，因子路径数据是齐的。）
+2. **`market_data.py` 前四个 `--build-*` flag 恒 exit 0**（裸 `return`），且会**短路后续 flag**：`--build-sectors --build-flow-rank` 里 flow-rank 被**静默忽略**。全仓只有 `--build-flow-rank`/`--build-benchmark` 有退出码语义。`data_refresh.py` 因此用"跑前/跑后只读缓存日期"补证据；东财封禁时 `--build-sectors` 会 exit 0 且日期不推进（退出码无信号）。
+
+### 环境 / 工具（新增，踩过）
+
+- 全量 pytest **必须带 `$env:PYTHONUTF8=1`**，否则 `tests/test_ops_guards.py::test_make_summary_pdf_help_writes_nothing` 因子进程中文 stdout 编码**假红**。
+- **禁止 `Get-ChildItem -Recurse` 全仓 grep**：仓库有几十个 `pt_*` pytest basetemp 目录，会刷几百行夹具噪音并超时。用 grep 工具或限定到具体文件。
+- 本机 **PowerShell 5.1 无 `Set-Content -Encoding utf8NoBOM`**（会让提交白跑一次）→ 提交消息文件用 write 工具落 UTF-8 无 BOM。
+
+### `paused` 急停开关已删除（2026-09-19，用户拍板"不留"）
+
+`D:/QMT_SIGNALS/paused` 已删。全仓消费点（`prism/trader.py:26`、`qmt/bridge/signal_bridge_real.py:128`、`tt_solo/ttcore/daemon.py:57`）统一是"**文件存在 = 急停**"，缺文件 = 未暂停，删除安全、无代码依赖它预存。**当前唯一剩余闸门是 `armed.txt`（值仍是陈旧的 `20260914`，桥/守护照旧拒单）**；急停可随时由面板 `/api/automation`、`/api/pause` 或 `arm_today.py` 重新按下。

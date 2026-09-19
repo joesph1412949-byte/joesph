@@ -192,3 +192,17 @@ cd "D:/QMT/bin.x64" && "D:/QMT/bin.x64/pythonw.exe" "绝对路径/query_account.
 脚本要点：`XtQuantTrader(r'D:\QMT\userdata_mini', int(time.time()))` → `start()` → `connect()` 返回 0 → `query_account_infos()` 拿 id → `StockAccount(aid,'STOCK')` → `subscribe()` → `sleep(0.8)` → 查 `query_stock_asset / query_stock_positions / query_stock_orders / query_stock_trades`。stdout 中文需 `io.TextIOWrapper(..., encoding='utf-8')`。
 
 **铁律**：① **只读，绝不下单** ② **绝不推断成交**，唯一可信是 `query_stock_trades` ③ 委托/成交查询**只覆盖当日**，跨日须查券商流水。
+
+## QMT 可作"地面真值"查询（只读，2026-09-19 已验证）
+
+用项目自己的 Python 直接 `from xtquant import xtdata`（自动连 127.0.0.1:58610），**只读元数据，不下单**：
+
+- `xtdata.get_instrument_detail(code)` → 31 键，含 **`DownStopPrice` / `UpStopPrice` / `PreClose` / `InstrumentName` / `InstrumentStatus` / `IsTrading`**。
+- `xtdata.get_full_tick([code])` → 键集含 **`lastPrice / open / lastClose / high / low / volume / stockStatus / timetag`**。
+- `xtdata.get_stock_list_in_sector('沪深A股')` → 5224 只（全市场遍历可用）。
+
+**⚠️ 铁律**：凡涉及**交易规则、字段存在性、涨跌幅口径**的假设，**优先直接问 QMT 实测或查现行规则**，别靠代码/记忆推断。2026-09-19 正是靠这条实测**证伪**了一条基于**过时规则**的"主板 ST −5% 漏判"缺口（ST 主板早已 5%→10%，与普通股同幅），避免了一次会**造成漏买**的错误修复。
+
+## 提交纪律再收紧（多会话并发）
+
+路径限定提交时**优先不 `git add`，直接** `git commit -F <msgfile> -- <path1> <path2> …` —— 对共享索引**零写入**，比 `add` + `commit` 更安全。裸 `git commit` 绝对禁止（会提交**整个共享索引**，吃掉别人已暂存的文件，09-19 真实发生过）。另：本机 **PowerShell 5.1 无 `Set-Content -Encoding utf8NoBOM`** → 消息文件用 write 工具落 UTF-8 无 BOM。
