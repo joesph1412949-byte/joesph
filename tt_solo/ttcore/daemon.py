@@ -67,7 +67,9 @@ def armed_state(root=None, env="real", now=None):
         content = f.read_text(encoding="utf-8", errors="replace").strip()
     except OSError as e:
         return False, "armed 读取失败: %r" % e
-    if today not in content:
+    # 按**整行**比较: 子串匹配会把 "x20260914000"/"120260914" 也判成已放行
+    lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
+    if today not in lines:
         return False, "armed 未含今日 %s" % today
     return True, "armed"
 
@@ -322,6 +324,14 @@ def _guard_drill_state(state_arg):
 
 
 def build_daemon(args):
+    # ---- 互斥守卫(I5): fail-closed, 不是 warning ----------------
+    # --sample 用的是离线样本行情(末根 2026-09-11, 与真价差约 10%), 而 --live
+    # 会往真实队列写信号/真报单。两者同时给出 ⇒ 直接拒绝启动。
+    if getattr(args, "live", False) and getattr(args, "sample", False):
+        raise SystemExit(
+            "--live 与 --sample 互斥: --sample 用的是离线样本行情(末根 "
+            "2026-09-11, 与真价差约 10%), 不能拿去实盘下单。\n"
+            "  要演练: 去掉 --live; 要实盘: 去掉 --sample。")
     overrides = {}
     if args.live:
         overrides["dry_run"] = False
@@ -329,8 +339,13 @@ def build_daemon(args):
     if env:
         overrides["env"] = env
     cfg = tt_config.load(overrides=overrides or None)
-    if args.live:
-        cfg["dry_run"] = False
+    # ---- dry_run 收紧(I6): --live 是**唯一**关闭 dry_run 的途径 ----
+    # 旧实现直接 `dry_run = cfg["dry_run"]` ⇒ 一份遗留的 "dry_run": false 会让
+    # "演练 DRY-RUN" 菜单项变成实盘写信号(与 README/菜单标签冲突)。
+    if not args.live and cfg.get("dry_run") is False:
+        LOG.warning("配置里的 dry_run=false 被忽略 —— 必须显式 --live 才进入"
+                    "实盘模式(不再允许配置文件单独打开实盘)。")
+    cfg["dry_run"] = not bool(args.live)
     now_fn = (lambda: datetime(2026, 9, 14, 10, 0, 0)) if args.fake_now else None
     feed = market.make_feed(prefer_sample=args.sample, now_fn=now_fn)
     book_dry = bool(getattr(args, "book_dry_run", False))
@@ -347,12 +362,17 @@ def build_daemon(args):
     if getattr(args, "direct", False):
         # 直连执行器: 账户号取配置; --sample 时不给 executor(纯离线)
         if not args.sample:
-            from .executor import DirectExecutor
+            from .executor import DirectExecutor, PLACED_NAME
             risk = cfg.get("risk", {})
             executor = DirectExecutor(
                 account_id=cfg.get("account_id") or "",
                 lot=getattr(eng, "lot", 100),
                 max_order_amount=risk.get("max_single_order_amount"),
+                # 纵深防御: propose_price 顶替档位价时复核滑点/偏离
+                max_slippage_pct=risk.get("max_slippage_pct"),
+                max_price_deviation_pct=risk.get("max_price_deviation_pct"),
+                # order_id 幂等跨进程/跨账本重置(与账本同目录的 append-only)
+                placed_path=Path(args.state or STATE_PATH).with_name(PLACED_NAME),
                 now_fn=now_fn)
     return TTDaemon(cfg, ledger=led, engine=eng, dry_run=cfg["dry_run"],
                     now_fn=now_fn, signal_root=args.signal_root,
@@ -371,16 +391,22 @@ SIM_NOTICE = (
 )
 
 
-def env_banner(cfg, dry_run, direct=False, book_dry_run=False):
-    """返回启动横幅(多行)。sim 通道额外给出账户警告。"""
+def env_banner(cfg, dry_run, direct=False, book_dry_run=False, signal_root=None):
+    """返回启动横幅(多行)。sim 通道额外给出账户警告。
+
+    signal_root: **实际生效**的信号根(呼应用 --signal-root 或 TT_SIGNAL_ROOT)。
+    不传才回落到模块常量 —— 否则横幅会指向 D:/QMT_SIGNALS, 与真的写出去的
+    目录不是一个地方。
+    """
     env = cfg.get("env", "real")
+    root = Path(signal_root) if signal_root else SIGNAL_ROOT
     if direct:
         lines = ["  执行通道: 直连 miniQMT (外部 Python order_stock, 不写信号文件)",
                  "  账户: %s" % (cfg.get("account_id") or "(自动枚举已登录账号)"),
                  "  下发模式: %s" % ("DRY-RUN — 只算不提交" if dry_run
                                      else "LIVE — 会真实报单")]
     else:
-        lines = ["  信号通道: %s  (%s/)" % (env, SIGNAL_ROOT / env),
+        lines = ["  信号通道: %s  (%s/)" % (env, root / env),
                  "  下发模式: %s" % ("DRY-RUN — 只算不落盘" if dry_run
                                      else "LIVE — 会写信号文件")]
     if env == "sim" and not direct:
@@ -418,7 +444,7 @@ def main(argv=None):
 
     d = build_daemon(args)
     banner = env_banner(d.cfg, d.dry_run, direct=d.direct,
-                        book_dry_run=d.book_dry_run)
+                        book_dry_run=d.book_dry_run, signal_root=d.signal_root)
     if args.once:
         rt = d.run_once()
         print(banner)

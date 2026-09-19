@@ -13,7 +13,7 @@
      "factors": ["M6", "M7", "S3", "S4", "S6",
                  "SEC1", "SEC2", "SEC3", "SEC4", "SEC6"]}
   ],
-  "composite": {"mode": "average", "cap": 9.0},
+  "composite": {"mode": "weighted_sum", "cap": 9.0},
   "filters": {"candidate_min_model": 3, "environment_threshold": 3},
   "sell_rules": {"take_profit_pct": 0.15, "stop_loss_pct": 0.05,
                  "max_hold_days": 5},

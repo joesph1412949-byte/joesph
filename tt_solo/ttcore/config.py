@@ -9,7 +9,10 @@
 """
 import json
 import copy
+import logging
 from pathlib import Path
+
+LOG = logging.getLogger("tt_config")
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent / "tt_config.json"
 
@@ -232,28 +235,36 @@ def validate(cfg):
 
         # ---- 交叉校验: 最深"实际使用档"的固有偏离须仍在偏离中枢闸门内 ----
         # 第 n 档挂单价 = ref*(1 ± band*n) → 固有偏离 = n*band。
-        # 若 max_units*band > max_price_deviation_pct, 深档会被 DEVIATION_TOO_BIG
-        # 静默拦掉(功能缺失而非安全), 故 fail-closed 报错, 强制人显式调参。
+        # 判据必须与 grid.band_of 的**实际取值口径**一致: band_of 是
+        #   `pct > 0 → band = pct/100`, 与 band_mode 无关(见 grid.py)。
+        # 旧代码把这段包在 `if band_mode == "fixed"` 里 ⇒ 部署配置
+        # (band_mode="sigma" + 每标的都有 band_pct)整体漏检, 深档被
+        # DEVIATION_TOO_BIG 静默拦掉 —— 功能缺失而非安全。
         # 用 max_units(实际用几档) 而非 n_units(阶梯算几档), 后者可大于前者。
         # 单位: band_pct 是百分数(0.53 = 0.53%), 换算成小数再比。
-        if grid["band_mode"] == "fixed":
+        #
+        # 处置方式 = WARNING 而非 ConfigError: 部署 tt_config.json 里
+        # 603268.SH(min(5,3)×3.41% = 10.23%)本来就超限, 硬拦会让守护**起不来**
+        # —— 那是用 fail-closed 制造事故。改为启动时点名, 由人决定收紧 band_pct
+        # 还是降 max_units(band_mode=sigma 时无 band_pct 的标的仍只能运行时校验)。
+        if s["band_pct"] > 0:
             worst_band = s["band_pct"] / 100.0
             eff_n = min(s["n_units"], grid["max_units"])
-            if worst_band > 0:
-                worst_dev = eff_n * worst_band
-                if worst_dev > risk["max_price_deviation_pct"] + 1e-9:
-                    raise ConfigError(
-                        "symbols[%d] %s: 实际档数(%d) × band(%.2f%%) = %.2f%% 超过 "
-                        "risk.max_price_deviation_pct(%.2f%%) → 第 %d 档起会被"
-                        "偏离闸门静默拦下。请降 grid.max_units 或收紧 band_pct, "
-                        "或放宽该闸门"
-                        % (i, code, eff_n, s["band_pct"], worst_dev * 100,
-                           risk["max_price_deviation_pct"] * 100,
-                           min(eff_n,
-                               int(risk["max_price_deviation_pct"]
-                                   / worst_band) + 1)))
-        # band_mode=sigma 时带宽由日波动率×band_k 现算, 无法在配置期静态判定,
-        # 由 engine 在算完 meta['band'] 后做同口径运行时校验(见 engine._make_intent)。
+            worst_dev = eff_n * worst_band
+            if worst_dev > risk["max_price_deviation_pct"] + 1e-9:
+                LOG.warning(
+                    "配置交叉校验: symbols[%d] %s 实际档数(%d) × band(%.2f%%) "
+                    "= %.2f%% 超过 risk.max_price_deviation_pct(%.2f%%) → 第 %d "
+                    "档起会被偏离闸门拦下(该标的做不满 %d 档)。"
+                    "请降 grid.max_units、收紧 %s.band_pct 或放宽该闸门;"
+                    "本配置下最多做到第 %d 档。",
+                    i, code, eff_n, s["band_pct"], worst_dev * 100,
+                    risk["max_price_deviation_pct"] * 100, eff_n, eff_n,
+                    code,
+                    max(0, int(risk["max_price_deviation_pct"] / worst_band)))
+        # band_mode=sigma 且**没给** band_pct 时带宽由日波动率×band_k 现算,
+        # 配置期无法静态判定, 由 engine 在算完 meta['band'] 后做同口径运行时
+        # 校验(见 engine._make_intent 的 DEPTH_BEYOND_DEVIATION)。
 
     return cfg
 

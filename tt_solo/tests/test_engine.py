@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
 """策略编排端到端测试(注入假行情/假账户, 不打网络)。"""
+import logging
+
 import pytest
 
 from ttcore import config as tt_config
+from ttcore import grid
+from ttcore import risk as tt_risk
 from ttcore.engine import TTEngine
 
 OPEN = "10:00"
@@ -417,3 +421,152 @@ def test_max_units_zero_rejected():
             "symbols": [{"code": "600900.SH", "name": "X", "enabled": True,
                          "weight": 0.1, "band_pct": 0.5, "n_units": 3}],
         })
+
+
+# ------------------------------------------------------------ 涨跌停闸门中枢(Minor 1)
+
+def test_limit_close_uses_corrected_prev_close(eng_factory, ledger, sym,
+                                               snap_factory, monkeypatch):
+    """涨跌停闸门的中枢必须是修正后的前收, 不是陈旧的 tick.last_close。
+
+    真机实测(2026-09-19 周六): 600900 的 tick.lastClose=28.46(09-17 收盘),
+    正确前收是 09-18 的 28.27 —— 相差一天会让整个涨跌停区间偏移。
+
+    必须**探到闸门实际收到的值**: 光断言 ctx["limit_close"] 只测了算出来的
+    字段, 测不到接线(把 limit_close 算对了却继续传 last_close 照样绿)。
+    """
+    ledger.load()
+    snap = snap_factory(last=28.45, last_close=28.46, high=28.57, low=28.10,
+                        ma20=28.19, ma20_prev=28.19)
+    snap["daily"] = {"date": "20260911", "close": 28.09}    # 正确的最后一根日K
+    eng, _ = eng_factory({"600900.SH": snap})
+
+    seen = []
+    real_check = tt_risk.RiskGate.check
+
+    def spy(self, **kw):
+        seen.append(kw.get("last_close"))
+        return real_check(self, **kw)
+
+    monkeypatch.setattr(tt_risk.RiskGate, "check", spy)
+    ctx, intents = eng.plan_symbol(sym, eng.account_state(), OPEN, "OPEN")
+
+    assert ctx["last_close"] == 28.46            # tick 原值仍留作展示
+    assert ctx["ref"] == pytest.approx(28.09)
+    assert ctx["limit_close"] == pytest.approx(28.09)
+    assert intents, "本轮没有生成意图 → 探针没探到接线"
+    assert seen, "闸门一次都没被调用 → 探针没探到接线"
+    assert all(abs(v - 28.09) < 1e-9 for v in seen), \
+        "闸门收到的涨跌停中枢仍是陈旧值: %r" % (seen,)
+
+    # 后果具体化: 31.0 按陈旧昨收(28.46×1.10=31.31)算"合法", 按正确昨收
+    # (28.09×1.10=30.899)算"超涨停" —— 旧接线会放它过去。
+    assert tt_risk.check_limit_band(31.0, ctx["last_close"], sym["code"]).ok
+    v = tt_risk.check_limit_band(31.0, ctx["limit_close"], sym["code"])
+    assert not v.ok and v.code == "BAND_OUT"
+
+
+def test_limit_close_in_open_ref_mode_still_prev_close(eng_factory, ledger,
+                                                       sym, snap_factory,
+                                                       monkeypatch):
+    """ref_mode=open 时 ref 是今开(不能当昨收用) → 涨跌停中枢仍取前收。"""
+    ledger.load()
+    snap = snap_factory(last=28.45, last_close=28.46, high=28.57, low=28.10,
+                        ma20=28.19, ma20_prev=28.19, open_=28.30)
+    snap["daily"] = {"date": "20260911", "close": 28.09}
+    eng, _ = eng_factory({"600900.SH": snap})
+    eng.grid_cfg["ref_mode"] = "open"
+
+    seen = []
+    real_check = tt_risk.RiskGate.check
+
+    def spy(self, **kw):
+        seen.append(kw.get("last_close"))
+        return real_check(self, **kw)
+
+    monkeypatch.setattr(tt_risk.RiskGate, "check", spy)
+    ctx, intents = eng.plan_symbol(sym, eng.account_state(), OPEN, "OPEN")
+
+    assert ctx["ref"] == pytest.approx(28.30)           # 中枢 = 今开
+    assert ctx["limit_close"] == pytest.approx(28.09)   # 涨跌停仍按前收
+    assert intents and all(abs(v - 28.09) < 1e-9 for v in seen), seen
+
+
+# ------------------------------------------------------------ band_mode 现状真相
+
+def test_band_of_prefers_band_pct_regardless_of_band_mode():
+    """`band_of` 的代码级判据: band_pct>0 就优先, **与 band_mode 无关**。
+
+    部署配置写着 band_mode="sigma", 但每个标的都有 band_pct>0
+    ⇒ band_k / sigma 从未生效过, 100% 走 band_pct。README §1 那句
+    "band_mode: sigma 时带宽不取 band_pct" 与代码不符。
+    """
+    assert grid.band_of({"band_pct": 0.53}, sigma=0.05, band_k=3.0,
+                        band_mode="sigma") == pytest.approx(0.0053)
+    assert grid.band_of({"band_pct": 0.53}, sigma=0.05, band_k=3.0,
+                        band_mode="fixed") == pytest.approx(0.0053)
+    # 没有 band_pct 时 sigma 才生效
+    assert grid.band_of({}, sigma=0.01, band_k=1.0,
+                        band_mode="sigma") == pytest.approx(0.01)
+    # sigma 拿不到且无 band_pct → None(该标的当日跳过)
+    assert grid.band_of({}, sigma=None, band_k=1.0, band_mode="sigma") is None
+
+
+def test_config_cross_check_covers_sigma_mode(caplog):
+    """交叉校验要按 band_of 的**实际取值口径**生效, 不能被 band_mode 包着。
+
+    旧实现包在 `if band_mode == "fixed"` 里 ⇒ sigma + band_pct=5.0、3 档
+    = 15% > 5% 也校验通过(静默失效)。触发时给显眼 WARNING(不抛异常, 见下)。
+    """
+    with caplog.at_level(logging.WARNING, logger="tt_config"):
+        tt_config.load(overrides={
+            "grid": {"band_mode": "sigma", "band_k": 1.0, "n_units": 5,
+                     "max_units": 3, "ref_mode": "prev_close",
+                     "sigma_window": 60},
+            "symbols": [{"code": "600900.SH", "name": "X", "enabled": True,
+                         "weight": 0.1, "band_pct": 5.0, "n_units": 5}],
+        })
+    assert "600900.SH" in caplog.text
+    assert "15.00%" in caplog.text
+
+
+def test_config_cross_check_silent_when_compliant(caplog):
+    with caplog.at_level(logging.WARNING, logger="tt_config"):
+        tt_config.load(overrides={
+            "grid": {"band_mode": "sigma", "band_k": 1.0, "n_units": 5,
+                     "max_units": 3, "ref_mode": "prev_close",
+                     "sigma_window": 60},
+            "symbols": [{"code": "600900.SH", "name": "X", "enabled": True,
+                         "weight": 0.1, "band_pct": 0.53, "n_units": 5}],
+        })
+    assert caplog.text == ""
+
+
+def test_deployed_config_loads_and_flags_only_603268(caplog):
+    """**部署配置必须能加载**(硬拦会让守护升级后起不来), 超限标的要点名。
+
+    实测表(2026-09-19):
+        600900.SH  min(5,3)×0.53% = 1.59%  ✓
+        600938.SH  min(5,3)×1.65% = 4.95%  ✓
+        601088.SH  min(5,3)×1.40% = 4.20%  ✓
+        603268.SH  min(5,3)×3.41% = 10.23% ✗ (enabled=false)
+    """
+    with caplog.at_level(logging.WARNING, logger="tt_config"):
+        cfg = tt_config.load()
+    assert cfg["grid"]["band_mode"] == "sigma"
+    assert "603268.SH" in caplog.text
+    assert "10.23%" in caplog.text
+    for other in ("600900.SH", "600938.SH", "601088.SH"):
+        assert other not in caplog.text
+
+
+def test_deployed_config_worst_deviation_table():
+    """把上面那张表钉成断言, 免得配置改了这份记录悄悄失真。"""
+    cfg = tt_config.load()
+    mu = cfg["grid"]["max_units"]
+    md = cfg["risk"]["max_price_deviation_pct"]
+    worst = {s["code"]: min(s["n_units"], mu) * s["band_pct"] / 100.0
+             for s in cfg["symbols"]}
+    assert worst["603268.SH"] == pytest.approx(0.1023)
+    assert worst["603268.SH"] > md
+    assert max(v for k, v in worst.items() if k != "603268.SH") <= md

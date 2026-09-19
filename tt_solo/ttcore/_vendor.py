@@ -5,9 +5,9 @@ ponytail: vendored from shared/common.py @2026-09-16 —— tt_solo 要能被整
 拷走独立运行, 故刻意不 import shared。5 个符号约 60 行, 为它们造一层包结构
 属于过度设计, 内联到单文件即可(每个函数标注来源保留回溯)。
 
-注意 limit_ratio_for_code 的差异: shared/common.py 的判定是 ("8", "4"),
-而 tt/risk.py 的兜底实现是 ("8", "4", "92")。北交所 920xxx 属 30% 涨跌幅,
-故此处采用 tt 的更正确版本("92"); shared 版本缺这条, 是主项目侧的潜在缺陷。
+注意 limit_ratio_for_code 的口径: 与 shared/common.py **已一致** —— 两处都是
+("92", "8", "4") → 北交所 920xxx 按 30% 涨跌幅。此处 @2026-09-16 先补上 "92";
+shared 侧 @2026-09-19 补上(该段注释原写"shared 版本缺这条", 已过时)。
 """
 import os
 import threading

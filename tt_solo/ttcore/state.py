@@ -128,6 +128,10 @@ class Ledger:
                         archived = self.archive_current()
                     if has_data and not archived:
                         self._preserve_unarchived(raw)
+                else:
+                    # 合法 JSON 但**非 dict**(如 []/5/"x"/null) = 结构不符。
+                    # 与上面同款: 一律改名留档, 绝不就地 save() 盖掉。
+                    self._preserve_unarchived(raw)
             except (ValueError, OSError):
                 pass                          # 坏文件 → 按新日重置(fail-safe)
         if not self.writable:
@@ -164,7 +168,8 @@ class Ledger:
     def _preserve_unarchived(self, raw):
         """未被归档的账本在重置前改名留档, 免得 save() 把它就地盖成空账本。
 
-        进这里 = 同日仅版本不符(收盘后升版 / 手改过 state 文件)或归档没写成功。
+        进这里 = 同日仅版本不符(收盘后升版 / 手改过 state 文件)、归档没写成功,
+        或账本是合法 JSON 但结构不符(非 dict)。
         定名(name + 旧版本 + 日期)是关键: 重启循环反复覆盖同一个 .bak, 不堆积。
         名字带版本+日期, 也不会撞上正经的 state 文件。
 
@@ -176,8 +181,12 @@ class Ledger:
             p = Path(self.path)
             if not p.exists():
                 return
-            bak = "%s.pre-v%s-%s.bak" % (p.name, raw.get("version"),
-                                         raw.get("date") or "")
+            if isinstance(raw, dict):
+                ver, day = raw.get("version"), raw.get("date")
+            else:
+                # 非 dict 没有 version/date 可取 → 用类型名当标号
+                ver, day = type(raw).__name__, ""
+            bak = "%s.pre-v%s-%s.bak" % (p.name, ver, day or "")
             p.replace(p.with_name(bak))       # os.replace 语义: 同盘原子改名
         except Exception:                 # noqa: BLE001 - 刻意吞掉一切
             pass

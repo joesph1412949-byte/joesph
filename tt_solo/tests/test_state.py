@@ -4,6 +4,8 @@ import json
 import threading
 from datetime import datetime
 
+import pytest
+
 from ttcore import _vendor
 from ttcore.state import Ledger
 
@@ -488,6 +490,44 @@ def test_same_day_version_mismatch_preserves_original_file(tmp_path):
     assert led.state["date"] == "2026-09-14"             # 照常重置为新账本
     assert led.state["symbols"] == {}
     assert _hist_rows(tmp_path) == []                    # 今天没被钉上半日行
+
+
+@pytest.mark.parametrize("raw", ["[]", "5", '"x"', "null"])
+def test_non_dict_state_json_is_preserved(tmp_path, raw):
+    """合法 JSON 但**非 dict** 的账本也要改名留档, 不许就地覆盖。
+
+    旧实现只在 `isinstance(raw, dict)` 时才走留档分支 —— 非 dict 直接落到
+    "重置为新账本 + save()", 把盘上那份原始内容就地盖掉, 与 load() 自己的
+    注释("结构不符 → 改名留档")矛盾。取证副本是事故后唯一能复盘的东西。
+    """
+    p = tmp_path / "tt_state.json"
+    p.write_text(raw, encoding="utf-8")
+
+    led = Ledger(path=p, now_fn=lambda: datetime(2026, 9, 14, 15, 10))
+    led.load()
+
+    baks = list(tmp_path.glob("*.bak"))
+    assert len(baks) == 1, "非 dict 账本被直接覆盖, 原始数据丢失"
+    assert baks[0].read_text(encoding="utf-8") == raw
+    assert led.state["date"] == "2026-09-14"        # 照常重置为新账本
+    assert led.state["symbols"] == {}
+    assert _hist_rows(tmp_path) == []               # 今天没被钉上半日行
+
+
+def test_non_dict_state_preserve_failure_does_not_block_load(tmp_path,
+                                                             monkeypatch):
+    """非 dict 的留档失败也必须只是丢备份, 不许拦住载入。"""
+    p = tmp_path / "tt_state.json"
+    p.write_text("[]", encoding="utf-8")
+
+    def boom(self, target):
+        raise RuntimeError("disk full")
+    monkeypatch.setattr(type(p), "replace", boom)
+
+    led = Ledger(path=p, now_fn=lambda: datetime(2026, 9, 14, 15, 10))
+    led.load()
+    assert led.state["date"] == "2026-09-14"
+    assert led.state["symbols"] == {}
 
 
 def test_preserve_failure_does_not_block_load(tmp_path, monkeypatch):

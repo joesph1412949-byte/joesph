@@ -2,8 +2,12 @@
 """tt 直连执行器测试(DirectExecutor) —— 全程 fake backend, 绝不触碰真实账户。
 
 覆盖: dry_run 不提交 / 真实提交参数正确 / 幂等 / 风控未过跳过 /
-账户不匹配整批拒单 / BUY-SELL 常量 / 执行层纵深防御 / 柜台拒单 / 未连接 / 撤单。
+账户不匹配整批拒单 / BUY-SELL 常量 / 执行层纵深防御 / 柜台拒单 / 未连接 / 撤单 /
+propose_price 的滑点复核 / 跨进程 order_id 幂等 / 方向字段校验。
 """
+import json
+from datetime import datetime
+
 import pytest
 
 from ttcore.engine import Intent
@@ -46,10 +50,20 @@ class FakeBackend:
 
 
 def mk_intent(code="600900.SH", side="SELL", price=28.537, volume=600,
-              ok=True, rc="", unit=3, name="长江电力"):
+              ok=True, rc="", unit=3, name="长江电力", meta=None):
     return Intent(code, name, side, price, volume, "档位%d" % unit, ok, rc, "",
                   "TT_20260914_600900SH_%s_%d" % (side, unit),
-                  {"unit": unit})
+                  meta if meta is not None else {"unit": unit})
+
+
+def mk_gated_intent(**kw):
+    """带上阶梯价/中枢的 Intent —— 执行层复核滑点/偏离所需的 meta。"""
+    kw.setdefault("meta", {"unit": 3, "ladder_price": 28.537, "ref": 28.09})
+    return mk_intent(**kw)
+
+
+def _now():
+    return datetime(2026, 9, 14, 10, 0, 0)
 
 
 @pytest.fixture
@@ -184,8 +198,9 @@ def test_price_invalid(ex):
 # ---------------------------------------------------------------- propose_price
 
 def test_propose_price_overrides(ex):
+    """改价生效 —— 前提是 meta 里带着可比参考价(见 _verify_proposed_price)。"""
     e, be = ex
-    r = e.execute([mk_intent(price=28.537)], dry_run=False,
+    r = e.execute([mk_gated_intent(price=28.537)], dry_run=False,
                   propose_price=lambda it: 28.500)
     assert be.orders_sent[0]["price"] == pytest.approx(28.500)
     assert r[0]["price"] == pytest.approx(28.500)
@@ -197,6 +212,163 @@ def test_propose_price_failure_falls_back(ex):
         raise RuntimeError("no quote")
     e.execute([mk_intent(price=28.537)], dry_run=False, propose_price=boom)
     assert be.orders_sent[0]["price"] == pytest.approx(28.537)
+
+
+# ------------------------------------------------- propose_price 的滑点复核
+# 生产链路(daemon → 信号文件→QMT 桥)本来就没有 propose_price, 而文档声称
+# "执行器会再跑一遍闸门"。这里把它做成真的: propose_price 一旦顶替了档位价,
+# 必须用 Intent.meta 里的 ladder_price/ref 复核滑点与偏离。
+
+def test_propose_price_beyond_slippage_rejected():
+    """委托价相对阶梯价偏离 > 3% → 拒(旧代码照样 SUBMITTED)。"""
+    be = FakeBackend()
+    e = DirectExecutor(account_id="88869979", backend=be, now_fn=_now,
+                       max_slippage_pct=0.03)
+    # 阶梯价 28.537, 改报 27.0 → 偏离 5.39%
+    r = e.execute([mk_gated_intent()], dry_run=False,
+                  propose_price=lambda it: 27.0)
+    assert be.orders_sent == []
+    assert r[0]["ok"] is False and r[0]["code"] == "SLIPPAGE_TOO_BIG"
+    assert e.stats["rejected"] == 1
+
+
+def test_propose_price_within_slippage_accepted():
+    be = FakeBackend()
+    e = DirectExecutor(account_id="88869979", backend=be, now_fn=_now,
+                       max_slippage_pct=0.03)
+    r = e.execute([mk_gated_intent()], dry_run=False,
+                  propose_price=lambda it: 28.500)
+    assert be.orders_sent[0]["price"] == pytest.approx(28.500)
+    assert r[0]["ok"] is True and r[0]["code"] == "SUBMITTED"
+
+
+def test_propose_price_beyond_deviation_rejected():
+    """相对中枢(meta['ref'])的偏离同样要复核。"""
+    be = FakeBackend()
+    e = DirectExecutor(account_id="88869979", backend=be, now_fn=_now,
+                       max_price_deviation_pct=0.05)
+    r = e.execute([mk_gated_intent()], dry_run=False,
+                  propose_price=lambda it: 30.0)      # 30.0/28.09 = +6.8%
+    assert be.orders_sent == []
+    assert r[0]["code"] == "DEVIATION_TOO_BIG"
+
+
+def test_propose_price_without_reference_is_rejected():
+    """没有任何参考价可比 → 拒(fail-closed: 否则 propose_price 就是绕过闸门)。"""
+    be = FakeBackend()
+    e = DirectExecutor(account_id="88869979", backend=be, now_fn=_now,
+                       max_slippage_pct=0.03)
+    r = e.execute([mk_intent(meta={"unit": 1})], dry_run=False,
+                  propose_price=lambda it: 28.500)
+    assert be.orders_sent == []
+    assert r[0]["code"] == "PRICE_UNVERIFIED"
+
+
+def test_no_propose_price_skips_extra_check(ex):
+    """propose_price 的替代价与档位价相同(或没给)时, 不额外拦(引擎侧已查过)。"""
+    e, be = ex
+    r = e.execute([mk_intent()], dry_run=False,
+                  propose_price=lambda it: 28.537)
+    assert r[0]["ok"] is True and len(be.orders_sent) == 1
+
+
+# ------------------------------------------------- order_id 跨进程幂等(I4)
+
+def test_placed_ids_persist_across_processes(tmp_path):
+    """进程 A 提交过的 order_id, 进程 B(新对象)必须凭盘上记录拒重。
+
+    旧实现 _placed 只在内存: 盘中升版重启(本仓承认这是正常发版窗口, 见
+    tests/test_state.py 的同日版本不符用例)→ 账本被重置 → 同一批 order_id
+    重现 → 柜台收到两遍(实测 4 笔, 重复 2 个)。
+    """
+    p = tmp_path / "tt_placed.jsonl"
+    be1 = FakeBackend()
+    DirectExecutor(account_id="88869979", backend=be1, now_fn=_now,
+                   placed_path=p).execute([mk_intent()], dry_run=False)
+    assert len(be1.orders_sent) == 1
+
+    be2 = FakeBackend()                      # 模拟重启: 全新 _placed
+    r = DirectExecutor(account_id="88869979", backend=be2, now_fn=_now,
+                       placed_path=p).execute([mk_intent()], dry_run=False)
+    assert be2.orders_sent == []
+    assert r[0]["code"] == "ALREADY_PLACED"
+
+
+def test_placed_ids_expire_next_day(tmp_path):
+    """跨日自动失效: 昨天的 order_id 不放行今天(否则永久锁死)。"""
+    p = tmp_path / "tt_placed.jsonl"
+    be1 = FakeBackend()
+    DirectExecutor(account_id="88869979", backend=be1, now_fn=_now,
+                   placed_path=p).execute([mk_intent()], dry_run=False)
+
+    be2 = FakeBackend()
+    tomorrow = DirectExecutor(
+        account_id="88869979", backend=be2,
+        now_fn=lambda: datetime(2026, 9, 15, 10, 0, 0),
+        placed_path=p)
+    r = tomorrow.execute([mk_intent()], dry_run=False)
+    assert len(be2.orders_sent) == 1
+    assert r[0]["code"] == "SUBMITTED"
+
+
+def test_placed_file_is_append_only_jsonl(tmp_path):
+    """落盘形态: 每行一个 JSON(append-only, 与 tt_history.jsonl 同款手法)。"""
+    p = tmp_path / "tt_placed.jsonl"
+    be = FakeBackend()
+    e = DirectExecutor(account_id="88869979", backend=be, now_fn=_now,
+                       placed_path=p)
+    e.execute([mk_intent(unit=1, price=28.239),
+               mk_intent(unit=2, price=28.388)], dry_run=False)
+    rows = [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines()
+            if l.strip()]
+    assert [r["order_id"] for r in rows] == [
+        "TT_20260914_600900SH_SELL_1", "TT_20260914_600900SH_SELL_2"]
+    assert all(r["date"] == "20260914" for r in rows)
+
+
+def test_rejected_order_is_not_recorded_as_placed(tmp_path):
+    """被柜台拒的单不能进 placed 文件 —— 否则重试窗口被永久关掉。"""
+    p = tmp_path / "tt_placed.jsonl"
+
+    class RejectBackend(FakeBackend):
+        def order(self, *a, **k):
+            return -1
+
+    e = DirectExecutor(account_id="88869979", backend=RejectBackend(),
+                       now_fn=_now, placed_path=p)
+    assert e.execute([mk_intent()], dry_run=False)[0]["ok"] is False
+    assert not p.exists()
+    assert e.execute([mk_intent()], dry_run=False)[0]["code"] == "ORDER_REJECTED"
+
+
+# ------------------------------------------------- 方向字段校验(Minor 5)
+
+@pytest.mark.parametrize("bad", ["", None, "LONG", "SEL", "BUYY", "  "])
+def test_invalid_side_rejected(bad):
+    """`action` 缺失/空串/乱写 → 一律拒 SIDE_INVALID。
+
+    旧实现 `"BUY" if side.startswith("B") else "SELL"`: 空串与任何非 B 开头
+    的垃圾都会**被当成 SELL 提交**(真实卖出), 这是最危险的一类静默降级。
+    """
+    be = FakeBackend()
+    e = DirectExecutor(account_id="88869979", backend=be, now_fn=_now)
+    sig = {"order_id": "X1", "stock_code": "600900.SH", "price": 28.5,
+           "volume": 100, "action": bad}
+    r = e.execute([sig], dry_run=False)
+    assert be.orders_sent == []
+    assert r[0]["code"] == "SIDE_INVALID"
+
+
+@pytest.mark.parametrize("good,expect", [("BUY", STOCK_BUY), ("buy", STOCK_BUY),
+                                        ("SELL", STOCK_SELL),
+                                        ("sell", STOCK_SELL)])
+def test_valid_side_accepted(good, expect):
+    be = FakeBackend()
+    e = DirectExecutor(account_id="88869979", backend=be, now_fn=_now)
+    sig = {"order_id": "X2", "stock_code": "600900.SH", "price": 28.5,
+           "volume": 100, "action": good}
+    assert e.execute([sig], dry_run=False)[0]["ok"] is True
+    assert be.orders_sent[0]["type"] == expect
 
 
 # ---------------------------------------------------------------- 统计

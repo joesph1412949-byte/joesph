@@ -15,9 +15,10 @@ _registry = reg  # validate 的 reg=None 形参遮蔽模块级名 → 别名兜�
 
 # 综合分组合方式
 composite_modes = {
-    "top3_weighted": lambda scores, cfg: _top3_weighted(scores, cfg),
-    "sum": lambda scores, cfg: sum(scores),
-    "average": lambda scores, cfg: (sum(scores) / len(scores)) if scores else 0.0,
+    "top3_weighted": lambda scores, cfg, models=None: _top3_weighted(scores, cfg),
+    "sum": lambda scores, cfg, models=None: sum(scores),
+    "average": lambda scores, cfg, models=None: (sum(scores) / len(scores)) if scores else 0.0,
+    "weighted_sum": lambda scores, cfg, models=None: _weighted_sum(scores, cfg, models),
 }
 
 GRADE_RULES = [
@@ -33,6 +34,28 @@ def _top3_weighted(scores, cfg):
     ordered = sorted(scores, reverse=True)
     total = sum(ordered[i] * weights[i] for i in range(min(len(ordered), len(weights))))
     return min(total, cap)
+
+
+def _weighted_sum(scores, cfg, models=None):
+    """Σ(模型 weight × 模型分) 再 min(..., cap); 权重按**声明序(名字)**对齐。
+
+    与 top3_weighted 的"按分数排名加权"是两种语义, 故单开一个模式(不塞进
+    average 里, 免得两种语义纠缠)。只作用于 composite(排序), 不作用于
+    candidate_min_model 资质线/GRADE_RULES 分级 —— 那些消费 model_scores 的
+    **原始命中数**。
+
+    cap 是"Σ(层权重 × 该层因子数)"的理论上限(见 docs/superpowers/specs/
+    2026-09-03-full-factor-strategy-design.md: 0.60×9 + 0.25×8 + 0.15×11 =
+    9.05), 只用声明值、不自动改写; 缺 cap 则不设上限。
+    权重缺失/脏值(非数值/NaN/≤0) → 该层 1.0(与校验器"模型权重需为正数"
+    同口径: 脏配置不静默清零整层, 也不崩)。
+    """
+    total = 0.0
+    for s, m in zip(scores, models or [{}] * len(scores)):
+        w = _num((m or {}).get("weight"), 1.0)
+        total += (w if 0 < w < float("inf") else 1.0) * s
+    cap = cfg.get("cap")
+    return min(total, cap) if cap is not None else total
 
 
 def load_strategy(path_or_dict):
@@ -134,7 +157,8 @@ def _compute_scores(ctx, strategy):
     scores = [model_scores[m["id"]] for m in strategy["scoring_models"]]
     comp_cfg = strategy.get("composite") or {}
     mode = comp_cfg.get("mode", "top3_weighted")
-    composite = composite_modes[mode](scores, comp_cfg)
+    composite = composite_modes[mode](scores, comp_cfg,
+                                      strategy["scoring_models"])
     best = max(scores) if scores else 0
     second = sorted(scores, reverse=True)[1] if len(scores) > 1 else 0
     grade = "E"
