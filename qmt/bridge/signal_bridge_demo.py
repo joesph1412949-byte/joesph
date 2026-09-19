@@ -2,14 +2,14 @@
 # QMT signal bridge - ASCII only (no CJK to avoid QMT GBK encoding issues)
 # ============================================================
 #  SIMULATION bridge. NOT for real trading.
-#  It has NO per-day dedup (HAS_DAILY_DEDUP = False): the same order_id
-#  can be submitted twice. It also does not validate the account -- it
-#  orders on whatever account the current QMT terminal is logged into.
-#  If ENVIRONMENT is ever flipped to "real", the arm file must at least be
-#  dated today (same rule as signal_bridge_real.py), but real orders belong
-#  in qmt/bridge/signal_bridge_real.py, which carries the full gate chain
+#  It has NO per-day dedup (HAS_DAILY_DEDUP = False) and NO paused gate, so
+#  ENVIRONMENT = "real" is REFUSED at startup by _check_safety() (execution
+#  constraint, decided 2026-09-19) -- real orders go through
+#  qmt/bridge/signal_bridge_real.py, which carries the full gate chain
 #  (paused / dated armed file / per-day dedup / same-round sell guard /
-#  price sanity).
+#  price-volume sanity / optional account whitelist).
+#  It also does not validate the account -- it orders on whatever account the
+#  current QMT terminal is logged into.
 # ============================================================
 import json
 import os
@@ -79,15 +79,15 @@ def _is_armed():
 
 def _check_safety():
     if ENVIRONMENT == "real":
-        if DRY_RUN:
-            return False, "real env forbids DRY_RUN=True"
-        armed, armed_msg = _is_armed()
-        if not armed:
-            return False, "real not armed (%s), create %s containing today's " \
-                          "YYYYMMDD" % (armed_msg, ARM_FILE)
-        return True, "real mode armed (live trading channel open%s)" % (
-            "" if HAS_DAILY_DEDUP else
-            "; WARNING: this bridge has NO per-day dedup -- not for production")
+        # Execution constraint, not a comment: this bridge has NO per-day dedup
+        # (HAS_DAILY_DEDUP = False) and NO paused gate, so real orders must never
+        # go through it. Refuse to start and point at the real bridge. The arm
+        # file state is still reported so the operator sees what it would have
+        # been (e.g. a stale arm file).
+        _armed, armed_msg = _is_armed()
+        return False, ("real mode REFUSED: this bridge has no per-day dedup and "
+                       "no paused gate -> use qmt/bridge/signal_bridge_real.py "
+                       "for real orders (arm file state: %s)" % armed_msg)
     return True, "simulation mode (safe)"
 
 # ---------------- utils ----------------

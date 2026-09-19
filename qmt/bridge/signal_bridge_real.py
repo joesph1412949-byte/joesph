@@ -55,6 +55,27 @@ ARMED_FILE = os.path.join(SIGNAL_ROOT, ENVIRONMENT, "armed.txt")
 DEDUP_FILE = os.path.join(SIGNAL_ROOT, ENVIRONMENT, "placed_today.json")
 DEDUP_ENABLED = True
 MAX_ORDER_PRICE = 100000.0
+# 6) Optional hardening (opt-in -- BOTH defaults keep today's behaviour):
+#    ALLOWED_ACCOUNTS empty  = accept whatever account QMT is logged into (the
+#      current default). Put your REAL fund account id(s) here to whitelist
+#      them; anything else is then rejected with the account id printed.
+#    MAX_ORDER_VOLUME 0 = no limit. Set a positive number to reject a
+#      fat-fingered volume (a hand-written JSON with one digit too many); the
+#      same pattern as MAX_ORDER_PRICE.
+ALLOWED_ACCOUNTS = ()
+MAX_ORDER_VOLUME = 0
+# NOT DONE on purpose (decided after review, 2026-09-19):
+# - Limit-up/limit-down band check: this bridge is deliberately self-contained
+#   (no project imports, no market-data access), so it has no previous close /
+#   limit price to compare against. It would need a QMT-side API whose
+#   availability in the strategy context is UNVERIFIED. MAX_ORDER_PRICE stays.
+# - pid/lock file against a SECOND QMT terminal running this same bridge: a lock
+#   is the only mechanism that can SILENTLY BLOCK real orders and needs a human
+#   to clear it (a crash leaves a stale lock -> no orders all day, unannounced).
+#   It would trade an operational mistake (loading the real bridge twice) for a
+#   brand-new failure mode inside the ordering path. The per-order re-read plus
+#   the atomic write in _save_placed shrink that window to a single order
+#   instead; keep it an operational rule, not code.
 # ===================================================================
 
 PENDING_DIR = os.path.join(SIGNAL_ROOT, ENVIRONMENT, "pending")
@@ -360,10 +381,17 @@ def _call_passorder(sig, ctx=None):
     # Price sanity (fat-finger guard): a positive limit price must be sane.
     if price < 0 or price > MAX_ORDER_PRICE:
         return False, "price out of range %r (max %.0f)" % (price, MAX_ORDER_PRICE)
+    # Volume sanity (opt-in fat-finger guard): MAX_ORDER_VOLUME = 0 disables it.
+    if MAX_ORDER_VOLUME and volume > MAX_ORDER_VOLUME:
+        return False, "volume out of range %r (max %d)" % (volume, MAX_ORDER_VOLUME)
 
     account_id = _resolve_account(sig, ctx)
     if not account_id:
         return False, "no account: set FIXED_ACCOUNT or leave signal account empty and log in"
+    # Account whitelist (opt-in): ALLOWED_ACCOUNTS = () accepts any account.
+    if ALLOWED_ACCOUNTS and account_id not in ALLOWED_ACCOUNTS:
+        return False, "account %s not in ALLOWED_ACCOUNTS %s" % (
+            account_id, list(ALLOWED_ACCOUNTS))
 
     code = _with_market_suffix(stock_code) if ADD_MARKET_SUFFIX else str(stock_code)
 

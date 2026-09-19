@@ -465,14 +465,29 @@ def test_demo_armed_stale_date_rejected(monkeypatch, tmp_path):
 
 
 def test_demo_armed_today_accepted(monkeypatch, tmp_path):
+    """控制者裁决 #5: demo 桥 real 分支从"文档约束"升级为**执行约束** ——
+    即便 arm 文件是今天的也拒绝启动(该桥无去重/无 paused), 并指向 real 桥。
+    这条断言由本批翻转: 旧行为是"今天的 arm 即放行"。"""
     demo = importlib.import_module("qmt.bridge.signal_bridge_demo")
     arm = tmp_path / ".REAL_ARMED"
     arm.write_text(datetime.now().strftime("%Y%m%d"), encoding="utf-8")
     monkeypatch.setattr(demo, "ARM_FILE", str(arm))
     monkeypatch.setattr(demo, "ENVIRONMENT", "real")
     monkeypatch.setattr(demo, "DRY_RUN", False)
-    ok, _ = demo._check_safety()
-    assert ok is True
+    ok, msg = demo._check_safety()
+    assert ok is False
+    assert "signal_bridge_real" in msg
+
+
+def test_demo_real_refused_without_arm_file(monkeypatch, tmp_path):
+    """未武装时同样拒绝启动(不因缺文件或日期新鲜而放行)。"""
+    demo = importlib.import_module("qmt.bridge.signal_bridge_demo")
+    monkeypatch.setattr(demo, "ARM_FILE", str(tmp_path / "nope.txt"))
+    monkeypatch.setattr(demo, "ENVIRONMENT", "real")
+    monkeypatch.setattr(demo, "DRY_RUN", False)
+    ok, msg = demo._check_safety()
+    assert ok is False
+    assert "signal_bridge_real" in msg
 
 
 def test_demo_declares_no_production_dedup(monkeypatch):
@@ -560,3 +575,65 @@ def test_live_check_pause_row_states_bridge_honors_it(monkeypatch, tmp_path):
     rows = [r for r in lc._rows if r[2] == "一键暂停开关"]
     assert rows
     assert "桥" in rows[0][3], "文案要点明桥端同样受 paused 约束"
+
+
+# ---------- 控制者裁决 #1/#2: opt-in 加固(默认不改变现行为) ----------
+
+def _guard_sig(**kw):
+    sig = {"stock_code": "600000.SH", "action": "BUY", "price": 10.0, "volume": 100}
+    sig.update(kw)
+    return sig
+
+
+def test_allowed_accounts_empty_allows_any(monkeypatch):
+    """默认空名单 = 允许任意(QMT 当前登录账号) —— 不得改变今天的语义。"""
+    monkeypatch.setattr(bridge, "DRY_RUN", True)
+    monkeypatch.setattr(bridge, "ALLOWED_ACCOUNTS", ())
+    monkeypatch.setattr(bridge, "FIXED_ACCOUNT", "88869979")
+    ok, msg = bridge._call_passorder(_guard_sig())
+    assert ok is True, msg
+    assert "DRY_RUN" in msg
+
+
+def test_allowed_accounts_mismatch_rejected(monkeypatch):
+    monkeypatch.setattr(bridge, "DRY_RUN", True)
+    monkeypatch.setattr(bridge, "ALLOWED_ACCOUNTS", {"11111111"})
+    monkeypatch.setattr(bridge, "FIXED_ACCOUNT", "88869979")
+    ok, msg = bridge._call_passorder(_guard_sig())
+    assert ok is False
+    assert "88869979" in msg and "11111111" in msg, "必须打印当前账号与名单: %s" % msg
+
+
+def test_allowed_accounts_match_allowed(monkeypatch):
+    monkeypatch.setattr(bridge, "DRY_RUN", True)
+    monkeypatch.setattr(bridge, "ALLOWED_ACCOUNTS", {"88869979"})
+    monkeypatch.setattr(bridge, "FIXED_ACCOUNT", "88869979")
+    ok, msg = bridge._call_passorder(_guard_sig())
+    assert ok is True, msg
+
+
+def test_max_order_volume_default_unlimited(monkeypatch):
+    """默认 0 = 不限制。"""
+    monkeypatch.setattr(bridge, "DRY_RUN", True)
+    monkeypatch.setattr(bridge, "MAX_ORDER_VOLUME", 0)
+    monkeypatch.setattr(bridge, "FIXED_ACCOUNT", "88869979")
+    ok, msg = bridge._call_passorder(_guard_sig(volume=99999999))
+    assert ok is True, msg
+
+
+def test_max_order_volume_rejected_when_exceeded(monkeypatch):
+    monkeypatch.setattr(bridge, "DRY_RUN", True)
+    monkeypatch.setattr(bridge, "MAX_ORDER_VOLUME", 1000)
+    monkeypatch.setattr(bridge, "FIXED_ACCOUNT", "88869979")
+    ok, msg = bridge._call_passorder(_guard_sig(volume=1100))
+    assert ok is False
+    assert "1100" in msg and "1000" in msg, "必须打印实际 volume 与上限: %s" % msg
+
+
+def test_max_order_volume_allows_at_limit(monkeypatch):
+    """边界: == 上限放行, 只有严格超限才拒。"""
+    monkeypatch.setattr(bridge, "DRY_RUN", True)
+    monkeypatch.setattr(bridge, "MAX_ORDER_VOLUME", 1000)
+    monkeypatch.setattr(bridge, "FIXED_ACCOUNT", "88869979")
+    ok, msg = bridge._call_passorder(_guard_sig(volume=1000))
+    assert ok is True, msg
