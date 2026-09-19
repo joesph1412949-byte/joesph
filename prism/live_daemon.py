@@ -252,34 +252,56 @@ class LiveDaemon:
 
     # ---------------- 收盘选股(gap #1/#2) ----------------
     def _do_close_pick(self, now, st, out):
+        """15:05 收盘选股 → 落次日计划。
+
+        返回值 = **本次选股是否真正跑完**: True 才让调用方登记当日 pick_slots。
+        - True: 选股跑完, 无论有无候选(门禁不过/今天没票、仓位已满都是合法结果);
+        - False: 账户/现金事实缺失, 或 run_daily 带 error(全缺价拒单)/paused
+          —— 这些是**瞬时失败**, 登记 slot 等于把"不知道"当"今天没票",
+          QMT 抖一下当天零建仓、次日无计划, 日志还与真没票不可区分。
+        失败分支不登记 ⇒ 下一轮(POLL_SECONDS)自然重试。
+
+        F1 与 paper 侧同口径(prism/paper.py pick_top5_at_close): 只有成功的
+        选股才写当日幂等键(screens_done/pickT ↔ pick_slots/pickT)。
+        """
         res = self.screen_fn(now) or {}
         sigs = res.get("signals") or []
         out["screen"] = {"environment_ok": res.get("environment_ok"),
                          "candidates": len(res.get("candidates") or []),
                          "signals": len(sigs),
+                         "paused": res.get("paused"),
                          "error": res.get("error")}
+        err = res.get("error")
+        if err or res.get("paused"):
+            LOG.warning("收盘选股未完成(error=%r paused=%r) → 不占当日 slot, "
+                        "约 %d 秒后自动重试", err, res.get("paused"), POLL_SECONDS)
+            return False
         if not sigs:
-            LOG.info("收盘选股: 无信号(env_ok=%s)", res.get("environment_ok"))
-            return
+            LOG.info("收盘选股: 无信号(env_ok=%s) → 合法结果, 当日 slot 已登记",
+                     res.get("environment_ok"))
+            return True
         asset = self.account.total_asset() if self.account else None
         if asset is None:
             out["skipped"].append("asset_unavailable")
-            LOG.warning("收盘选股: 拿不到账户总资产 → 本日不建仓(fail-closed)")
-            return
+            LOG.warning("收盘选股: 拿不到账户总资产 → 本日不建仓(fail-closed), "
+                        "不占当日 slot, 约 %d 秒后重试", POLL_SECONDS)
+            return False
         cash = self.account.available_cash() if self.account else None
         if cash is None:
             out["skipped"].append("cash_unavailable")
             LOG.warning("收盘选股: 拿不到可用资金 → 本日不建仓(fail-closed); "
-                        "只按总资产算股数会下出付不起的单")
-            return
+                        "只按总资产算股数会下出付不起的单; 不占当日 slot, "
+                        "约 %d 秒后重试", POLL_SECONDS)
+            return False
         # 建仓预算: 总资产只是上限, 真能掏出来的钱是可用现金; 逐只扣减
         budget = min(asset, cash)
         book = self._load_positions()
         slots = self.max_positions - len(book.all())
         if slots <= 0:
             out["skipped"].append("max_positions")
-            LOG.info("收盘选股: 持仓已满(%d 只) → 不建仓", self.max_positions)
-            return
+            LOG.info("收盘选股: 持仓已满(%d 只) → 不建仓(合法结果, slot 已登记)",
+                     self.max_positions)
+            return True
         for_date = next_weekday(now.date()).isoformat()
         plans = []
         for s in sigs:
@@ -304,6 +326,7 @@ class LiveDaemon:
                  "单只 %.0f%%, 上限 %d 只) → %s 发单",
                  len(plans), min(asset, cash), asset, cash,
                  self.position_ratio * 100, self.max_positions, for_date)
+        return True
 
     # ---------------- 次日开盘发单 ----------------
     def _do_open_send(self, now, st, out):
@@ -433,8 +456,10 @@ class LiveDaemon:
             self._maybe_sync(now, out)
             slot = "%sT%s" % (d, PICK_SLOT)
             if hm >= PICK_SLOT and self.provider and slot not in st["pick_slots"]:
-                self._do_close_pick(now, st, out)
-                st["pick_slots"] = (st["pick_slots"] + [slot])[-30:]
+                # 只有选股真正跑完才登记 slot(F1): 账户/现金查询失败或
+                # run_daily 带 error 时不登记, 下一轮真重试(与 paper 侧同口径)
+                if self._do_close_pick(now, st, out):
+                    st["pick_slots"] = (st["pick_slots"] + [slot])[-30:]
                 self._save_state(st)
                 out["action"] = "close_pick"
             return out

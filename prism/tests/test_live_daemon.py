@@ -259,6 +259,105 @@ def test_close_pick_only_once_per_day(tmp_path):
     assert out2["planned"] == []
 
 
+# ---------------- 失败不烧当日 slot(F1 实盘侧; 与 paper 侧同口径) ----------------
+
+def test_close_pick_failure_does_not_burn_slot(tmp_path):
+    """资产查询失败 ⇒ 不登记当日 pick_slots, 且下一轮(QMT 恢复后)真重试。
+
+    旧行为: 无条件登记 slot ⇒ QMT 抖一下当天零建仓、次日无计划可发,
+    日志里只剩 "asset_unavailable", 与"今天没选到票"不可区分。
+    """
+    calls = []
+
+    def _screen(now):
+        calls.append(now)
+        return _screen_result([("600000.SH", "浦发", 10.55)])
+
+    d = _daemon(tmp_path, account=_FakeAccount(asset=None), screen_fn=_screen)
+    out = d.tick_once(MON)
+    assert "asset_unavailable" in out["skipped"]
+    assert _read_json(tmp_path / "live_state.json")["pick_slots"] == []
+    # QMT 恢复 → slot 仍未登记, 下一轮必须真重试并把计划落下来
+    d.account._asset = {"total_asset": 1000000.0, "cash": 500000.0,
+                        "market_value": 0.0, "frozen_cash": 0.0}
+    d._last_sync_ts = 0
+    out2 = d.tick_once(datetime(2026, 9, 14, 15, 7))
+    assert len(calls) == 2                     # 真的重试了完整选股
+    assert [p["code"] for p in out2["planned"]] == ["600000.SH"]
+    assert _read_json(tmp_path / "live_state.json")["pick_slots"] \
+        == ["2026-09-14T15:05"]
+
+
+def test_close_pick_cash_unavailable_does_not_burn_slot(tmp_path):
+    calls = []
+
+    def _screen(now):
+        calls.append(now)
+        return _screen_result([("600000.SH", "浦发", 10.55)])
+
+    d = _daemon(tmp_path, account=_account(cash=0), screen_fn=_screen)
+    out = d.tick_once(MON)
+    assert "cash_unavailable" in out["skipped"]
+    assert _read_json(tmp_path / "live_state.json")["pick_slots"] == []
+    d.account._asset["cash"] = 500000.0
+    d._last_sync_ts = 0
+    d.tick_once(datetime(2026, 9, 14, 15, 7))
+    assert len(calls) == 2
+
+
+def test_close_pick_screen_error_does_not_burn_slot(tmp_path):
+    """run_daily 带 error(全缺价拒单) ⇒ 不是"今天没票", 不登记 slot。"""
+    calls = []
+
+    def _screen(now):
+        calls.append(now)
+        return {"environment_ok": True, "candidates": [{"code": "600000.SH"}],
+                "signals": [], "signals_written": 0, "paused": False,
+                "skipped_no_price": 1,
+                "error": "real盘候选缺 up_stop_price, 已拒绝生成信号"}
+
+    d = _daemon(tmp_path, screen_fn=_screen)
+    out = d.tick_once(MON)
+    assert out["screen"]["error"]
+    assert _read_json(tmp_path / "live_state.json")["pick_slots"] == []
+    d._last_sync_ts = 0
+    d.tick_once(datetime(2026, 9, 14, 15, 7))
+    assert len(calls) == 2
+
+
+def test_close_pick_screen_exception_does_not_burn_slot(tmp_path):
+    """选股抛异常 ⇒ tick 抛出(run_forever 下轮重试), slot 绝不登记。"""
+    def _boom(now):
+        raise RuntimeError("选股炸了")
+
+    d = _daemon(tmp_path, screen_fn=_boom)
+    with pytest.raises(RuntimeError):
+        d.tick_once(MON)
+    assert d._load_state()["pick_slots"] == []
+
+
+def test_close_pick_no_candidates_burns_slot(tmp_path):
+    """反向护栏: 合法结果(门禁不过/今天没票)必须登记 slot。
+
+    不登记的话, 30 秒一轮会把整套选股(涨停池+逐股上下文)重跑到收盘。
+    """
+    calls = []
+
+    def _screen(now):
+        calls.append(now)
+        return {"environment_ok": False, "candidates": [], "signals": [],
+                "signals_written": 0, "paused": False, "skipped_no_price": 0}
+
+    d = _daemon(tmp_path, screen_fn=_screen)
+    d.tick_once(MON)
+    assert _read_json(tmp_path / "live_state.json")["pick_slots"] \
+        == ["2026-09-14T15:05"]
+    d._last_sync_ts = 0
+    out2 = d.tick_once(datetime(2026, 9, 14, 15, 7))
+    assert len(calls) == 1                     # 不重复跑完整选股
+    assert out2["planned"] == []
+
+
 # ---------------- 次日开盘发单 + 记账 ----------------
 
 def _plan(code="600000.SH", price=10.55, vol=14200,
