@@ -27,10 +27,12 @@
            inputs.notes;
         2. 盘中真实 tick —— 离线无分钟/快照数据, 用**当日缓存收盘价**代替,
            属前视; 本回放只验收调度链路与闸门, **不得据此评判策略收益**;
-        3. "一字板转排队 / 跌停开盘跳过" —— 这两个闸门在
-           `prism/paper.py::PaperAccount.execute_open_buys`(**模拟盘**账户),
-           **不在** live_daemon 里。回放把 paper 侧那一段也跑一遍做对照,
-           并把这个不对称点名(见 paper_leg)。
+        3. "跌停开盘跳过"闸门(自 2026-09-19 起 live_daemon._do_open_send 也有,
+           判据含数据源真实 DownStopPrice/缺行情 fail-closed)在回放里只有
+           **降级输入**: 开盘步的 tick 由计划价合成(见 inputs.notes), 因此它
+           在回放中恒不命中; 一字板转排队仍只在 `paper.py::execute_open_buys`
+           (模拟盘账户), 回放把 paper 侧那一段也跑一遍做对照, 并把这个不对称
+           点名(见 paper_leg)。
 """
 import argparse
 import json
@@ -236,6 +238,9 @@ class _Provider:
         def get_full_market_ticks(self, codes=None):
             return {}
 
+        def get_instrument(self, code):
+            return {}          # 离线无 instrument 详情 → daemon 回落到分板系数
+
     def __init__(self):
         self.ds = self._DS()
 
@@ -318,6 +323,12 @@ class Rehearsal:
             "写 exit_signaled ⇒ 同一天每次巡检都重发同一批 SELL。两条都由**确定性"
             "order_id + 桥端 per-day dedup** 兜底, 实盘路径首次发出后即去重。回放"
             "把重复留在时间线上, 免得把 dry_run 的形状当成生产形状")
+        self.notes.append(
+            "开盘步行情: 计划股在开盘窗口还不是持仓, 且离线缓存只到选股日 ⇒ "
+            "回放按**当日计划的代码**加载行情, 仍拿不到时用**计划价**合成中性 "
+            "tick(现价=前收=计划价, 落盘价仍由计划决定)。这是回放的降级声明: "
+            "实盘 fail-closed 下缺行情=整批不发, 回放必须有输入才能预览内容, "
+            "不代表真实开盘价/跌停价")
         if self.day.weekday() >= 5:
             self.notes.append(
                 "回放起始日 %s 是周末 ⇒ 守护全程不在交易时段, 零信号属预期"
@@ -401,10 +412,23 @@ class Rehearsal:
 
     def _live_step(self, now, hm, label):
         self._cur = {}
-        if now.weekday() < 5 and hm not in ("15:05", "15:06", "15:00", "09:26"):
-            codes = self.daemon._load_positions().all().keys()
-            self._load_ticks(hm, codes, now.strftime("%Y-%m-%d"),
-                             _prev_iso(self._cache, now))
+        today = now.strftime("%Y-%m-%d")
+        plans = [p for p in self.daemon._load_state()["plans"]
+                 if p.get("for_date") == today]
+        if now.weekday() < 5 and hm not in ("15:05", "15:06", "15:00"):
+            # 开盘步也要行情: 计划股此刻还不是持仓, 只按持仓取行情会让开盘步
+            # 一只都拿不到 tick —— 实盘 fail-closed 下那是整批跳过、预览变空。
+            # 故代码集 = 持仓 ∪ 当日计划(09:26 也从排除表里拿掉)。
+            codes = set(self.daemon._load_positions().all()) \
+                | {p["code"] for p in plans}
+            self._load_ticks(hm, codes, today, _prev_iso(self._cache, now))
+        for p in plans:
+            # 计划股仍无行情(离线缓存只到选股日, 次一/次二工作日没有 K 线, 且
+            # 未给 tick_script)→ 用**计划价**合成一条中性 tick(现价=前收=
+            # 计划价): 闸门有输入可判、预览有内容。这不是假装知道开盘价 ——
+            # 落盘价由计划决定, 这里只避免"fail-closed 让回放整段变空"。
+            self._cur.setdefault(p["code"], {"lastPrice": float(p["price"]),
+                                            "lastClose": float(p["price"])})
         out = self.daemon.tick_once(now)
         entry = {"at": now.strftime("%Y-%m-%dT%H:%M"), "hm": hm,
                  "label": label, "kind": "live", "action": out["action"],

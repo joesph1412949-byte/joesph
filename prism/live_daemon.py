@@ -16,11 +16,16 @@
                 重启重跑不产生新文件; 桥端 per-day dedup 兜底。
   #8 T+1        当日买入不卖: exit_rules enforce_t1 + 券商 can_use_volume
                 双保险; 跌停日顺延(exit_rules.is_limit_down)。
-  #9 开盘闸门   发单前判跌停(昨收 × (1−分板幅度), 权威 shared.common): **跌停
-                开盘/窗口内砸到跌停 → 跳过该只**(否则挂在涨停价上的限价买单会
-                立即成交在跌停板; 判据同 prism/paper.py::execute_open_buys)。
-                行情缺失时不判、照发(沿用本模块"行情 fail-open"口径; 改 fail-closed
-                会连 rehearsal 开盘预览一起挡掉)。
+  #9 开盘闸门   发单前判跌停: **真实跌停价优先**(ds.get_instrument 的
+                 DownStopPrice, 取法同 prism/paper_daemon.py::_open_buy_ticks
+                 —— 唯一能识别 ST ±5% 的口径; 分板系数只按代码前缀分板, 没有
+                 ST 档, 会把主板 ST 的 −5% 跌停算成 −10% 而漏判), 拿不到才回落
+                 昨收 × (1−分板幅度)(权威 shared.common)。**跌停开盘/窗口内砸到
+                 跌停 → 跳过该只**(否则挂在涨停价上的限价买单会立即成交在跌停板;
+                 判据同 prism/paper.py::execute_open_buys)。
+                 **行情缺失(前收/价格缺) → 跳过该只(fail-closed)**: 与
+                 paper.execute_open_buys 的"无行情 = skip"同口径 —— 同一策略的
+                 两条执行路径必须同口径, 且买入侧错发(可能成交在跌停板)比漏发贵。
 
 安全边界(与 prism/paper_daemon.py §8 同款):
   - **默认 dry_run=True**: 只记录/日志, 零副作用; 显式 --live 才落信号;
@@ -97,6 +102,8 @@ class LiveDaemon:
         self.sleep_fn = sleep_fn
         self._strat_cache = None
         self._last_sync_ts = 0.0
+        self._down_stop_day = ""      # 真实跌停价的当日缓存(见 _down_stop_price)
+        self._down_stop_cache = {}
 
     # ---------------- 策略(动态读默认指针, 与模拟盘/回测同一份 JSON) ----------------
     def _resolve_strategy(self):
@@ -334,6 +341,35 @@ class LiveDaemon:
         return True
 
     # ---------------- 次日开盘发单 ----------------
+    def _down_stop_price(self, code, day):
+        """真实跌停价(数据源 ds.get_instrument 的 DownStopPrice); 拿不到 → 0。
+
+        与 prism/paper_daemon.py::_open_buy_ticks 同一条路径、同一字段(见
+        prism/data.py:149 的取法)。为什么不用分板系数就够: 分板系数只按代码
+        前缀分板, 没有(也无法有)ST 档 —— 主板 ST 的 −5% 会被算成 −10%,
+        开盘跌停买不到闸门。当日成功值缓存: 开盘窗口 POLL_SECONDS(30s)一轮,
+        每只只查一次(≤ 计划只数次/日); 失败**不**缓存(QMT 抖一下不许把当天
+        钉死在这个口径上, 下一轮还会重试)。
+        """
+        code = str(code)
+        if self._down_stop_day != day:
+            self._down_stop_day, self._down_stop_cache = day, {}
+        if code in self._down_stop_cache:
+            return self._down_stop_cache[code]
+        ds = getattr(self.provider, "ds", None)
+        if ds is None:
+            return 0.0
+        try:
+            det = ds.get_instrument(code) or {}
+        except Exception as e:
+            LOG.warning("开盘发单: %s 真实跌停价查询失败(%r) → 回落到分板系数",
+                        code, e)
+            return 0.0
+        px = _num(det.get("DownStopPrice"))
+        if px > 0:
+            self._down_stop_cache[code] = px
+        return px
+
     def _do_open_send(self, now, st, out):
         d = now.strftime("%Y-%m-%d")
         plans = [p for p in st["plans"] if p.get("for_date") == d]
@@ -348,20 +384,27 @@ class LiveDaemon:
             px = min([x for x in (_num(t.get("open")), _num(t.get("lastPrice")))
                       if x > 0], default=0.0)
             if prev <= 0 or px <= 0:
-                # 行情缺失 → **不判跌停, 按现状发**(模块既有口径"行情 fail-open";
-                # 改成 fail-closed 会把 rehearsal 的开盘预览一并挡掉 —— 见
-                # prism/rehearsal.py::_live_step: 开盘步不注入 tick)。
-                LOG.warning("开盘发单: %s 拿不到行情(前收/价格缺) → 未判跌停, 照发",
-                            code)
-            else:
-                low = round(prev * (1 - limit_ratio_for_code(code)), 2)
-                if px <= low + 0.001:
-                    # 跌停开盘(或窗口内砸到跌停) → 保护跳过: 挂在涨停价上的限价
-                    # 买单会立即成交在跌停板(判据同 paper.execute_open_buys)。
-                    out["skipped"].append("limit_down_open:%s" % code)
-                    LOG.warning("开盘发单: %s 开盘/现价 %.2f ≤ 跌停价 %.2f "
-                                "→ 跳过(今日不买)", code, px, low)
-                    continue
+                # 行情缺失 → 跳过该只(fail-closed)。口径依据: 同一策略的两条
+                # 执行路径必须同口径 —— prism/paper.py::execute_open_buys 对
+                # "无行情"就是 skip; 且买入侧**错发**(挂单价可能成交在跌停板/
+                # 涨停板上)远比漏发贵。计划当日消费(与 paper 同款: 不在窗口内
+                # 30 秒一轮反复重试一只没有行情的票)。
+                out["skipped"].append("no_quote:%s" % code)
+                LOG.warning("开盘发单: %s 拿不到行情(前收/价格缺) → 跳过"
+                            "(fail-closed, 今日不买)", code)
+                continue
+            # 跌停价: tick 自带真实值 → 用它; 否则查数据源注入(同 paper_daemon);
+            # 都拿不到才回落到分板系数(近似口径: 无股票名 ⇒ 不含 ST ±5%)
+            low = _num(t.get("downStopPrice")) \
+                or self._down_stop_price(code, d) \
+                or round(prev * (1 - limit_ratio_for_code(code)), 2)
+            if px <= low + 0.001:
+                # 跌停开盘(或窗口内砸到跌停) → 保护跳过: 挂在涨停价上的限价
+                # 买单会立即成交在跌停板(判据同 paper.execute_open_buys)。
+                out["skipped"].append("limit_down_open:%s" % code)
+                LOG.warning("开盘发单: %s 开盘/现价 %.2f ≤ 跌停价 %.2f "
+                            "→ 跳过(今日不买)", code, px, low)
+                continue
             ready.append(p)
         sigs = [trader.build_signal(
             code=p["code"], action="BUY", price=p["price"],

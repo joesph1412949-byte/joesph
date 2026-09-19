@@ -36,14 +36,24 @@ def _pause_file_in_tmp(tmp_path, monkeypatch):
 # ---------------- 测试替身 ----------------
 
 class _FakeProvider:
-    """只需非 None(daemon 用 provider 存在性做闸门)。"""
+    """只需非 None(daemon 用 provider 存在性做闸门)。
+
+    instruments: {code: 详情 dict}, 详情字段名与真实数据源一致
+    (ds.get_instrument → UpStopPrice/DownStopPrice, 见 prism/data.py:149)。
+    """
 
     class _DS:
+        def __init__(self, instruments=None):
+            self._inst = dict(instruments or {})
+
         def get_full_market_ticks(self, codes=None):
             return {}
 
-    def __init__(self):
-        self.ds = self._DS()
+        def get_instrument(self, code):
+            return dict(self._inst.get(code) or {})
+
+    def __init__(self, instruments=None):
+        self.ds = self._DS(instruments)
 
 
 class _FakeAccount:
@@ -120,9 +130,9 @@ def _strategy(tp=0.15, sl=0.05, hold=5):
 
 
 def _daemon(tmp_path, account=None, screen_fn=None, ticks_fn=None,
-            dry_run=False, **kw):
+            dry_run=False, instruments=None, **kw):
     return LiveDaemon(
-        provider=_FakeProvider(),
+        provider=_FakeProvider(instruments=instruments),
         account=account if account is not None else _account(),
         strategy=_strategy(),
         state_file=tmp_path / "live_state.json",
@@ -378,10 +388,11 @@ def _seed_plan(tmp_path, code="600000.SH", price=10.55, vol=14200,
     _seed_state(tmp_path, [_plan(code, price, vol, for_date)])
 
 
-def _open_tick(open_px=None, last=None, last_close=None):
-    """开盘窗口 tick 替身(只带 daemon 判定用得上的三个价格字段)。
+def _open_tick(open_px=None, last=None, last_close=None, down_stop=None):
+    """开盘窗口 tick 替身(只带 daemon 判定用得上的价格字段)。
 
-    None = 该字段缺失(用来构造"行情半残/前收缺失"的输入缺失态)。"""
+    None = 该字段缺失(用来构造"行情半残/前收缺失"的输入缺失态)。
+    down_stop = tick 自带的真实跌停价(数据源口径, 含 ST ±5%)。"""
     t = {}
     if open_px is not None:
         t["open"] = open_px
@@ -389,12 +400,15 @@ def _open_tick(open_px=None, last=None, last_close=None):
         t["lastPrice"] = last
     if last_close is not None:
         t["lastClose"] = last_close
+    if down_stop is not None:
+        t["downStopPrice"] = down_stop
     return lambda codes: {c: dict(t) for c in codes}
 
 
 def test_open_send_writes_signal_and_records_position(tmp_path):
     _seed_plan(tmp_path)
-    d = _daemon(tmp_path, dry_run=False)
+    d = _daemon(tmp_path, dry_run=False,
+                ticks_fn=_open_tick(10.6, 10.6, 10.0))   # 正常开盘(非跌停)
     out = d.tick_once(TUE_OPEN)
     assert out["action"] == "open_send"
     files = _pending(tmp_path)
@@ -412,7 +426,8 @@ def test_open_send_writes_signal_and_records_position(tmp_path):
 
 def test_open_send_dry_run_has_no_side_effects(tmp_path):
     _seed_plan(tmp_path)
-    d = _daemon(tmp_path, dry_run=True)
+    d = _daemon(tmp_path, dry_run=True,
+                ticks_fn=_open_tick(10.6, 10.6, 10.0))   # 正常开盘(非跌停)
     out = d.tick_once(TUE_OPEN)
     assert out["action"] == "open_send" and len(out["buys"]) == 1
     assert _pending(tmp_path) == []
@@ -473,6 +488,48 @@ def test_open_send_uses_board_limit_ratio(tmp_path):
     assert sig["price"] == 8.8
 
 
+def test_open_send_skips_st_limit_down_open_from_real_down_stop(tmp_path):
+    """主板 ST 开盘 −5%(跌停) → 必须跳过。
+
+    判别力: 分板系数(limit_ratio_for_code)对 600xxx 给 −10% ⇒ 跌停价算成 9.00,
+    而 9.50 的 ST 跌停开盘会被判"非跌停"**照发**(挂涨停价的买单立即成交在
+    跌停板)。真实口径只有数据源的 DownStopPrice 有(ST ±5% 无法从代码前缀推出)。
+    """
+    _seed_plan(tmp_path, price=10.45)
+    d = _daemon(tmp_path, dry_run=False,
+                ticks_fn=_open_tick(9.5, 9.5, 10.0, down_stop=9.5))
+    out = d.tick_once(TUE_OPEN)
+    assert "limit_down_open:600000.SH" in out["skipped"]
+    assert out["buys"] == [] and _pending(tmp_path) == []
+    assert not (tmp_path / "positions.json").exists()
+
+
+def test_open_send_skips_st_limit_down_open_via_instrument_injection(tmp_path):
+    """tick 不带跌停价时, daemon 自己查 ds.get_instrument 的 DownStopPrice
+    (与 prism/paper_daemon.py::_open_buy_ticks 同一条路径/同一字段) ⇒ ST −5%
+    开盘同样跳过。拿不到真实值才是回落到分板系数的那条路。"""
+    _seed_plan(tmp_path, price=10.45)
+    d = _daemon(tmp_path, dry_run=False,
+                ticks_fn=_open_tick(9.5, 9.5, 10.0),      # tick 里没有 downStopPrice
+                instruments={"600000.SH": {"DownStopPrice": 9.5}})
+    out = d.tick_once(TUE_OPEN)
+    assert "limit_down_open:600000.SH" in out["skipped"]
+    assert out["buys"] == [] and _pending(tmp_path) == []
+
+
+def test_open_send_sends_non_st_at_minus5pct_open(tmp_path):
+    """非 ST 主板开 −5%(跌停价 −10% = 9.00) → 照发(防"一刀切按 −5% 判")。
+
+    判别力: 若把闸门写成"跌幅 ≥5% 即跳过"或对 ST 口径一刀切, 这条会红。"""
+    _seed_plan(tmp_path, price=10.45)
+    d = _daemon(tmp_path, dry_run=False,
+                ticks_fn=_open_tick(9.5, 9.5, 10.0),
+                instruments={"600000.SH": {"DownStopPrice": 9.0}})
+    out = d.tick_once(TUE_OPEN)
+    assert out["skipped"] == [] and len(out["buys"]) == 1
+    assert len(_pending(tmp_path)) == 1
+
+
 def test_open_send_partial_skip_other_still_sent(tmp_path):
     """一跌停一正常 → 只发正常那只(不因一只拖死整批)。"""
     _seed_state(tmp_path, [_plan("600000.SH", 10.55, 14200),
@@ -487,17 +544,28 @@ def test_open_send_partial_skip_other_still_sent(tmp_path):
     assert set(_read_json(tmp_path / "positions.json")) == {"000001.SZ"}
 
 
-def test_open_send_without_quote_still_sends(tmp_path):
-    """行情缺失 → 不判跌停, 照发(**有意保留的现状**, 非漏判)。
+def test_open_send_skips_when_quote_missing(tmp_path):
+    """行情缺失(前收/价格缺) → **不发**(fail-closed), 该只记 no_quote 并当日不追买。
 
-    本模块口径是"行情 fail-open / 决策 fail-closed(账户事实)"; 若把这条改成
-    fail-closed(不发单), `prism/rehearsal.py::_live_step` 的开盘步**不注入 tick**
-    ⇒ 回放预览会整段变空(实测 test_rehearsal_never_writes_signals 变红)。要收
-    紧成 fail-closed, 先让回放的开盘步注入 tick(那是另一个文件的事)。"""
+    口径依据: 同一策略的两条执行路径必须**同口径** ——
+    `prism/paper.py::execute_open_buys` 对无行情就是
+    `skipped({"code":.., "reason":"无行情"})`; 实盘侧原来的"不判跌停、照发"是
+    另一套口径。且买入侧**错发**(挂单价可能成交在跌停板)远比**漏发**贵。
+
+    改坏哪一处会红: 把 `_do_open_send` 的 `prev <= 0 or px <= 0` 分支改回
+    `ready.append(p)`(旧 fail-open) ⇒ buys 从 0 变 1、pending 落 1 个文件。
+
+    前置条件(已修): `rehearsal._live_step` 给开盘步注入行情 —— 否则
+    test_rehearsal_never_writes_signals 会因回放预览整段变空而变红。
+    """
     _seed_plan(tmp_path)                     # 假 provider 的 ds 返回 {} = 行情链路没数据
     d = _daemon(tmp_path, dry_run=False)
     out = d.tick_once(TUE_OPEN)
-    assert len(out["buys"]) == 1 and len(_pending(tmp_path)) == 1
+    assert out["action"] == "open_send" and out["buys"] == []
+    assert "no_quote:600000.SH" in out["skipped"]
+    assert _pending(tmp_path) == []
+    assert not (tmp_path / "positions.json").exists()
+    # 与 paper 的"无行情" skip 同款: 计划当日消费, 不在窗口内反复重试
     assert _read_json(tmp_path / "live_state.json")["plans"] == []
 
 
