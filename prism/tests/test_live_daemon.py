@@ -530,6 +530,25 @@ def test_open_send_sends_non_st_at_minus5pct_open(tmp_path):
     assert len(_pending(tmp_path)) == 1
 
 
+def test_open_send_warns_once_when_real_down_stop_unavailable(tmp_path, caplog):
+    """真实跌停价拿不到(回落分板系数)必须**可辨识**: 一天一次 WARNING。
+
+    为什么: 回落口径不含 ST ±5%, 本日 ST 跌停会漏判 —— 这正是改造前那个
+    **完全无声**的漏洞。回落本身是 paper 同款口径(拿不到真实值就近似), 但不许
+    连痕迹都没有。改坏哪一处会红: 删掉 `_down_stop_price` 的回落告警 ⇒
+    caplog 里 0 条; 把告警写成每只会喊一次 ⇒ 两条 tick 后 2 条。
+    """
+    _seed_plan(tmp_path)
+    d = _daemon(tmp_path, dry_run=True,          # dry_run: 计划不消费, 两次都走发单
+                ticks_fn=_open_tick(10.6, 10.6, 10.0))
+    with caplog.at_level(logging.WARNING):
+        out1 = d.tick_once(TUE_OPEN)
+        d._last_sync_ts = 0
+        d.tick_once(datetime(2026, 9, 15, 9, 28))
+    assert len(out1["buys"]) == 1                # 回落口径仍可用 → 照发
+    assert caplog.text.count("拿不到真实跌停价") == 1
+
+
 def test_open_send_partial_skip_other_still_sent(tmp_path):
     """一跌停一正常 → 只发正常那只(不因一只拖死整批)。"""
     _seed_state(tmp_path, [_plan("600000.SH", 10.55, 14200),

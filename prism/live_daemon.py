@@ -104,6 +104,7 @@ class LiveDaemon:
         self._last_sync_ts = 0.0
         self._down_stop_day = ""      # 真实跌停价的当日缓存(见 _down_stop_price)
         self._down_stop_cache = {}
+        self._down_stop_warned = False
 
     # ---------------- 策略(动态读默认指针, 与模拟盘/回测同一份 JSON) ----------------
     def _resolve_strategy(self):
@@ -354,21 +355,29 @@ class LiveDaemon:
         code = str(code)
         if self._down_stop_day != day:
             self._down_stop_day, self._down_stop_cache = day, {}
+            self._down_stop_warned = False
         if code in self._down_stop_cache:
             return self._down_stop_cache[code]
         ds = getattr(self.provider, "ds", None)
-        if ds is None:
-            return 0.0
-        try:
-            det = ds.get_instrument(code) or {}
-        except Exception as e:
-            LOG.warning("开盘发单: %s 真实跌停价查询失败(%r) → 回落到分板系数",
-                        code, e)
-            return 0.0
+        det = {}
+        if ds is not None:
+            try:
+                det = ds.get_instrument(code) or {}
+            except Exception as e:
+                LOG.warning("开盘发单: %s 真实跌停价查询失败(%r) → 回落到分板系数",
+                            code, e)
         px = _num(det.get("DownStopPrice"))
         if px > 0:
             self._down_stop_cache[code] = px
-        return px
+            return px
+        # 回落口径(分板系数)**不含 ST ±5%** ⇒ 本日 ST 跌停会漏判。回落是 paper
+        # 同款近似, 但不许无声: 一天喊一次(开盘窗口 30 秒一轮, 按只喊会刷屏)。
+        if not self._down_stop_warned:
+            self._down_stop_warned = True
+            LOG.warning("开盘发单: %s 拿不到真实跌停价(DownStopPrice=%r) → "
+                        "回落到分板系数; 该口径不含 ST ±5%%(ST 跌停会漏判)",
+                        code, det.get("DownStopPrice"))
+        return 0.0
 
     def _do_open_send(self, now, st, out):
         d = now.strftime("%Y-%m-%d")
