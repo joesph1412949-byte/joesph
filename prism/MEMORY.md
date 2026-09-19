@@ -51,6 +51,18 @@
 4. `ops/watchdog.py` 服务清单与 `start_all.py` 不一致（**不守护 `qmt_sync`**），且 `install_watchdog.bat` 的计划任务**从未安装成功**（`cd /d` 是 cmd 语法、在 PowerShell 里报错）→ "有守护"是文档假象。
 5. `shared/common.with_market_suffix` 把 `400xxx → .BJ`，而其档位自 `6cbe510` 起是 0.05（老三板）→ **同文件内不一致**；**老三板正确后缀待查，无证据不改**。
 
+**后续批次（同批，SHA 续上表）**：
+
+| SHA | 内容 |
+|---|---|
+| `b3781c9` | 见上表（校验诚实性 + `pyproject.toml` + `.gitignore`） |
+| `c50162d` | 见上表（死代码删除） |
+| `4a44bc8`+`32a7af5` | `prism/strategy_lint.py`：策略 JSON 声明键消费自检（AST 剥注释/字符串；`weight ≠ weights` 精确相等；写入不算消费）。**实测 3 个零读取点的键**：`market_gate.model="node"`、`filters.environment_threshold`（**同一语义声明两遍、只有 `market_gate.threshold` 生效**）、`execution.one_word_fallback="queue"`（全仓含 JS/HTML 仅 JSON 那一处出现 ⇒ **无人读**）。**已知能力边界**：它是**键名级**判定 ⇒ 把 HEAD 源码树单独复跑时 `weight/cap/mode` 全被报"已消费"（`item.get('weight')` 是**因子条目**权重、`cfg.get('cap')` 在当时 `average` 模式下不可达）⇒ **"读了但对当前取值/分支不生效"这类二阶问题它抓不出来** |
+| `1173b10`+`6fa1d89` | **桥安全闸门**：① **桥端此前完全没有 `paused` 闸门**（文档称三道、实际两道）→ 补上并**每单重读**、paused 时**保留 pending**；② `armed` 从"整批只读一次"改成**每单重读**（此前批次中途撤 arm，剩余照下单）；③ 去重账 `placed_today.json` 改**原子写 + 读不动即 fail-closed**（拒单并保留 pending）+ `passorder` **抛异常也记账**（可能已到券商，宁可漏单不可重单）+ 每单重读；④ demo 桥：armed 补日期校验、`_with_market_suffix` 与 real 桥对齐、`HAS_DAILY_DEDUP=False` 声明，**`ENVIRONMENT="real"` 直接拒绝启动**（指向 real 桥）；⑤ opt-in 加固 `ALLOWED_ACCOUNTS`/`MAX_ORDER_VOLUME`（默认空/0 = **不改现行为**）。**明确不做**：涨跌停区间校验（桥自包含、拿不到昨收）、跨终端锁文件（锁是唯一会让真实委托被**静默挡住**且崩溃残留后需**人工清锁**的机制，代价大于它修的操作失误）。**⚠️ 现场事实（最有说服力的一条）**：`D:/QMT_SIGNALS/paused` 在 09-19 一直是**按下**状态（mtime 09-17 23:54），而 C1 修好前桥端**完全不理会 paused** ⇒ **过去唯一在挡真实委托的是 `armed.txt` 里过期的 `20260914`**，即"急停"对桥此前是**无效的**。**C6 同轮卖出护栏的能力边界**：只在 SELL 与 BUY 同轮且 SELL 排队在前时有效（跨轮检测不到）；**受理 ≠ 成交**（返回 0 只代表终端收了委托，卖出受理未成交仍可能放行买单，要堵需委托状态查询，自包含桥拿不到）——真正的根因修法在发送侧（做T直连的两段提交） |
+| `62b92ba` | **market_data 数据完整性**：缓存改**原子写**；`build_global_cache`/`fetch_futures` 不再整份回写（治跨写者丢更新）；futures 加尾部新鲜度门；`rebuild` 时清 `sectors`（治 496 个 BK 孤儿码）；`--build-benchmark` 失败**不再吞成 exit 0**；删死参数 `--stats`；**`futures_snapshot()` 改为默认纯读**（此前 `backtest/cli.py` 的 `load_market_data()` 会在**跑回测时联网采集并回写真实缓存** ⇒ 连跑两轮 F8 命中在 666↔719 漂移、A/B 不是单一变量）。**D7 真跑**：benchmark 东财被封 → **降级链 东财→通达信→QMT**，`000001.SH` 取到 **174 日（2026-01-05~09-18）**，补上缺的 **9 个交易日**；其余 6 段逐段 SAME。**⚠️ 运营缺口**：读路径不再自动补数据之后，`market_data` 的 **kline/global/flow/benchmark/futures/sector_map 六段完全没有自动刷新路径**（仓库内无脚本、无计划任务在跑 `--build-*`）⇒ 全靠手工敲命令，代码侧无兜底 |
+| `1eec58b` | **ops 启动链 + 端口归属 + CSRF**：① `_port_owned_by_other()`（**不带 SO_REUSEADDR 抢绑 → 失败再 connect 复核**，避开 TIME_WAIT 误判）放进 `prism_web/__main__` 最前，**只在 `WERKZEUG_RUN_MAIN` 为空时执行**（werkzeug 3.1.8 的父进程持 socket、子进程继承 fd，豁免必需）；② `watchdog` 单实例锁（端口 5123；**socket 无引用会被 CPython 立刻析构 ⇒ 锁静默失效**，需模块级引用）；③ `--once` 拉起失败返回非零；④ **`debug` 默认值翻转为 fail-closed**（仅 `APP_DEBUG=1` 才开）；⑤ **CSRF 修复**：本机档写端点按 `Sec-Fetch-Site` 否决 `cross-site`/`same-site` 跨端口/`file://`（残留缺口：真 fail-closed 需本机写请求带自定义头，**要改 `app.js`**，未做）；⑥ `/api/strategies/create` 同秒并发加锁；⑦ 4 个端点裸 500 收敛为 JSON、响应文案去 `%r`；⑧ 摘除已死的 `/api/stock/<code>/manual` 路由（`datasource/manual_store.py` 与 `prism/data.py` 的注入链**保留**）。**额外发现（测试侧安全）**：`test_app.py::test_screen_default_follows_pointer` 旧版**直接改真实的 `prism/strategies/.active.json`**，而 `paper_daemon` 每轮**热读**该指针 ⇒ 测试窗口内守护真可能拿到 `first_board_v03`；已隔离到 `tmp_path` 并用写审计证明对真实路径零写入 |
+| `87eb522` | `ops/prism_launcher.ps1` 补 `APP_DEBUG=0`（三个入口里唯一漏设的；实测用修好的启动器重启后 `/console` 200→**404**、5000 单监听、reloader 双进程消失） |
+
 ## 项目现状（截至 2026-09-18）
 
 **prism**：A股量化系统。选股引擎（36 因子 / 3 策略 / JSON 策略文件）+ 回测 + Flask 网页 GUI（5000 端口）+ 模拟盘守护。Windows + Python 3.12 + QMT miniQMT（xtquant：`C:\Users\28037\AppData\Local\Programs\Python\Python312\Lib\site-packages`）+ **通达信 pytdx 1.72（同目录，09-05 装）**。
